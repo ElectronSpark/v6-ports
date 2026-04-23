@@ -60,12 +60,85 @@ add_custom_command(
     COMMENT "Staging wlcomp + desktop into ${XV6_SYSROOT}"
     VERBATIM)
 
+# ── wlcomp rebuild from source ──────────────────────────────────────
+#
+# The prebuilt wlcomp staged above contains a sign-extension bug in its
+# absolute-mouse-coord scaling:
+#
+#     g_cursor_x = (int16_t)((uint32_t)ev.dx * g_fb_w / 65536);
+#
+# `ev.dx` is `int16_t`, so values >32767 sign-extend to 0xFFFFnnnn under
+# the (uint32_t) cast and the cursor snaps to (0,0) once the host pointer
+# crosses screen-center. Fix is a zero-extending (uint16_t) cast first.
+#
+# Rather than carry a patched binary, we re-compile wlcomp from the
+# upstream source tree against the prebuilt headers/libs already shipped
+# in WAYLAND_REF_SYSROOT, then overwrite the staged binary.
+
+set(WAYLAND_SRC_DIR
+    "/home/es/xv6/xv6-tmp/user/wlcomp"
+    CACHE PATH "wlcomp/desktop source directory")
+
+if(EXISTS "${WAYLAND_SRC_DIR}/wlcomp.c" AND DEFINED CMAKE_C_COMPILER)
+    set(_wl_build  ${CMAKE_CURRENT_BINARY_DIR}/wlcomp-build)
+    set(_wl_src    ${_wl_build}/wlcomp.c)
+    set(_wl_font   ${_wl_build}/font8x16.h)
+    set(_wl_bin    ${_wl_build}/wlcomp)
+    file(MAKE_DIRECTORY ${_wl_build})
+
+    # Patch step: copy wlcomp.c into the build dir with the cast fixed.
+    add_custom_command(
+        OUTPUT  ${_wl_src} ${_wl_font}
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    ${WAYLAND_SRC_DIR}/font8x16.h ${_wl_font}
+        COMMAND sed -e "s|(uint32_t)ev\\.dx|(uint32_t)(uint16_t)ev.dx|"
+                    -e "s|(uint32_t)ev\\.dy|(uint32_t)(uint16_t)ev.dy|"
+                    ${WAYLAND_SRC_DIR}/wlcomp.c > ${_wl_src}
+        DEPENDS ${WAYLAND_SRC_DIR}/wlcomp.c ${WAYLAND_SRC_DIR}/font8x16.h
+        COMMENT "Patching wlcomp.c (zero-extend absolute mouse coords)"
+        VERBATIM)
+
+    # Compile against headers + libs already shipped in the reference sysroot.
+    add_custom_command(
+        OUTPUT  ${_wl_bin}
+        COMMAND ${CMAKE_C_COMPILER} -O2 -g -Wall -Wno-unused-result
+                    -isystem ${WAYLAND_REF_SYSROOT}/include
+                    -I ${WAYLAND_REF_SYSROOT}/include/wayland
+                    -L ${WAYLAND_REF_SYSROOT}/lib
+                    -L ${WAYLAND_REF_SYSROOT}/lib64
+                    -Wl,-rpath-link,${WAYLAND_REF_SYSROOT}/lib
+                    -o ${_wl_bin} ${_wl_src}
+                    -lwayland-server -lffi -lpthread -lrt -lm
+        DEPENDS ${_wl_src} ${_wl_font}
+        COMMENT "Compiling patched wlcomp from source"
+        VERBATIM)
+
+    # Install: overwrite the staged wlcomp with the freshly built one.
+    set(_wl_installed ${XV6_SYSROOT}/bin/wlcomp.rebuilt.stamp)
+    add_custom_command(
+        OUTPUT  ${_wl_installed}
+        COMMAND ${CMAKE_COMMAND} -E copy ${_wl_bin} ${XV6_SYSROOT}/bin/wlcomp
+        COMMAND ${CMAKE_COMMAND} -E touch ${_wl_installed}
+        DEPENDS ${_wl_bin} ${_sentinel}
+        COMMENT "Installing rebuilt wlcomp into ${XV6_SYSROOT}/bin"
+        VERBATIM)
+
+    set(_wl_extra_dep ${_wl_installed})
+else()
+    message(WARNING
+        "ports/wayland: WAYLAND_SRC_DIR=${WAYLAND_SRC_DIR}/wlcomp.c not found "
+        "or no CMAKE_C_COMPILER; skipping wlcomp rebuild. Cursor will snap to "
+        "(0,0) when the host pointer crosses screen-center.")
+    set(_wl_extra_dep)
+endif()
+
 add_custom_target(port-wayland ALL
-    DEPENDS ${_sentinel} ${XV6_SYSROOT}/bin/desktop ${_stamp})
+    DEPENDS ${_sentinel} ${XV6_SYSROOT}/bin/desktop ${_stamp} ${_wl_extra_dep})
 
 add_custom_target(port-wayland-clean
     COMMAND ${CMAKE_COMMAND} -E remove -f
                 ${_sentinel}
                 ${XV6_SYSROOT}/bin/desktop
                 ${_stamp}
+                ${_wl_extra_dep}
     COMMENT "Removing staged wayland artefacts from ${XV6_SYSROOT}")

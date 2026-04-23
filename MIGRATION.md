@@ -9,14 +9,14 @@ and documents the per-port recipes still to be written.
 | Port      | Status                          | Recipe location                                |
 | --------- | ------------------------------- | ---------------------------------------------- |
 | zlib      | from-source (cmake)             | `ports/zlib/CMakeLists.txt`                    |
+| bzip2     | from-source (cmake)             | `ports/bzip2/CMakeLists.txt`                   |
+| xz        | from-source (cmake)             | `ports/xz/CMakeLists.txt`                      |
+| libffi    | from-source (autoconf)          | `ports/libffi/CMakeLists.txt`                  |
+| sqlite    | submodule + STUB CMakeLists     | `ports/sqlite/CMakeLists.txt`                  |
+| ncurses   | submodule + STUB CMakeLists     | `ports/ncurses/CMakeLists.txt`                 |
+| readline  | submodule + STUB CMakeLists     | `ports/readline/CMakeLists.txt`                |
+| openssl   | submodule + STUB CMakeLists     | `ports/openssl/CMakeLists.txt`                 |
 | cpython   | **stage from prebuilt sysroot** | `ports/cpython/CMakeLists.txt` (wraps stage-cpython.sh) |
-| sqlite    | not yet ported                  | xv6-tmp/user/CMakeLists.txt:1094               |
-| bzip2     | not yet ported                  | xv6-tmp/user/CMakeLists.txt:1330               |
-| xz        | not yet ported                  | xv6-tmp/user/CMakeLists.txt:1380               |
-| libffi    | not yet ported                  | xv6-tmp/user/CMakeLists.txt:1422               |
-| ncurses   | not yet ported                  | xv6-tmp/user/CMakeLists.txt:357                |
-| readline  | not yet ported                  | xv6-tmp/user/CMakeLists.txt:478                |
-| openssl   | not yet ported                  | xv6-tmp/user/CMakeLists.txt:720                |
 
 The `cpython` port currently wraps `scripts/stage-cpython.sh`, which copies a
 known-good prebuilt CPython 3.12 + Flask stack from a reference sysroot

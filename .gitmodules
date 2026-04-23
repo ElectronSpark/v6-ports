@@ -1,0 +1,22 @@
+[submodule "bzip2/src"]
+	path = bzip2/src
+	url = https://gitlab.com/bzip2/bzip2.git
+[submodule "xz/src"]
+	path = xz/src
+	url = https://github.com/tukaani-project/xz.git
+[submodule "libffi/src"]
+	path = libffi/src
+	url = https://github.com/ElectronSpark/v6-libffi.git
+[submodule "sqlite/src"]
+	path = sqlite/src
+	url = https://github.com/ElectronSpark/v6-sqlite.git
+[submodule "ncurses/src"]
+	path = ncurses/src
+	url = https://github.com/mirror/ncurses.git
+[submodule "readline/src"]
+	path = readline/src
+	url = https://git.savannah.gnu.org/git/readline.git
+[submodule "openssl/src"]
+	path = openssl/src
+	url = https://github.com/openssl/openssl.git
+	branch = openssl-3.0
