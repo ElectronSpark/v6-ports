@@ -12,10 +12,10 @@ and documents the per-port recipes still to be written.
 | bzip2     | from-source (cmake)             | `ports/bzip2/CMakeLists.txt`                   |
 | xz        | from-source (cmake)             | `ports/xz/CMakeLists.txt`                      |
 | libffi    | from-source (autoconf)          | `ports/libffi/CMakeLists.txt`                  |
-| sqlite    | submodule + STUB CMakeLists     | `ports/sqlite/CMakeLists.txt`                  |
-| ncurses   | submodule + STUB CMakeLists     | `ports/ncurses/CMakeLists.txt`                 |
-| readline  | submodule + STUB CMakeLists     | `ports/readline/CMakeLists.txt`                |
-| openssl   | submodule + STUB CMakeLists     | `ports/openssl/CMakeLists.txt`                 |
+| sqlite    | from-source (autosetup)         | `ports/sqlite/CMakeLists.txt`                  |
+| ncurses   | from-source (autoconf)          | `ports/ncurses/CMakeLists.txt`                 |
+| readline  | from-source (autoconf, deps: ncurses) | `ports/readline/CMakeLists.txt`         |
+| openssl   | from-source (perl Configure)    | `ports/openssl/CMakeLists.txt`                 |
 | cpython   | **stage from prebuilt sysroot** | `ports/cpython/CMakeLists.txt` (wraps stage-cpython.sh) |
 
 The `cpython` port currently wraps `scripts/stage-cpython.sh`, which copies a
