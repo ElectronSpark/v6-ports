@@ -20,3 +20,7 @@
 	path = openssl/src
 	url = https://github.com/openssl/openssl.git
 	branch = openssl-3.0
+[submodule "cpython/src"]
+	path = cpython/src
+	url = https://github.com/ElectronSpark/v6-cpython.git
+	branch = v6-3.12

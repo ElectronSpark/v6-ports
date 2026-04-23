@@ -16,14 +16,19 @@ and documents the per-port recipes still to be written.
 | ncurses   | from-source (autoconf)          | `ports/ncurses/CMakeLists.txt`                 |
 | readline  | from-source (autoconf, deps: ncurses) | `ports/readline/CMakeLists.txt`         |
 | openssl   | from-source (perl Configure)    | `ports/openssl/CMakeLists.txt`                 |
-| cpython   | **stage from prebuilt sysroot** | `ports/cpython/CMakeLists.txt` (wraps stage-cpython.sh) |
+| cpython   | from-source (autoconf, deps: all above) | `ports/cpython/CMakeLists.txt`         |
 
-The `cpython` port currently wraps `scripts/stage-cpython.sh`, which copies a
-known-good prebuilt CPython 3.12 + Flask stack from a reference sysroot
-(default: `/home/es/xv6/xv6-tmp/build-x86/sysroot`) into `${XV6_SYSROOT}`.
-This is enough to make `cmake --build build --target world` produce a
-bootable Python-capable `fs.img` with no manual steps, but it depends on
-the reference sysroot being present.
+The `cpython` port now cross-compiles CPython 3.12 from `ports/cpython/src`
+(submodule of `ElectronSpark/v6-cpython`, branch `v6-3.12`) against the
+from-source ports installed in `${XV6_SYSROOT}` (openssl, sqlite, ncurses,
+readline, libffi, zlib, bzip2, xz). It produces `bin/python3.12`,
+`lib/libpython3.12.so.1.0`, `lib/python3.12/lib-dynload/*.so` (including
+`_ssl`, `_hashlib`, `_ctypes`, `_sqlite3`, `_curses`, `_bz2`, `_lzma`,
+`zlib`, `readline`, `select`), and the pure-Python stdlib under
+`lib/python3.12/`.
+
+`scripts/stage-cpython.sh` and `CPYTHON_REF_SYSROOT` are no longer used by
+this port and can be removed once nothing else references them.
 
 ## Replacing the stage step with from-source ports
 

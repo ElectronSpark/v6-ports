@@ -1,121 +1,258 @@
-# xv6-os cpython port — pragmatic stage-from-prebuilt recipe.
+# xv6-os cpython port — from-source CPython 3.12 cross build.
 #
-# This port currently does NOT compile CPython from source. Instead it
-# wraps scripts/stage-cpython.sh which copies a known-good ABI-compatible
-# CPython 3.12 + Flask + SQLAlchemy + SQLite stack from a reference
-# sysroot (REF) into ${XV6_SYSROOT}.
+# Builds CPython 3.12 (from `src/` submodule, branch v6-3.12) against the
+# from-source ports already installed in ${XV6_SYSROOT}: openssl, sqlite,
+# ncurses, readline, libffi, zlib, bzip2, xz. The cross toolchain
+# (x86_64-xv6-linux-musl-gcc) provides musl libc + sysroot.
 #
-# Why a stage-only port: building cpython end-to-end needs ~7 dep ports
-# (openssl, sqlite, libffi, ncurses, readline, bzip2, xz) each with
-# 50–300 lines of cross-compile flags lifted from xv6-tmp. That work is
-# the "real port" follow-up; this port exists so the umbrella has a
-# single, deterministic dependency edge from `world` -> `python`.
+# Outputs into ${XV6_SYSROOT}:
+#   bin/python3.12, bin/python3 (symlink), bin/python (symlink)
+#   lib/libpython3.12.so.1.0 + libpython3.so symlink
+#   lib/python3.12/                — pure-python stdlib
+#   lib/python3.12/lib-dynload/    — extension modules (.so)
+#   include/python3.12/            — public headers (Python.h)
 #
-# Inputs (cache vars, with defaults):
-#   CPYTHON_REF_SYSROOT  Reference sysroot to copy artefacts FROM.
-#                        Default: /home/es/xv6/xv6-tmp/build-x86/sysroot
-#   CPYTHON_LIB          Pure-python stdlib source dir (cpython/Lib).
-#                        Default: /home/es/xv6/xv6-tmp/user/v6-cpython/Lib
-#   PHASE2_LIB           Our toolchain's musl libc.so dir (auto-set via
-#                        XV6_TOOLCHAIN_BIN by the umbrella).
-#
-# Outputs (in ${XV6_SYSROOT}):
-#   bin/python3.12, bin/python (symlink)
-#   lib/libpython3.12.so.1.0, lib/libpython3.so
-#   lib/libgcc_s.so.1, lib/libreadline.so.8.2, lib/libncurses.so.6.4,
-#   lib/libstdc++.so.6.0.33, lib/libffi.so.7.1.0
-#   lib/python3.12/ (stdlib + lib-dynload + site-packages)
-#   lib/libc.so, lib/ld-musl-x86_64.so.1 (linker + libc)
-#
-# Standalone usage (without umbrella):
-#   cmake -S . -B build -DXV6_SYSROOT=/path/to/sysroot \
-#       -DPHASE2_LIB=/path/to/toolchain/x86_64-xv6-linux-musl/lib
+# Standalone usage:
+#   cmake -S . -B build \
+#       -DCMAKE_C_COMPILER=/path/to/x86_64-xv6-linux-musl-gcc \
+#       -DXV6_SYSROOT=/path/to/sysroot \
+#       -DPHASE2_LIB=/path/to/toolchain/x86_64-xv6-linux-musl/lib \
+#       -DXV6_REPO_ROOT=/path/to/xv6-os
 #   cmake --build build
 
 cmake_minimum_required(VERSION 3.16)
 project(xv6-port-cpython LANGUAGES NONE)
 
+# ---------------------------------------------------------------------
+# Required inputs
+# ---------------------------------------------------------------------
 if(NOT DEFINED XV6_SYSROOT OR XV6_SYSROOT STREQUAL "")
-    message(FATAL_ERROR
-        "ports/cpython: -DXV6_SYSROOT=<path> required")
+    message(FATAL_ERROR "ports/cpython: -DXV6_SYSROOT=<path> required")
+endif()
+if(NOT DEFINED CMAKE_C_COMPILER OR CMAKE_C_COMPILER STREQUAL "")
+    message(FATAL_ERROR "ports/cpython: -DCMAKE_C_COMPILER=<cross-gcc> required")
 endif()
 
-# REF: prebuilt sysroot we copy from. Override via -DCPYTHON_REF_SYSROOT=...
-set(CPYTHON_REF_SYSROOT
-    "/home/es/xv6/xv6-tmp/build-x86/sysroot"
-    CACHE PATH "Reference sysroot containing prebuilt cpython 3.12 + Flask")
+# Repo root — for finding toolchain/musl-xv6/compat (kqueue, etc).
+# Default: ports/cpython/../.. = repo root.
+get_filename_component(_default_repo_root "${CMAKE_CURRENT_SOURCE_DIR}/../.." ABSOLUTE)
+set(XV6_REPO_ROOT "${_default_repo_root}"
+    CACHE PATH "xv6-os repo root (for musl-xv6/compat sources)")
 
-set(CPYTHON_LIB
-    "/home/es/xv6/xv6-tmp/user/v6-cpython/Lib"
-    CACHE PATH "Path to cpython 3.12 source tree's Lib/ directory (pure-python stdlib)")
-
-# PHASE2_LIB: directory containing musl's libc.so for our toolchain.
-# The umbrella sets this via -DPHASE2_LIB=...; standalone users must too.
-if(NOT DEFINED PHASE2_LIB OR PHASE2_LIB STREQUAL "")
+set(_compat_dir "${XV6_REPO_ROOT}/toolchain/musl-xv6/compat")
+if(NOT EXISTS "${_compat_dir}/kqueue.c")
     message(FATAL_ERROR
-        "ports/cpython: -DPHASE2_LIB=<path-to-toolchain-x86_64-xv6-linux-musl-lib> required")
+        "ports/cpython: musl-xv6/compat sources missing at ${_compat_dir}")
 endif()
+
+# Source dir (submodule).
+set(_src "${CMAKE_CURRENT_SOURCE_DIR}/src")
+if(NOT EXISTS "${_src}/configure")
+    message(FATAL_ERROR
+        "ports/cpython: src/configure missing — run\n"
+        "  git submodule update --init --recursive ports/cpython/src")
+endif()
+
+# Cross toolchain + naming
+get_filename_component(_cc_realpath "${CMAKE_C_COMPILER}" REALPATH)
+get_filename_component(_cc_dir       "${_cc_realpath}"     DIRECTORY)
+get_filename_component(_cc_name      "${_cc_realpath}"     NAME)
+string(REGEX REPLACE "gcc$" ""  _xv6_prefix "${_cc_name}")  # e.g. x86_64-xv6-linux-musl-
+set(_cross_cc      "${_cc_dir}/${_xv6_prefix}gcc")
+set(_cross_ar      "${_cc_dir}/${_xv6_prefix}ar")
+set(_cross_ranlib  "${_cc_dir}/${_xv6_prefix}ranlib")
+set(_cross_readelf "${_cc_dir}/${_xv6_prefix}readelf")
+
+# Host triple: derived from prefix (strip trailing dash).
+string(REGEX REPLACE "-$" "" _xv6_triple "${_xv6_prefix}")
+# CPython config.sub doesn't know "*-xv6-linux-musl"; use a triple it accepts.
+if(_xv6_triple MATCHES "^x86_64")
+    set(_cpy_host    "x86_64-unknown-linux-musl")
+    set(_cpy_dynld   "/lib/ld-musl-x86_64.so.1")
+elseif(_xv6_triple MATCHES "^riscv64")
+    set(_cpy_host    "riscv64-unknown-linux-musl")
+    set(_cpy_dynld   "/lib/ld-musl-riscv64.so.1")
+else()
+    message(FATAL_ERROR "ports/cpython: unsupported triple ${_xv6_triple}")
+endif()
+
+include(ProcessorCount)
+if(NOT DEFINED XV6_PARALLEL_JOBS OR XV6_PARALLEL_JOBS EQUAL 0)
+    ProcessorCount(XV6_PARALLEL_JOBS)
+    if(XV6_PARALLEL_JOBS EQUAL 0)
+        set(XV6_PARALLEL_JOBS 4)
+    endif()
+endif()
+
+find_package(Python3 3.12 REQUIRED COMPONENTS Interpreter)
+
+# Output build dir (out-of-tree).
+set(_build "${CMAKE_CURRENT_BINARY_DIR}/build")
+file(MAKE_DIRECTORY "${_build}")
+file(MAKE_DIRECTORY "${_build}/Modules")
 
 # ---------------------------------------------------------------------
-# Sanity checks at configure time
+# kqueue_compat.o — provides kqueue/kevent for musl on xv6.
 # ---------------------------------------------------------------------
-if(NOT EXISTS "${CPYTHON_REF_SYSROOT}/lib/python3.12")
-    message(FATAL_ERROR
-        "ports/cpython: reference sysroot has no lib/python3.12 at "
-        "${CPYTHON_REF_SYSROOT}. Set CPYTHON_REF_SYSROOT or build CPython first.")
-endif()
-if(NOT EXISTS "${PHASE2_LIB}/libc.so")
-    message(FATAL_ERROR
-        "ports/cpython: musl libc.so not found at ${PHASE2_LIB}")
-endif()
-if(NOT EXISTS "${CPYTHON_LIB}/traceback.py")
-    message(WARNING
-        "ports/cpython: stdlib source dir ${CPYTHON_LIB} has no traceback.py — "
-        "Python imports of stdlib modules will fail at runtime.")
-endif()
-find_program(STAGE_RSYNC rsync REQUIRED)
-
-# ---------------------------------------------------------------------
-# Driver: invoke scripts/stage-cpython.sh through CMake so the work is
-# part of the build graph (re-runs whenever the script or env changes).
-# We could inline the rsync/cp commands here, but the script already
-# encapsulates the recipe and is self-documenting.
-# ---------------------------------------------------------------------
-set(_stamp "${CMAKE_CURRENT_BINARY_DIR}/staged.stamp")
-set(_script "${CMAKE_CURRENT_SOURCE_DIR}/../../scripts/stage-cpython.sh")
-get_filename_component(_script "${_script}" ABSOLUTE)
-if(NOT EXISTS "${_script}")
-    message(FATAL_ERROR "ports/cpython: stage-cpython.sh missing at ${_script}")
-endif()
-
-# Sentinel file the staging produces; used as the OUTPUT for incremental.
-set(_sentinel "${XV6_SYSROOT}/bin/python3.12")
-
+set(_kqueue_obj "${CMAKE_CURRENT_BINARY_DIR}/kqueue_compat.o")
 add_custom_command(
-    OUTPUT  ${_sentinel} ${_stamp}
-    COMMAND ${CMAKE_COMMAND} -E env
-                CPYTHON_LIB=${CPYTHON_LIB}
-            bash ${_script} ${CPYTHON_REF_SYSROOT} ${XV6_SYSROOT} ${PHASE2_LIB}
-    COMMAND ${CMAKE_COMMAND} -E touch ${_stamp}
-    DEPENDS ${_script}
-    COMMENT "Staging CPython 3.12 + Flask stack into ${XV6_SYSROOT}"
+    OUTPUT  ${_kqueue_obj}
+    COMMAND ${_cross_cc}
+            -O2 -fPIC
+            -isystem ${XV6_SYSROOT}/include
+            -isystem ${_compat_dir}
+            -c -o ${_kqueue_obj}
+            ${_compat_dir}/kqueue.c
+    DEPENDS ${_compat_dir}/kqueue.c
+    COMMENT "[cpython] kqueue_compat.o"
     VERBATIM)
 
-add_custom_target(port-cpython ALL DEPENDS ${_sentinel} ${_stamp})
+# ---------------------------------------------------------------------
+# Setup.local — link-time hints for cross-build extension modules.
+# We set explicit -l flags for modules whose autoprobe doesn't reliably
+# detect cross-compiled libs.
+# ---------------------------------------------------------------------
+set(_setup_local "${_build}/Modules/Setup.local")
+file(WRITE  "${_setup_local}" "*shared*\n")
+file(APPEND "${_setup_local}" "_curses _cursesmodule.c -I${XV6_SYSROOT}/include -L${XV6_SYSROOT}/lib -lncurses\n")
+file(APPEND "${_setup_local}" "_ssl _ssl.c -I${XV6_SYSROOT}/include -L${XV6_SYSROOT}/lib -lssl -lcrypto\n")
+file(APPEND "${_setup_local}" "_hashlib _hashopenssl.c -I${XV6_SYSROOT}/include -L${XV6_SYSROOT}/lib -lcrypto\n")
+
+# ---------------------------------------------------------------------
+# CFLAGS / LDFLAGS / LIBS for cross configure.
+# We rely on the cross toolchain's built-in musl sysroot for libc; only
+# add explicit -I/-L for ports installed under XV6_SYSROOT.
+# ---------------------------------------------------------------------
+set(_cppflags
+    "-I${XV6_SYSROOT}/include"
+    "-isystem ${_compat_dir}"
+    "-D_POSIX_C_SOURCE=200809L")
+string(REPLACE ";" " " _cppflags "${_cppflags}")
+
+set(_cflags "${_cppflags} -O2 -fPIC")
+
+set(_ldflags
+    "-L${XV6_SYSROOT}/lib"
+    "-Wl,-rpath,/lib"
+    "-Wl,--dynamic-linker=${_cpy_dynld}")
+string(REPLACE ";" " " _ldflags "${_ldflags}")
+
+# Modules linked into libpython require these for the curses+readline
+# combo (readline.a depends on ncurses symbols).
+set(_libs "-lreadline -lncurses -lpthread -lm")
+
+# ---------------------------------------------------------------------
+# Configure CPython.
+# ---------------------------------------------------------------------
+set(_makefile "${_build}/Makefile")
+add_custom_command(
+    OUTPUT  ${_makefile}
+    WORKING_DIRECTORY ${_build}
+    COMMAND ${CMAKE_COMMAND} -E env
+                CC=${_cross_cc}
+                AR=${_cross_ar}
+                RANLIB=${_cross_ranlib}
+                READELF=${_cross_readelf}
+                PKG_CONFIG=false
+                "CPPFLAGS=${_cppflags}"
+                "CFLAGS=${_cflags}"
+                "LDFLAGS=${_ldflags}"
+                "LIBS=${_libs}"
+                "LIBFFI_CFLAGS=-I${XV6_SYSROOT}/include"
+                "LIBFFI_LIBS=-L${XV6_SYSROOT}/lib -lffi"
+            ${_src}/configure
+                --host=${_cpy_host}
+                --build=x86_64-pc-linux-gnu
+                --prefix=/
+                --enable-shared
+                --without-static-libpython
+                --without-ensurepip
+                --disable-test-modules
+                --disable-ipv6
+                --with-build-python=${Python3_EXECUTABLE}
+                --with-system-ffi
+                --with-openssl=${XV6_SYSROOT}
+                ac_cv_file__dev_ptmx=no
+                ac_cv_file__dev_ptc=no
+                ac_cv_header_readline_readline_h=yes
+                ac_cv_lib_readline_readline=yes
+                ac_cv_readline_append_history=yes
+                ac_cv_readline_rl_completion_display_matches_hook=yes
+                ac_cv_readline_rl_completion_matches=yes
+                ac_cv_readline_rl_pre_input_hook=yes
+                ac_cv_readline_rl_resize_terminal=yes
+                ac_cv_header_sys_event_h=yes
+                ac_cv_func_kqueue=yes
+                ac_cv_func_select=yes
+                ac_cv_func_pselect=yes
+                ac_cv_search_dlopen=none\ required
+    DEPENDS ${_src}/configure ${_setup_local}
+    COMMENT "[cpython] configure (cross, host=${_cpy_host})"
+    VERBATIM)
+add_custom_target(cpython-configure DEPENDS ${_makefile})
+
+# ---------------------------------------------------------------------
+# Build CPython (the python binary + sharedmods, with kqueue_compat.o
+# linked into SYSLIBS so the kqueue extension module resolves).
+# ---------------------------------------------------------------------
+set(_python_bin   "${_build}/python")
+set(_libpython_so "${_build}/libpython3.12.so.1.0")
+set(_build_stamp  "${CMAKE_CURRENT_BINARY_DIR}/.cpython_built")
+
+set(_syslibs "${_kqueue_obj} -lreadline -lncurses -lm -lpthread")
+
+add_custom_command(
+    OUTPUT  ${_python_bin} ${_libpython_so} ${_build_stamp}
+    WORKING_DIRECTORY ${_build}
+    COMMAND make -j${XV6_PARALLEL_JOBS} python "SYSLIBS=${_syslibs}"
+    COMMAND make -j${XV6_PARALLEL_JOBS} sharedmods "SYSLIBS=${_syslibs}"
+    COMMAND ${CMAKE_COMMAND} -E touch ${_build_stamp}
+    DEPENDS ${_makefile} ${_kqueue_obj}
+    COMMENT "[cpython] build (j=${XV6_PARALLEL_JOBS})"
+    VERBATIM)
+
+# ---------------------------------------------------------------------
+# Install: copy libpython, ext modules, stdlib, headers, binary into
+# ${XV6_SYSROOT}.
+# ---------------------------------------------------------------------
+set(_install_stamp "${CMAKE_CURRENT_BINARY_DIR}/.cpython_installed")
+add_custom_command(
+    OUTPUT  ${_install_stamp}
+    WORKING_DIRECTORY ${_build}
+    # libpython shared lib(s)
+    COMMAND ${CMAKE_COMMAND} -E make_directory ${XV6_SYSROOT}/lib
+    COMMAND bash -c "cp -P libpython3.12.so* ${XV6_SYSROOT}/lib/ 2>/dev/null || true"
+    COMMAND bash -c "cp -P libpython3.so* ${XV6_SYSROOT}/lib/ 2>/dev/null || true"
+    # python binary
+    COMMAND ${CMAKE_COMMAND} -E make_directory ${XV6_SYSROOT}/bin
+    COMMAND ${CMAKE_COMMAND} -E copy ${_python_bin} ${XV6_SYSROOT}/bin/python3.12
+    COMMAND ${CMAKE_COMMAND} -E create_symlink python3.12 ${XV6_SYSROOT}/bin/python3
+    COMMAND ${CMAKE_COMMAND} -E create_symlink python3   ${XV6_SYSROOT}/bin/python
+    # extension modules
+    COMMAND ${CMAKE_COMMAND} -E make_directory ${XV6_SYSROOT}/lib/python3.12/lib-dynload
+    COMMAND bash -c "cp -P ${_build}/Modules/*.cpython-*.so ${XV6_SYSROOT}/lib/python3.12/lib-dynload/ 2>/dev/null || true"
+    # pure-python stdlib
+    COMMAND ${CMAKE_COMMAND} -E copy_directory ${_src}/Lib ${XV6_SYSROOT}/lib/python3.12
+    # public headers
+    COMMAND ${CMAKE_COMMAND} -E make_directory ${XV6_SYSROOT}/include/python3.12
+    COMMAND bash -c "cp -RP ${_src}/Include/. ${XV6_SYSROOT}/include/python3.12/"
+    COMMAND ${CMAKE_COMMAND} -E copy ${_build}/pyconfig.h ${XV6_SYSROOT}/include/python3.12/pyconfig.h
+    COMMAND ${CMAKE_COMMAND} -E touch ${_install_stamp}
+    DEPENDS ${_build_stamp}
+    COMMENT "[cpython] install -> ${XV6_SYSROOT}"
+    VERBATIM)
+
+add_custom_target(port-cpython ALL DEPENDS ${_install_stamp})
 
 add_custom_target(port-cpython-clean
-    COMMAND ${CMAKE_COMMAND} -E remove -f
-                ${_sentinel}
-                ${_stamp}
+    COMMAND ${CMAKE_COMMAND} -E rm -rf ${_build}
+    COMMAND ${CMAKE_COMMAND} -E rm -f
+                ${_build_stamp}
+                ${_install_stamp}
+                ${_kqueue_obj}
+                ${XV6_SYSROOT}/bin/python3.12
+                ${XV6_SYSROOT}/bin/python3
                 ${XV6_SYSROOT}/bin/python
-                ${XV6_SYSROOT}/lib/libpython3.12.so.1.0
-                ${XV6_SYSROOT}/lib/libpython3.so
-                ${XV6_SYSROOT}/lib/libffi.so.7.1.0
-                ${XV6_SYSROOT}/lib/libreadline.so.8.2
-                ${XV6_SYSROOT}/lib/libncurses.so.6.4
-                ${XV6_SYSROOT}/lib/libstdc++.so.6.0.33
-                ${XV6_SYSROOT}/lib/libgcc_s.so.1
-                ${XV6_SYSROOT}/lib/libc.so
-                ${XV6_SYSROOT}/lib/ld-musl-x86_64.so.1
-    COMMAND ${CMAKE_COMMAND} -E rm -rf ${XV6_SYSROOT}/lib/python3.12
-    COMMENT "Removing staged cpython artefacts from ${XV6_SYSROOT}")
+    COMMAND bash -c "rm -f ${XV6_SYSROOT}/lib/libpython3.12.so* ${XV6_SYSROOT}/lib/libpython3.so*"
+    COMMAND ${CMAKE_COMMAND} -E rm -rf ${XV6_SYSROOT}/lib/python3.12 ${XV6_SYSROOT}/include/python3.12
+    COMMENT "[cpython] clean")
