@@ -1,0 +1,21 @@
+cmake_minimum_required(VERSION 3.16)
+project(xv6-port-wayland-libs LANGUAGES NONE)
+include(${CMAKE_CURRENT_LIST_DIR}/../cmake/AddPort.cmake)
+
+# Cross build of the wayland client + server libraries (no scanner —
+# that is built by ports/wayland-host as a host tool).
+xv6_port(
+    NAME            wayland-libs
+    SOURCE_DIR      ${CMAKE_CURRENT_SOURCE_DIR}/../wayland-src/src
+    BUILD_SYSTEM    meson
+    DEPENDS         libffi libexpat wayland-host
+    OUTPUT_FILES    lib/libwayland-client.a
+                    lib/libwayland-server.a
+                    include/wayland-client.h
+    CMAKE_ARGS
+        -Dlibraries=true
+        -Dscanner=false
+        -Dtests=false
+        -Ddocumentation=false
+        -Ddtd_validation=false
+)

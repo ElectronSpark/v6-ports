@@ -75,3 +75,25 @@
 [submodule "pango/src"]
 	path = pango/src
 	url = https://gitlab.gnome.org/GNOME/pango.git
+[submodule "gtk3/src"]
+	path = gtk3/src
+	url = https://gitlab.gnome.org/GNOME/gtk.git
+	branch = gtk-3-24
+[submodule "wayland-src/src"]
+	path = wayland-src/src
+	url = https://gitlab.freedesktop.org/wayland/wayland.git
+[submodule "wayland-protocols/src"]
+	path = wayland-protocols/src
+	url = https://gitlab.freedesktop.org/wayland/wayland-protocols.git
+[submodule "libxkbcommon/src"]
+	path = libxkbcommon/src
+	url = https://github.com/xkbcommon/libxkbcommon.git
+[submodule "libepoxy/src"]
+	path = libepoxy/src
+	url = https://github.com/anholt/libepoxy.git
+[submodule "khronos-headers/egl-registry"]
+	path = khronos-headers/egl-registry
+	url = https://github.com/KhronosGroup/EGL-Registry.git
+[submodule "khronos-headers/opengl-registry"]
+	path = khronos-headers/opengl-registry
+	url = https://github.com/KhronosGroup/OpenGL-Registry.git

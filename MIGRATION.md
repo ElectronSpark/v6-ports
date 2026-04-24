@@ -33,6 +33,14 @@ and documents the per-port recipes still to be written.
 | atk       | from-source (meson, deps: glib) | `ports/atk/CMakeLists.txt`                     |
 | gdk-pixbuf| from-source (meson, deps: glib/libpng/libjpeg) | `ports/gdk-pixbuf/CMakeLists.txt` |
 | pango     | from-source (meson, deps: glib/harfbuzz/fontconfig/cairo/fribidi/freetype) | `ports/pango/CMakeLists.txt` |
+| khronos-headers | header-only (Khronos EGL/GL registry) | `ports/khronos-headers/CMakeLists.txt` |
+| linux-uapi-headers | header-only (host /usr/include/linux) | `ports/linux-uapi-headers/CMakeLists.txt` |
+| libepoxy  | from-source (meson, deps: khronos-headers) | `ports/libepoxy/CMakeLists.txt`     |
+| wayland-host | native (host wayland-scanner)  | `ports/wayland-host/CMakeLists.txt`         |
+| wayland-libs | from-source (meson, deps: libffi/libexpat/wayland-host) | `ports/wayland-libs/CMakeLists.txt` |
+| wayland-protocols | data-only (meson, deps: wayland-libs/wayland-host) | `ports/wayland-protocols/CMakeLists.txt` |
+| libxkbcommon | from-source (meson, deps: wayland-libs) | `ports/libxkbcommon/CMakeLists.txt`     |
+| gtk3      | from-source (meson, deps: glib/gdk-pixbuf/pango/atk/cairo/wayland-libs/wayland-protocols/libxkbcommon/libepoxy/linux-uapi-headers) | `ports/gtk3/CMakeLists.txt` |
 | vim       | from-source (autoconf, deps: ncurses) | `ports/vim/CMakeLists.txt`               |
 | cpython   | from-source (autoconf, deps: all above) | `ports/cpython/CMakeLists.txt`         |
 
@@ -53,7 +61,9 @@ Tier 3 (glib stack, meson):
   ✓ glib  ✓ glib-host  ✓ atk  ✓ gdk-pixbuf  ✓ pango
 
 Tier 4 (toolkit):
-  … gtk3 (3.24 LTS — autoconf)
+  ✓ khronos-headers  ✓ linux-uapi-headers  ✓ libepoxy
+  ✓ wayland-host  ✓ wayland-libs  ✓ wayland-protocols  ✓ libxkbcommon
+  ✓ gtk3 (3.24 — meson, Wayland-only backend)
 
 Tier 5 (NetSurf libs, custom Makefile):
   … nsgenbind (host build tool)

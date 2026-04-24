@@ -188,6 +188,12 @@ function(xv6_port)
 "strip      = '${_strip}'\n"
 "ranlib     = '${CMAKE_RANLIB}'\n"
 "pkg-config = 'pkg-config'\n"
+"glib-compile-resources = '${XV6_SYSROOT}/host-tools/bin/glib-compile-resources'\n"
+"glib-compile-schemas   = '${XV6_SYSROOT}/host-tools/bin/glib-compile-schemas'\n"
+"glib-genmarshal        = '${XV6_SYSROOT}/bin/glib-genmarshal'\n"
+"glib-mkenums           = '${XV6_SYSROOT}/bin/glib-mkenums'\n"
+"glib-gettextize        = '${XV6_SYSROOT}/bin/glib-gettextize'\n"
+"wayland-scanner        = '${XV6_SYSROOT}/host-tools/bin/wayland-scanner'\n"
 "\n"
 "[host_machine]\n"
 "system     = 'linux'\n"
@@ -219,7 +225,8 @@ function(xv6_port)
                 "PATH=${XV6_SYSROOT}/host-tools/bin:$ENV{PATH}"
                 "PKG_CONFIG_SYSROOT_DIR=${XV6_SYSROOT}"
                 "PKG_CONFIG_LIBDIR=${XV6_SYSROOT}/lib/pkgconfig:${XV6_SYSROOT}/share/pkgconfig"
-                "PKG_CONFIG_PATH="
+                "PKG_CONFIG_PATH=${XV6_SYSROOT}/host-tools/lib/pkgconfig:${XV6_SYSROOT}/host-tools/lib/x86_64-linux-gnu/pkgconfig:${XV6_SYSROOT}/host-tools/share/pkgconfig"
+                "PKG_CONFIG_PATH_FOR_BUILD=${XV6_SYSROOT}/host-tools/lib/pkgconfig:${XV6_SYSROOT}/host-tools/lib/x86_64-linux-gnu/pkgconfig:${XV6_SYSROOT}/host-tools/share/pkgconfig"
                 meson setup ${_build} ${_src}
                     --cross-file=${_crossfile}
                     --buildtype=release
@@ -234,7 +241,8 @@ function(xv6_port)
                 "PATH=${XV6_SYSROOT}/host-tools/bin:$ENV{PATH}"
                 "PKG_CONFIG_SYSROOT_DIR=${XV6_SYSROOT}"
                 "PKG_CONFIG_LIBDIR=${XV6_SYSROOT}/lib/pkgconfig:${XV6_SYSROOT}/share/pkgconfig"
-                "PKG_CONFIG_PATH="
+                "PKG_CONFIG_PATH=${XV6_SYSROOT}/host-tools/lib/pkgconfig:${XV6_SYSROOT}/host-tools/lib/x86_64-linux-gnu/pkgconfig:${XV6_SYSROOT}/host-tools/share/pkgconfig"
+                "PKG_CONFIG_PATH_FOR_BUILD=${XV6_SYSROOT}/host-tools/lib/pkgconfig:${XV6_SYSROOT}/host-tools/lib/x86_64-linux-gnu/pkgconfig:${XV6_SYSROOT}/host-tools/share/pkgconfig"
                 meson compile -C ${_build} -j ${P_JOBS} ${P_MAKE_ARGS})
         set(_install_cmd
             ${CMAKE_COMMAND} -E env
