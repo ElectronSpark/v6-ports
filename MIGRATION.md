@@ -16,8 +16,47 @@ and documents the per-port recipes still to be written.
 | ncurses   | from-source (autoconf)          | `ports/ncurses/CMakeLists.txt`                 |
 | readline  | from-source (autoconf, deps: ncurses) | `ports/readline/CMakeLists.txt`         |
 | openssl   | from-source (perl Configure)    | `ports/openssl/CMakeLists.txt`                 |
+| libpng    | from-source (cmake, deps: zlib) | `ports/libpng/CMakeLists.txt`                  |
+| libjpeg-turbo | from-source (cmake)         | `ports/libjpeg-turbo/CMakeLists.txt`           |
+| libexpat  | from-source (cmake)             | `ports/libexpat/CMakeLists.txt`                |
+| libxml2   | from-source (cmake, deps: zlib/xz) | `ports/libxml2/CMakeLists.txt`              |
+| freetype  | from-source (cmake, deps: zlib/bzip2/libpng) | `ports/freetype/CMakeLists.txt`  |
+| curl      | from-source (cmake, deps: zlib/openssl) | `ports/curl/CMakeLists.txt`             |
 | vim       | from-source (autoconf, deps: ncurses) | `ports/vim/CMakeLists.txt`               |
 | cpython   | from-source (autoconf, deps: all above) | `ports/cpython/CMakeLists.txt`         |
+
+## NetSurf-GTK3 roadmap (in progress)
+
+Goal: replace the staged `bin/netsurf` with a real from-source GTK3 build.
+Dependency tree (~25 new ports). Status legend: ✓ = built, … = pending.
+
+```
+Tier 1 (foundation, autoconf/cmake — DONE):
+  ✓ zlib  ✓ bzip2  ✓ xz  ✓ libffi  ✓ openssl
+  ✓ libpng  ✓ libjpeg-turbo  ✓ libexpat  ✓ libxml2  ✓ freetype  ✓ curl
+
+Tier 2 (font/graphics, mostly meson):
+  … pcre2  … pixman  … fribidi  … harfbuzz  … fontconfig  … cairo
+
+Tier 3 (glib stack, meson):
+  … glib  … atk  … gdk-pixbuf  … pango
+
+Tier 4 (toolkit):
+  … gtk3 (3.24 LTS — autoconf)
+
+Tier 5 (NetSurf libs, custom Makefile):
+  … nsgenbind (host build tool)
+  … libwapcaplet  … libparserutils  … libhubbub  … libcss
+  … libdom  … libnsgif  … libnsbmp  … libnsutils
+  … libnslog  … libnspsl  … libsvgtiny
+
+Tier 6 (browser):
+  … netsurf (GTK3 frontend)
+```
+
+Tier 2 work blocks on extending `xv6_port()` with a `meson` build mode
+(meson cross-file generation from `CMAKE_C_COMPILER` + `XV6_SYSROOT`).
+
 
 The `cpython` port now cross-compiles CPython 3.12 from `ports/cpython/src`
 (submodule of `ElectronSpark/v6-cpython`, branch `v6-3.12`) against the

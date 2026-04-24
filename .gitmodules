@@ -27,3 +27,21 @@
 [submodule "vim/src"]
 	path = vim/src
 	url = https://github.com/ElectronSpark/vim.git
+[submodule "libpng/src"]
+	path = libpng/src
+	url = https://github.com/pnggroup/libpng.git
+[submodule "libjpeg-turbo/src"]
+	path = libjpeg-turbo/src
+	url = https://github.com/libjpeg-turbo/libjpeg-turbo.git
+[submodule "libexpat/src"]
+	path = libexpat/src
+	url = https://github.com/libexpat/libexpat.git
+[submodule "libxml2/src"]
+	path = libxml2/src
+	url = https://gitlab.gnome.org/GNOME/libxml2.git
+[submodule "freetype/src"]
+	path = freetype/src
+	url = https://gitlab.freedesktop.org/freetype/freetype.git
+[submodule "curl/src"]
+	path = curl/src
+	url = https://github.com/curl/curl.git
