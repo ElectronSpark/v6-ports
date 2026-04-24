@@ -63,3 +63,15 @@
 [submodule "cairo/src"]
 	path = cairo/src
 	url = https://gitlab.freedesktop.org/cairo/cairo.git
+[submodule "glib/src"]
+	path = glib/src
+	url = https://gitlab.gnome.org/GNOME/glib.git
+[submodule "atk/src"]
+	path = atk/src
+	url = https://gitlab.gnome.org/GNOME/atk.git
+[submodule "gdk-pixbuf/src"]
+	path = gdk-pixbuf/src
+	url = https://gitlab.gnome.org/GNOME/gdk-pixbuf.git
+[submodule "pango/src"]
+	path = pango/src
+	url = https://gitlab.gnome.org/GNOME/pango.git

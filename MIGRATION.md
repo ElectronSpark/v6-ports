@@ -28,6 +28,11 @@ and documents the per-port recipes still to be written.
 | harfbuzz  | from-source (meson, deps: freetype) | `ports/harfbuzz/CMakeLists.txt`            |
 | fontconfig| from-source (meson, deps: freetype/libexpat) | `ports/fontconfig/CMakeLists.txt`  |
 | cairo     | from-source (meson, deps: pixman/freetype/fontconfig/libpng/zlib) | `ports/cairo/CMakeLists.txt` |
+| glib      | from-source (meson, deps: pcre2/libffi/zlib) | `ports/glib/CMakeLists.txt`         |
+| glib-host | native (host tools)             | `ports/glib-host/CMakeLists.txt`               |
+| atk       | from-source (meson, deps: glib) | `ports/atk/CMakeLists.txt`                     |
+| gdk-pixbuf| from-source (meson, deps: glib/libpng/libjpeg) | `ports/gdk-pixbuf/CMakeLists.txt` |
+| pango     | from-source (meson, deps: glib/harfbuzz/fontconfig/cairo/fribidi/freetype) | `ports/pango/CMakeLists.txt` |
 | vim       | from-source (autoconf, deps: ncurses) | `ports/vim/CMakeLists.txt`               |
 | cpython   | from-source (autoconf, deps: all above) | `ports/cpython/CMakeLists.txt`         |
 
@@ -45,7 +50,7 @@ Tier 2 (font/graphics, mostly meson):
   ✓ pcre2  ✓ pixman  ✓ fribidi  ✓ harfbuzz  ✓ fontconfig  ✓ cairo
 
 Tier 3 (glib stack, meson):
-  … glib  … atk  … gdk-pixbuf  … pango
+  ✓ glib  ✓ glib-host  ✓ atk  ✓ gdk-pixbuf  ✓ pango
 
 Tier 4 (toolkit):
   … gtk3 (3.24 LTS — autoconf)

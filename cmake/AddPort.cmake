@@ -216,6 +216,7 @@ function(xv6_port)
         set(_meson_setup
             ${CMAKE_COMMAND} -E rm -rf ${_build}
             COMMAND ${CMAKE_COMMAND} -E env
+                "PATH=${XV6_SYSROOT}/host-tools/bin:$ENV{PATH}"
                 "PKG_CONFIG_SYSROOT_DIR=${XV6_SYSROOT}"
                 "PKG_CONFIG_LIBDIR=${XV6_SYSROOT}/lib/pkgconfig:${XV6_SYSROOT}/share/pkgconfig"
                 "PKG_CONFIG_PATH="
@@ -230,12 +231,14 @@ function(xv6_port)
         set(_cmake_configure ${_meson_setup})
         set(_build_cmd
             ${CMAKE_COMMAND} -E env
+                "PATH=${XV6_SYSROOT}/host-tools/bin:$ENV{PATH}"
                 "PKG_CONFIG_SYSROOT_DIR=${XV6_SYSROOT}"
                 "PKG_CONFIG_LIBDIR=${XV6_SYSROOT}/lib/pkgconfig:${XV6_SYSROOT}/share/pkgconfig"
                 "PKG_CONFIG_PATH="
                 meson compile -C ${_build} -j ${P_JOBS} ${P_MAKE_ARGS})
         set(_install_cmd
             ${CMAKE_COMMAND} -E env
+                "PATH=${XV6_SYSROOT}/host-tools/bin:$ENV{PATH}"
                 "DESTDIR=${XV6_SYSROOT}"
                 meson install -C ${_build} --no-rebuild ${P_INSTALL_ARGS})
 
