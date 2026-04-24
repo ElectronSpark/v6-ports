@@ -85,7 +85,8 @@ Tier 5 (NetSurf libs, custom Makefile):
   ✓ libnslog  ✓ libnspsl  ✓ libsvgtiny
 
 Tier 6 (browser):
-  … netsurf (GTK3 frontend)
+  ✓ libpng-host (native libpng for NetSurf's convert_image build tool)
+  ✓ netsurf (GTK3 frontend, dynamically linked, /share/netsurf/ resources)
 ```
 
 Tier 2 done. The `meson` build mode in `xv6_port()` synthesizes a

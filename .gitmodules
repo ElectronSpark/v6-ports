@@ -136,3 +136,6 @@
 [submodule "netsurf-libsvgtiny/src"]
 	path = netsurf-libsvgtiny/src
 	url = git://git.netsurf-browser.org/libsvgtiny.git
+[submodule "netsurf/src"]
+	path = netsurf/src
+	url = git://git.netsurf-browser.org/netsurf.git
