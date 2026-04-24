@@ -22,6 +22,12 @@ and documents the per-port recipes still to be written.
 | libxml2   | from-source (cmake, deps: zlib/xz) | `ports/libxml2/CMakeLists.txt`              |
 | freetype  | from-source (cmake, deps: zlib/bzip2/libpng) | `ports/freetype/CMakeLists.txt`  |
 | curl      | from-source (cmake, deps: zlib/openssl) | `ports/curl/CMakeLists.txt`             |
+| pcre2     | from-source (cmake)             | `ports/pcre2/CMakeLists.txt`                   |
+| pixman    | from-source (meson)             | `ports/pixman/CMakeLists.txt`                  |
+| fribidi   | from-source (meson)             | `ports/fribidi/CMakeLists.txt`                 |
+| harfbuzz  | from-source (meson, deps: freetype) | `ports/harfbuzz/CMakeLists.txt`            |
+| fontconfig| from-source (meson, deps: freetype/libexpat) | `ports/fontconfig/CMakeLists.txt`  |
+| cairo     | from-source (meson, deps: pixman/freetype/fontconfig/libpng/zlib) | `ports/cairo/CMakeLists.txt` |
 | vim       | from-source (autoconf, deps: ncurses) | `ports/vim/CMakeLists.txt`               |
 | cpython   | from-source (autoconf, deps: all above) | `ports/cpython/CMakeLists.txt`         |
 
@@ -36,7 +42,7 @@ Tier 1 (foundation, autoconf/cmake — DONE):
   ✓ libpng  ✓ libjpeg-turbo  ✓ libexpat  ✓ libxml2  ✓ freetype  ✓ curl
 
 Tier 2 (font/graphics, mostly meson):
-  … pcre2  … pixman  … fribidi  … harfbuzz  … fontconfig  … cairo
+  ✓ pcre2  ✓ pixman  ✓ fribidi  ✓ harfbuzz  ✓ fontconfig  ✓ cairo
 
 Tier 3 (glib stack, meson):
   … glib  … atk  … gdk-pixbuf  … pango
@@ -54,8 +60,13 @@ Tier 6 (browser):
   … netsurf (GTK3 frontend)
 ```
 
-Tier 2 work blocks on extending `xv6_port()` with a `meson` build mode
-(meson cross-file generation from `CMAKE_C_COMPILER` + `XV6_SYSROOT`).
+Tier 2 done. The `meson` build mode in `xv6_port()` synthesizes a
+cross-file at configure time (CC/AR/strip/ranlib + sysroot +
+needs_exe_wrapper=true) and drives `meson setup / compile / install`
+with `PKG_CONFIG_SYSROOT_DIR` and `PKG_CONFIG_LIBDIR` pointed at the
+sysroot's pkgconfig dirs. Requires meson \u2265 1.6.1 (fontconfig);
+installed via `pip install --user --break-system-packages meson` to
+get 1.11.1 in `~/.local/bin`.
 
 
 The `cpython` port now cross-compiles CPython 3.12 from `ports/cpython/src`

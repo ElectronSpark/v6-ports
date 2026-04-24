@@ -45,3 +45,21 @@
 [submodule "curl/src"]
 	path = curl/src
 	url = https://github.com/curl/curl.git
+[submodule "pcre2/src"]
+	path = pcre2/src
+	url = https://github.com/PCRE2Project/pcre2.git
+[submodule "pixman/src"]
+	path = pixman/src
+	url = https://gitlab.freedesktop.org/pixman/pixman.git
+[submodule "fribidi/src"]
+	path = fribidi/src
+	url = https://github.com/fribidi/fribidi.git
+[submodule "harfbuzz/src"]
+	path = harfbuzz/src
+	url = https://github.com/harfbuzz/harfbuzz.git
+[submodule "fontconfig/src"]
+	path = fontconfig/src
+	url = https://gitlab.freedesktop.org/fontconfig/fontconfig.git
+[submodule "cairo/src"]
+	path = cairo/src
+	url = https://gitlab.freedesktop.org/cairo/cairo.git

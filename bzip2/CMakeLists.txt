@@ -41,3 +41,15 @@ xv6_port(
         -DENABLE_SHARED_LIB=OFF
         -DENABLE_STATIC_LIB=ON
 )
+
+# bzip2 installs only `libbz2_static.a`. Many downstream ports
+# (cairo via fontconfig, freetype, etc.) link with -lbz2, so create a
+# stable symlink in the sysroot.
+add_custom_command(
+    OUTPUT  ${XV6_SYSROOT}/lib/libbz2.a
+    COMMAND ${CMAKE_COMMAND} -E create_symlink
+            libbz2_static.a ${XV6_SYSROOT}/lib/libbz2.a
+    DEPENDS port-bzip2
+    COMMENT "Creating libbz2.a -> libbz2_static.a symlink")
+add_custom_target(port-bzip2-symlink ALL
+    DEPENDS ${XV6_SYSROOT}/lib/libbz2.a)
