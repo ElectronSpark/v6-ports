@@ -41,6 +41,19 @@ and documents the per-port recipes still to be written.
 | wayland-protocols | data-only (meson, deps: wayland-libs/wayland-host) | `ports/wayland-protocols/CMakeLists.txt` |
 | libxkbcommon | from-source (meson, deps: wayland-libs) | `ports/libxkbcommon/CMakeLists.txt`     |
 | gtk3      | from-source (meson, deps: glib/gdk-pixbuf/pango/atk/cairo/wayland-libs/wayland-protocols/libxkbcommon/libepoxy/linux-uapi-headers) | `ports/gtk3/CMakeLists.txt` |
+| netsurf-buildsystem | data-only (Makefile fragments) | `ports/netsurf-buildsystem/CMakeLists.txt` |
+| netsurf-nsgenbind   | native (host JS-binding generator) | `ports/netsurf-nsgenbind/CMakeLists.txt` |
+| netsurf-libwapcaplet | from-source (netsurf-make) | `ports/netsurf-libwapcaplet/CMakeLists.txt` |
+| netsurf-libparserutils | from-source (netsurf-make) | `ports/netsurf-libparserutils/CMakeLists.txt` |
+| netsurf-libhubbub   | from-source (netsurf-make, deps: libparserutils) | `ports/netsurf-libhubbub/CMakeLists.txt` |
+| netsurf-libcss      | from-source (netsurf-make, deps: libwapcaplet/libparserutils) | `ports/netsurf-libcss/CMakeLists.txt` |
+| netsurf-libdom      | from-source (netsurf-make, deps: nsgenbind/libexpat/libwapcaplet/libparserutils/libhubbub/libcss) | `ports/netsurf-libdom/CMakeLists.txt` |
+| netsurf-libnsgif    | from-source (netsurf-make) | `ports/netsurf-libnsgif/CMakeLists.txt` |
+| netsurf-libnsbmp    | from-source (netsurf-make) | `ports/netsurf-libnsbmp/CMakeLists.txt` |
+| netsurf-libnsutils  | from-source (netsurf-make) | `ports/netsurf-libnsutils/CMakeLists.txt` |
+| netsurf-libnslog    | from-source (netsurf-make) | `ports/netsurf-libnslog/CMakeLists.txt` |
+| netsurf-libnspsl    | from-source (netsurf-make) | `ports/netsurf-libnspsl/CMakeLists.txt` |
+| netsurf-libsvgtiny  | from-source (netsurf-make, deps: libexpat/libwapcaplet) | `ports/netsurf-libsvgtiny/CMakeLists.txt` |
 | vim       | from-source (autoconf, deps: ncurses) | `ports/vim/CMakeLists.txt`               |
 | cpython   | from-source (autoconf, deps: all above) | `ports/cpython/CMakeLists.txt`         |
 
@@ -66,10 +79,10 @@ Tier 4 (toolkit):
   ✓ gtk3 (3.24 — meson, Wayland-only backend)
 
 Tier 5 (NetSurf libs, custom Makefile):
-  … nsgenbind (host build tool)
-  … libwapcaplet  … libparserutils  … libhubbub  … libcss
-  … libdom  … libnsgif  … libnsbmp  … libnsutils
-  … libnslog  … libnspsl  … libsvgtiny
+  ✓ netsurf-buildsystem  ✓ nsgenbind (host build tool)
+  ✓ libwapcaplet  ✓ libparserutils  ✓ libhubbub  ✓ libcss
+  ✓ libdom  ✓ libnsgif  ✓ libnsbmp  ✓ libnsutils
+  ✓ libnslog  ✓ libnspsl  ✓ libsvgtiny
 
 Tier 6 (browser):
   … netsurf (GTK3 frontend)

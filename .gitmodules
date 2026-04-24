@@ -97,3 +97,42 @@
 [submodule "khronos-headers/opengl-registry"]
 	path = khronos-headers/opengl-registry
 	url = https://github.com/KhronosGroup/OpenGL-Registry.git
+[submodule "netsurf-buildsystem/src"]
+	path = netsurf-buildsystem/src
+	url = git://git.netsurf-browser.org/buildsystem.git
+[submodule "netsurf-nsgenbind/src"]
+	path = netsurf-nsgenbind/src
+	url = git://git.netsurf-browser.org/nsgenbind.git
+[submodule "netsurf-libwapcaplet/src"]
+	path = netsurf-libwapcaplet/src
+	url = git://git.netsurf-browser.org/libwapcaplet.git
+[submodule "netsurf-libparserutils/src"]
+	path = netsurf-libparserutils/src
+	url = git://git.netsurf-browser.org/libparserutils.git
+[submodule "netsurf-libhubbub/src"]
+	path = netsurf-libhubbub/src
+	url = git://git.netsurf-browser.org/libhubbub.git
+[submodule "netsurf-libcss/src"]
+	path = netsurf-libcss/src
+	url = git://git.netsurf-browser.org/libcss.git
+[submodule "netsurf-libdom/src"]
+	path = netsurf-libdom/src
+	url = git://git.netsurf-browser.org/libdom.git
+[submodule "netsurf-libnsgif/src"]
+	path = netsurf-libnsgif/src
+	url = git://git.netsurf-browser.org/libnsgif.git
+[submodule "netsurf-libnsbmp/src"]
+	path = netsurf-libnsbmp/src
+	url = git://git.netsurf-browser.org/libnsbmp.git
+[submodule "netsurf-libnsutils/src"]
+	path = netsurf-libnsutils/src
+	url = git://git.netsurf-browser.org/libnsutils.git
+[submodule "netsurf-libnslog/src"]
+	path = netsurf-libnslog/src
+	url = git://git.netsurf-browser.org/libnslog.git
+[submodule "netsurf-libnspsl/src"]
+	path = netsurf-libnspsl/src
+	url = git://git.netsurf-browser.org/libnspsl.git
+[submodule "netsurf-libsvgtiny/src"]
+	path = netsurf-libsvgtiny/src
+	url = git://git.netsurf-browser.org/libsvgtiny.git

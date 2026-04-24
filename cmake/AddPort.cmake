@@ -267,10 +267,46 @@ function(xv6_port)
                 PREFIX=/
                 install ${P_INSTALL_ARGS})
 
+    elseif(P_BUILD_SYSTEM STREQUAL "netsurf")
+        # NetSurf-buildsystem libraries: each lib's Makefile delegates
+        # to ${NSSHARED}/makefiles/Makefile.* (lib-static rules).
+        # P_MAKE_ARGS may carry extra knobs; CMAKE_ARGS is unused.
+        set(_nsshared "${CMAKE_SOURCE_DIR}/netsurf-buildsystem/src")
+        set(_ns_env
+            ${CMAKE_COMMAND} -E env
+                "PATH=${XV6_SYSROOT}/host-tools/bin:$ENV{PATH}"
+                "PKG_CONFIG_SYSROOT_DIR=${XV6_SYSROOT}"
+                "PKG_CONFIG_LIBDIR=${XV6_SYSROOT}/lib/pkgconfig:${XV6_SYSROOT}/share/pkgconfig"
+                "PKG_CONFIG_PATH=${XV6_SYSROOT}/lib/pkgconfig:${XV6_SYSROOT}/share/pkgconfig"
+                "CC=${CMAKE_C_COMPILER}"
+                "AR=${CMAKE_AR}"
+                "RANLIB=${CMAKE_RANLIB}"
+                "CFLAGS=${XV6_PORT_CFLAGS}"
+                "LDFLAGS=--sysroot=${XV6_SYSROOT}")
+        set(_cmake_configure
+            ${CMAKE_COMMAND} -E echo "netsurf-buildsystem build of ${_name}"
+            COMMAND ${_ns_env} make -C ${_src} clean
+                NSSHARED=${_nsshared} PREFIX=/
+                COMPONENT_TYPE=lib-static
+                Q=)
+        set(_build_cmd
+            ${_ns_env} make -C ${_src} -j${P_JOBS}
+                NSSHARED=${_nsshared} PREFIX=/
+                COMPONENT_TYPE=lib-static
+                Q=
+                ${P_MAKE_ARGS})
+        set(_install_cmd
+            ${_ns_env} make -C ${_src}
+                NSSHARED=${_nsshared} PREFIX=/
+                DESTDIR=${XV6_SYSROOT}
+                COMPONENT_TYPE=lib-static
+                Q=
+                install ${P_INSTALL_ARGS})
+
     else()
         message(FATAL_ERROR
             "xv6_port(${_name}): unsupported BUILD_SYSTEM=${P_BUILD_SYSTEM} "
-            "(expected cmake|autoconf|meson|make)")
+            "(expected cmake|autoconf|meson|make|netsurf)")
     endif()
 
     # ------------------------------------------------------------------
