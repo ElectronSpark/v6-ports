@@ -16,6 +16,7 @@ and documents the per-port recipes still to be written.
 | ncurses   | from-source (autoconf)          | `ports/ncurses/CMakeLists.txt`                 |
 | readline  | from-source (autoconf, deps: ncurses) | `ports/readline/CMakeLists.txt`         |
 | openssl   | from-source (perl Configure)    | `ports/openssl/CMakeLists.txt`                 |
+| vim       | from-source (autoconf, deps: ncurses) | `ports/vim/CMakeLists.txt`               |
 | cpython   | from-source (autoconf, deps: all above) | `ports/cpython/CMakeLists.txt`         |
 
 The `cpython` port now cross-compiles CPython 3.12 from `ports/cpython/src`

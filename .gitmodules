@@ -24,3 +24,6 @@
 	path = cpython/src
 	url = https://github.com/ElectronSpark/v6-cpython.git
 	branch = v6-3.12
+[submodule "vim/src"]
+	path = vim/src
+	url = https://github.com/ElectronSpark/vim.git
