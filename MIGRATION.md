@@ -135,11 +135,11 @@ For each port:
 
    Upstream URLs (from `xv6-tmp/.gitmodules`):
    - openssl  → `https://github.com/openssl/openssl.git` (branch `openssl-3.0`)
-   - sqlite   → `https://github.com/ElectronSpark/v6-sqlite.git`
-   - libffi   → `https://github.com/ElectronSpark/v6-libffi.git`
+  - sqlite   → `git@github.com:ElectronSpark/v6-sqlite.git`
+  - libffi   → `git@github.com:ElectronSpark/v6-libffi.git`
    - ncurses  → `https://github.com/mirror/ncurses.git`
-   - readline → `https://git.savannah.gnu.org/git/readline.git`
-   - cpython  → `https://github.com/ElectronSpark/v6-cpython.git` (branch `3.12`)
+  - readline → `git@github.com:ElectronSpark/v6-readline.git`
+  - cpython  → `git@github.com:ElectronSpark/v6-cpython.git` (branch `3.12`)
 
    `bzip2`, `xz`, `libuuid` are vendored in `xv6-tmp/user/` (not submodules).
 

@@ -6,27 +6,27 @@
 	url = https://github.com/tukaani-project/xz.git
 [submodule "libffi/src"]
 	path = libffi/src
-	url = https://github.com/ElectronSpark/v6-libffi.git
+	url = git@github.com:ElectronSpark/v6-libffi.git
 [submodule "sqlite/src"]
 	path = sqlite/src
-	url = https://github.com/ElectronSpark/v6-sqlite.git
+	url = git@github.com:ElectronSpark/v6-sqlite.git
 [submodule "ncurses/src"]
 	path = ncurses/src
 	url = https://github.com/mirror/ncurses.git
 [submodule "readline/src"]
 	path = readline/src
-	url = https://git.savannah.gnu.org/git/readline.git
+	url = git@github.com:ElectronSpark/v6-readline.git
 [submodule "openssl/src"]
 	path = openssl/src
 	url = https://github.com/openssl/openssl.git
 	branch = openssl-3.0
 [submodule "cpython/src"]
 	path = cpython/src
-	url = https://github.com/ElectronSpark/v6-cpython.git
+	url = git@github.com:ElectronSpark/v6-cpython.git
 	branch = v6-3.12
 [submodule "vim/src"]
 	path = vim/src
-	url = https://github.com/ElectronSpark/vim.git
+	url = git@github.com:ElectronSpark/vim.git
 [submodule "libpng/src"]
 	path = libpng/src
 	url = https://github.com/pnggroup/libpng.git

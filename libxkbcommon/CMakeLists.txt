@@ -18,3 +18,25 @@ xv6_port(
         -Denable-bash-completion=false
         -Denable-zsh-completion=false
 )
+
+set(XKEYBOARD_CONFIG_DIR "/usr/share/X11/xkb"
+    CACHE PATH "Host xkeyboard-config directory to stage for libxkbcommon")
+
+if(EXISTS "${XKEYBOARD_CONFIG_DIR}/rules/evdev")
+    set(_xkb_data_stamp ${CMAKE_CURRENT_BINARY_DIR}/xkeyboard-config.stamp)
+    add_custom_command(
+        OUTPUT  ${_xkb_data_stamp}
+        COMMAND ${CMAKE_COMMAND} -E make_directory ${XV6_SYSROOT}/share/X11
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+                    ${XKEYBOARD_CONFIG_DIR}
+                    ${XV6_SYSROOT}/share/X11/xkb
+        COMMAND ${CMAKE_COMMAND} -E touch ${_xkb_data_stamp}
+        COMMENT "Staging xkeyboard-config data for libxkbcommon"
+        VERBATIM)
+    add_custom_target(port-libxkbcommon-xkb-data ALL
+        DEPENDS ${_xkb_data_stamp})
+else()
+    message(WARNING
+        "ports/libxkbcommon: ${XKEYBOARD_CONFIG_DIR}/rules/evdev not found; "
+        "GTK/Wayland clients may fail to create XKB keymaps at runtime.")
+endif()

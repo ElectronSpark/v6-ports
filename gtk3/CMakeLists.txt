@@ -37,3 +37,32 @@ xv6_port(
         -Dtests=false
         -Dinstalled_tests=false
 )
+
+set(GTK_CURSOR_THEME_DIR "/usr/share/icons/Adwaita"
+    CACHE PATH "Host Adwaita cursor theme directory to stage for GTK/Wayland")
+
+if(EXISTS "${GTK_CURSOR_THEME_DIR}/cursors/default")
+    set(_gtk_cursor_stamp ${CMAKE_CURRENT_BINARY_DIR}/cursor-theme.stamp)
+    add_custom_command(
+        OUTPUT  ${_gtk_cursor_stamp}
+        COMMAND ${CMAKE_COMMAND} -E make_directory ${XV6_SYSROOT}/share/icons
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+                    ${GTK_CURSOR_THEME_DIR}
+                    ${XV6_SYSROOT}/share/icons/Adwaita
+        COMMAND ${CMAKE_COMMAND} -E make_directory ${XV6_SYSROOT}/share/icons/default
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    ${GTK_CURSOR_THEME_DIR}/cursor.theme
+                    ${XV6_SYSROOT}/share/icons/default/index.theme
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+                ${GTK_CURSOR_THEME_DIR}/cursors
+                ${XV6_SYSROOT}/share/icons/default/cursors
+        COMMAND ${CMAKE_COMMAND} -E touch ${_gtk_cursor_stamp}
+        COMMENT "Staging Adwaita cursor theme for GTK/Wayland"
+        VERBATIM)
+    add_custom_target(port-gtk3-cursor-theme ALL
+        DEPENDS ${_gtk_cursor_stamp})
+else()
+    message(WARNING
+        "ports/gtk3: ${GTK_CURSOR_THEME_DIR}/cursors/default not found; "
+        "GTK/Wayland clients may fail to load cursor theme default.")
+endif()

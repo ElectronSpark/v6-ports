@@ -7,6 +7,7 @@ xv6_port(
     SOURCE_DIR      ${CMAKE_CURRENT_SOURCE_DIR}/src
     BUILD_SYSTEM    netsurf
     DEPENDS         netsurf-buildsystem libexpat netsurf-libwapcaplet
+                    netsurf-libparserutils netsurf-libhubbub netsurf-libdom
     OUTPUT_FILES    lib/libsvgtiny.a
                     include/svgtiny.h
 )

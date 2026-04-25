@@ -84,43 +84,75 @@ if(EXISTS "${WAYLAND_SRC_DIR}/wlcomp.c" AND DEFINED CMAKE_C_COMPILER)
     set(_wl_src    ${_wl_build}/wlcomp.c)
     set(_wl_font   ${_wl_build}/font8x16.h)
     set(_wl_bin    ${_wl_build}/wlcomp)
+    set(_desktop_bin ${_wl_build}/desktop)
     file(MAKE_DIRECTORY ${_wl_build})
 
-    # Patch step: copy wlcomp.c into the build dir with the cast fixed.
+    # Patch step: copy wlcomp.c into the build dir with several fixes:
+    #   1. Zero-extend absolute mouse coords (sign-extension bug).
+    #   2. Point netsurf homepage at the bundled welcome.html instead of
+    #      a Flask demo on http://127.0.0.1/ (no HTTP server runs on the
+    #      rootfs in this build).
+    #   3. Skip the 30-second probe loop that waits for that demo.
+    #   4. Disable NetSurf launch points until the browser is stable.
+    #   5. Avoid epoll-on-epoll waits that can strand Wayland roundtrips.
+    #   6. Give the Wayland event loop a short blocking dispatch window so
+    #      client-fd readiness after accept is not missed.
     add_custom_command(
         OUTPUT  ${_wl_src} ${_wl_font}
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
                     ${WAYLAND_SRC_DIR}/font8x16.h ${_wl_font}
         COMMAND sed -e "s|(uint32_t)ev\\.dx|(uint32_t)(uint16_t)ev.dx|"
                     -e "s|(uint32_t)ev\\.dy|(uint32_t)(uint16_t)ev.dy|"
+                    -e "s|homepage_url:http://127.0.0.1/|homepage_url:file:///share/netsurf/welcome.html|"
+                    -e "s|for (int i = 0\\; i < 60\\; i++)|for (int i = 0; i < 0; i++)|"
+                    -e "s|{ \"Browser\",  \"/bin/netsurf\",   \"netsurf\",  0xFF3D6E9E, 'W' },|{ \"Browser\",  NULL,             NULL,       0xFF3D6E9E, 'W' },|"
+                    -e "s|{ \"Web Browser\",     \"/bin/netsurf\",   \"netsurf\"  },|{ \"---\",             NULL,             NULL       },|"
+                    -e "s|case 9: launch_desktop_app(\"/bin/netsurf\", \"netsurf\"); break;|case 9: break;|g"
                     ${WAYLAND_SRC_DIR}/wlcomp.c > ${_wl_src}
+                COMMAND perl -0pi -e [=[s{        if \(surf->committed_buf && surf->committed_buf->resource &&\n            !surf->buffer_released\) \{\n            wl_buffer_send_release\(surf->committed_buf->resource\);\n            surf->buffer_released = 1;\n        \}\n}{        /* Keep the current committed buffer owned until replacement. */\n}]=]
+                        ${_wl_src}
+                COMMAND perl -0pi -e [=[s{        /\* Wait for events \(16ms timeout ~ 60fps\) \*/\n        struct epoll_event events\[8\];\n        epoll_wait\(epfd, events, 8, 16\);\n}{        /* Keep the compositor loop cycling so Wayland roundtrips complete. */\n        usleep(16000);\n}]=]
+                    ${_wl_src}
+                COMMAND perl -0pi -e [=[s{wl_event_loop_dispatch\(loop, 0\);}{wl_event_loop_dispatch(loop, 1);}g]=]
+                    ${_wl_src}
         DEPENDS ${WAYLAND_SRC_DIR}/wlcomp.c ${WAYLAND_SRC_DIR}/font8x16.h
-        COMMENT "Patching wlcomp.c (zero-extend absolute mouse coords)"
+                COMMENT "Patching wlcomp.c (mouse coords, NetSurf launch, buffer lifetime, event loop)"
         VERBATIM)
 
-    # Compile against headers + libs already shipped in the reference sysroot.
+    # Compile against the in-tree Wayland headers + libs so compositor-side
+    # protocol I/O uses the same xv6 compatibility fixes as clients.
     add_custom_command(
         OUTPUT  ${_wl_bin}
-        COMMAND ${CMAKE_C_COMPILER} -O2 -g -Wall -Wno-unused-result
+        COMMAND ${CMAKE_C_COMPILER} -O2 -g -Wall -Wno-unused-result -static
+                    -isystem ${XV6_SYSROOT}/include
                     -isystem ${WAYLAND_REF_SYSROOT}/include
                     -I ${WAYLAND_REF_SYSROOT}/include/wayland
-                    -L ${WAYLAND_REF_SYSROOT}/lib
-                    -L ${WAYLAND_REF_SYSROOT}/lib64
-                    -Wl,-rpath-link,${WAYLAND_REF_SYSROOT}/lib
+                    -L ${XV6_SYSROOT}/lib
+                    -Wl,-rpath-link,${XV6_SYSROOT}/lib
                     -o ${_wl_bin} ${_wl_src}
-                    -lwayland-server -lffi -lpthread -lrt -lm
+                    -lwayland-server ${WAYLAND_REF_SYSROOT}/lib/libwayland-server.a
+                    -lffi -lpthread -lrt -lm
         DEPENDS ${_wl_src} ${_wl_font}
         COMMENT "Compiling patched wlcomp from source"
         VERBATIM)
 
-    # Install: overwrite the staged wlcomp with the freshly built one.
+    add_custom_command(
+        OUTPUT  ${_desktop_bin}
+        COMMAND ${CMAKE_C_COMPILER} -O2 -g -Wall -static
+                    -o ${_desktop_bin} ${WAYLAND_SRC_DIR}/desktop.c
+        DEPENDS ${WAYLAND_SRC_DIR}/desktop.c
+        COMMENT "Compiling desktop session manager from source"
+        VERBATIM)
+
+    # Install: overwrite staged GUI binaries with freshly built static ones.
     set(_wl_installed ${XV6_SYSROOT}/bin/wlcomp.rebuilt.stamp)
     add_custom_command(
         OUTPUT  ${_wl_installed}
         COMMAND ${CMAKE_COMMAND} -E copy ${_wl_bin} ${XV6_SYSROOT}/bin/wlcomp
+        COMMAND ${CMAKE_COMMAND} -E copy ${_desktop_bin} ${XV6_SYSROOT}/bin/desktop
         COMMAND ${CMAKE_COMMAND} -E touch ${_wl_installed}
-        DEPENDS ${_wl_bin} ${_sentinel}
-        COMMENT "Installing rebuilt wlcomp into ${XV6_SYSROOT}/bin"
+        DEPENDS ${_wl_bin} ${_desktop_bin} ${_sentinel}
+        COMMENT "Installing rebuilt GUI session into ${XV6_SYSROOT}/bin"
         VERBATIM)
 
     set(_wl_extra_dep ${_wl_installed})
@@ -134,6 +166,10 @@ endif()
 
 add_custom_target(port-wayland ALL
     DEPENDS ${_sentinel} ${XV6_SYSROOT}/bin/desktop ${_stamp} ${_wl_extra_dep})
+
+if(TARGET port-wayland-libs)
+    add_dependencies(port-wayland port-wayland-libs)
+endif()
 
 add_custom_target(port-wayland-clean
     COMMAND ${CMAKE_COMMAND} -E remove -f

@@ -82,6 +82,7 @@ set(_vim_src_build "${_build}/src")
 set(_config_status "${_vim_src_build}/auto/config.status")
 
 set(_cflags "-O2 -fPIC -I${XV6_SYSROOT}/include")
+set(_cppflags "-I${XV6_SYSROOT}/include")
 set(_ldflags "-L${XV6_SYSROOT}/lib -Wl,-rpath,/lib")
 
 add_custom_command(
@@ -93,6 +94,7 @@ add_custom_command(
                 RANLIB=${_cross_ranlib}
                 STRIP=${_cross_strip}
                 "CFLAGS=${_cflags}"
+                "CPPFLAGS=${_cppflags}"
                 "LDFLAGS=${_ldflags}"
                 "LIBS=-lncurses"
             ./configure

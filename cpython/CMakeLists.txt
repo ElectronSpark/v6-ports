@@ -244,6 +244,16 @@ add_custom_command(
 
 add_custom_target(port-cpython ALL DEPENDS ${_install_stamp})
 
+# Inter-port deps: cpython links against many ports' static libs at
+# configure-time (its `checking whether the C compiler works` test
+# already pulls -lreadline -lncurses -lpthread -lm). Make sure those
+# ports are installed into the sysroot before we configure.
+foreach(_d IN ITEMS readline ncurses openssl sqlite libffi zlib bzip2 xz)
+    if(TARGET port-${_d})
+        add_dependencies(port-cpython port-${_d})
+    endif()
+endforeach()
+
 add_custom_target(port-cpython-clean
     COMMAND ${CMAKE_COMMAND} -E rm -rf ${_build}
     COMMAND ${CMAKE_COMMAND} -E rm -f
