@@ -6,27 +6,27 @@
 	url = https://github.com/tukaani-project/xz.git
 [submodule "libffi/src"]
 	path = libffi/src
-	url = git@github.com:ElectronSpark/v6-libffi.git
+	url = https://github.com/ElectronSpark/v6-libffi.git
 [submodule "sqlite/src"]
 	path = sqlite/src
-	url = git@github.com:ElectronSpark/v6-sqlite.git
+	url = https://github.com/ElectronSpark/v6-sqlite.git
 [submodule "ncurses/src"]
 	path = ncurses/src
 	url = https://github.com/mirror/ncurses.git
 [submodule "readline/src"]
 	path = readline/src
-	url = git@github.com:ElectronSpark/v6-readline.git
+	url = https://github.com/ElectronSpark/v6-readline.git
 [submodule "openssl/src"]
 	path = openssl/src
-	url = git@github.com:ElectronSpark/v6-openssl.git
+	url = https://github.com/ElectronSpark/v6-openssl.git
 	branch = v6-port
 [submodule "cpython/src"]
 	path = cpython/src
-	url = git@github.com:ElectronSpark/v6-cpython.git
+	url = https://github.com/ElectronSpark/v6-cpython.git
 	branch = v6-3.12
 [submodule "vim/src"]
 	path = vim/src
-	url = git@github.com:ElectronSpark/vim.git
+	url = https://github.com/ElectronSpark/vim.git
 [submodule "libpng/src"]
 	path = libpng/src
 	url = https://github.com/pnggroup/libpng.git
@@ -81,7 +81,7 @@
 	branch = gtk-3-24
 [submodule "wayland-src/src"]
 	path = wayland-src/src
-	url = git@github.com:ElectronSpark/v6-wayland.git
+	url = https://github.com/ElectronSpark/v6-wayland.git
 	branch = v6-port
 [submodule "wayland-protocols/src"]
 	path = wayland-protocols/src
