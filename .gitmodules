@@ -81,7 +81,8 @@
 	branch = gtk-3-24
 [submodule "wayland-src/src"]
 	path = wayland-src/src
-	url = https://gitlab.freedesktop.org/wayland/wayland.git
+	url = git@github.com:ElectronSpark/v6-wayland.git
+	branch = v6-port
 [submodule "wayland-protocols/src"]
 	path = wayland-protocols/src
 	url = https://gitlab.freedesktop.org/wayland/wayland-protocols.git
