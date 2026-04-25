@@ -18,8 +18,8 @@
 	url = git@github.com:ElectronSpark/v6-readline.git
 [submodule "openssl/src"]
 	path = openssl/src
-	url = https://github.com/openssl/openssl.git
-	branch = openssl-3.0
+	url = git@github.com:ElectronSpark/v6-openssl.git
+	branch = v6-port
 [submodule "cpython/src"]
 	path = cpython/src
 	url = git@github.com:ElectronSpark/v6-cpython.git
