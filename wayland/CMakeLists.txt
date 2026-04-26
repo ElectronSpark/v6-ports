@@ -19,13 +19,17 @@ foreach(_src wlcomp.c desktop.c font8x16.h)
 endforeach()
 
 set(_wl_build     ${CMAKE_CURRENT_BINARY_DIR}/wlcomp-build)
+set(_wl_proto_dir ${_wl_build}/wayland)
 set(_wl_src       ${_wl_build}/wlcomp.c)
 set(_wl_font      ${_wl_build}/font8x16.h)
+set(_xdg_xml      ${CMAKE_CURRENT_SOURCE_DIR}/../wayland-protocols/src/stable/xdg-shell/xdg-shell.xml)
+set(_xdg_header   ${_wl_proto_dir}/xdg-shell-server-protocol.h)
+set(_xdg_code     ${_wl_build}/xdg-shell-protocol.c)
 set(_wl_bin       ${_wl_build}/wlcomp)
 set(_desktop_bin  ${_wl_build}/desktop)
 set(_wl_installed ${XV6_SYSROOT}/bin/wlcomp)
 set(_desktop_installed ${XV6_SYSROOT}/bin/desktop)
-file(MAKE_DIRECTORY ${_wl_build} ${XV6_SYSROOT}/bin)
+file(MAKE_DIRECTORY ${_wl_build} ${_wl_proto_dir} ${XV6_SYSROOT}/bin)
 
 add_custom_command(
     OUTPUT  ${_wl_src} ${_wl_font}
@@ -50,16 +54,35 @@ add_custom_command(
     VERBATIM)
 
 add_custom_command(
+    OUTPUT  ${_xdg_header} ${_xdg_code}
+    COMMAND ${CMAKE_COMMAND} -E make_directory ${_wl_proto_dir}
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                ${XV6_SYSROOT}/include/wayland-server-core.h
+                ${_wl_proto_dir}/wayland-server-core.h
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                ${XV6_SYSROOT}/include/wayland-server-protocol.h
+                ${_wl_proto_dir}/wayland-server-protocol.h
+    COMMAND ${XV6_SYSROOT}/host-tools/bin/wayland-scanner server-header
+                ${_xdg_xml} ${_xdg_header}
+    COMMAND ${XV6_SYSROOT}/host-tools/bin/wayland-scanner private-code
+                ${_xdg_xml} ${_xdg_code}
+    DEPENDS ${_xdg_xml}
+    COMMENT "Generating xdg-shell Wayland protocol sources"
+    VERBATIM)
+
+add_custom_command(
     OUTPUT  ${_wl_bin}
     COMMAND ${CMAKE_C_COMPILER} -O2 -g -Wall -Wno-unused-result -static
                 -isystem ${XV6_SYSROOT}/include
+                -I ${_wl_build}
+                -I ${_wl_proto_dir}
                 -I ${XV6_SYSROOT}/include/wayland
                 -L ${XV6_SYSROOT}/lib
                 -Wl,-rpath-link,${XV6_SYSROOT}/lib
-                -o ${_wl_bin} ${_wl_src}
+                -o ${_wl_bin} ${_wl_src} ${_xdg_code}
                 ${XV6_SYSROOT}/lib/libwayland-server.a
                 -lffi -lpthread -lrt -lm
-    DEPENDS ${_wl_src} ${_wl_font} ${XV6_SYSROOT}/lib/libwayland-server.a
+    DEPENDS ${_wl_src} ${_wl_font} ${_xdg_header} ${_xdg_code}
     COMMENT "Compiling wlcomp from source"
     VERBATIM)
 
@@ -80,6 +103,9 @@ add_custom_command(
     VERBATIM)
 
 add_custom_target(port-wayland ALL DEPENDS ${_wl_installed} ${_desktop_installed})
+if(TARGET port-wayland-libs)
+    add_dependencies(port-wayland port-wayland-libs)
+endif()
 
 add_custom_target(port-wayland-clean
     COMMAND ${CMAKE_COMMAND} -E rm -rf ${_wl_build}

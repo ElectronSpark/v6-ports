@@ -83,6 +83,7 @@ export LDFLAGS=\"-L\${SYSROOT}/lib\"
 export PKG_CONFIG=\"\${NS_BUILD}/pkg-config-wrapper\"
 export PKG_CONFIG_SYSROOT_DIR=\"\${SYSROOT}\"
 export PKG_CONFIG_LIBDIR=\"\${SYSROOT}/lib/pkgconfig:\${SYSROOT}/share/pkgconfig\"
+export GDK_PIXBUF_PIXDATA=\"/usr/bin/gdk-pixbuf-pixdata\"
 export PATH=\"\${NS_HOST_TOOLS}/bin:\${PATH}\"
 
 # --- CC wrapper: append CRT + -lc + libgcc when LINKING (not compiling) ---
@@ -152,6 +153,7 @@ make -j\$(nproc) TARGET=gtk3 \\
     BUILD_LDFLAGS=\"-L\${NS_HOST_PNG_LIB}\" \\
     BUILD_LIBPNG_LDFLAGS=\"-lpng -lz -lm\" \\
     GLIB_COMPILE_RESOURCES=\"\${NS_HOST_TOOLS}/bin/glib-compile-resources\" \\
+    GDK_PIXBUF_PIXDATA=\"\${GDK_PIXBUF_PIXDATA}\" \\
     NETSURF_GTK_RES_PATH=\"/share/netsurf/\" \\
     Q=
 

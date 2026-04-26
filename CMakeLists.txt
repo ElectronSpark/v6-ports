@@ -52,9 +52,11 @@ endforeach()
 list(LENGTH _ports _nports)
 message(STATUS "xv6 ports discovered: ${_nports} (${_ports})")
 
+# cpython declares dependencies on several library ports in its own
+# CMakeLists.txt; add it after discovery has created those targets.
 # wayland builds the compositor against the generated wayland-libs output.
-list(REMOVE_ITEM _ports wayland)
-list(APPEND _ports wayland)
+list(REMOVE_ITEM _ports cpython wayland)
+list(APPEND _ports cpython wayland)
 
 foreach(p IN LISTS _ports)
     add_subdirectory(${p})

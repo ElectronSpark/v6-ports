@@ -28,6 +28,18 @@ project(xv6-port-zlib LANGUAGES NONE)
 
 include(${CMAKE_CURRENT_LIST_DIR}/../cmake/AddPort.cmake)
 
+set(ZLIB_PREPARED_SOURCE_DIR ${CMAKE_BINARY_DIR}/zlib-src)
+file(REMOVE_RECURSE ${ZLIB_PREPARED_SOURCE_DIR})
+file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/src/ DESTINATION ${ZLIB_PREPARED_SOURCE_DIR})
+
+if(NOT EXISTS ${ZLIB_PREPARED_SOURCE_DIR}/zconf.h
+        AND EXISTS ${ZLIB_PREPARED_SOURCE_DIR}/zconf.h.in)
+    configure_file(
+        ${ZLIB_PREPARED_SOURCE_DIR}/zconf.h.in
+        ${ZLIB_PREPARED_SOURCE_DIR}/zconf.h
+        COPYONLY)
+endif()
+
 # Sanity: make sure the cross toolchain was passed.
 foreach(v CMAKE_C_COMPILER CMAKE_AR CMAKE_RANLIB)
     if(NOT ${v} OR ${v} STREQUAL "")
@@ -39,7 +51,7 @@ endforeach()
 
 xv6_port(
     NAME            zlib
-    SOURCE_DIR      ${CMAKE_CURRENT_SOURCE_DIR}/src
+    SOURCE_DIR      ${ZLIB_PREPARED_SOURCE_DIR}
     BUILD_SYSTEM    cmake
     OUTPUT_FILES    lib/libz.a
                     include/zlib.h
