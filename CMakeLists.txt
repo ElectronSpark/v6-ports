@@ -52,6 +52,10 @@ endforeach()
 list(LENGTH _ports _nports)
 message(STATUS "xv6 ports discovered: ${_nports} (${_ports})")
 
+# wayland builds the compositor against the generated wayland-libs output.
+list(REMOVE_ITEM _ports wayland)
+list(APPEND _ports wayland)
+
 foreach(p IN LISTS _ports)
     add_subdirectory(${p})
 endforeach()
