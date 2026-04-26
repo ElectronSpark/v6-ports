@@ -118,8 +118,14 @@ int main(void)
         return 1;
     }
 
-    /* 3. Keep the session compositor-only while NetSurf startup is debugged. */
-    client_pid = -1;
+    /* 3. Launch NetSurf as a Wayland GTK3 client. */
+    client_pid = launch_client("/bin/netsurf", "netsurf", NULL);
+    if (client_pid < 0) {
+        perror("[desktop] fork netsurf");
+        cleanup();
+        return 1;
+    }
+    fprintf(stderr, "[desktop] netsurf pid=%d\n", client_pid);
 
     /* 4. Supervise compositor and client */
     while (g_running) {
@@ -131,6 +137,10 @@ int main(void)
                         WEXITSTATUS(status));
                 wlcomp_pid = 0;
                 break;  /* compositor gone → session over */
+            } else if (exited == client_pid) {
+                fprintf(stderr, "[desktop] netsurf exited (status %d)\n",
+                        WEXITSTATUS(status));
+                client_pid = 0;
             }
         }
         usleep(100000);  /* 100 ms poll */

@@ -8,9 +8,7 @@ if(NOT DEFINED CMAKE_C_COMPILER OR CMAKE_C_COMPILER STREQUAL "")
     message(FATAL_ERROR "ports/wayland: CMAKE_C_COMPILER is required")
 endif()
 
-set(WAYLAND_SRC_DIR
-    "${CMAKE_CURRENT_SOURCE_DIR}/src"
-    CACHE PATH "wlcomp/desktop source directory")
+set(WAYLAND_SRC_DIR "${CMAKE_CURRENT_SOURCE_DIR}/src")
 
 foreach(_src wlcomp.c desktop.c font8x16.h)
     if(NOT EXISTS "${WAYLAND_SRC_DIR}/${_src}")
