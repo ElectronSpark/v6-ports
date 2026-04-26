@@ -15,6 +15,7 @@
 #include <string.h>
 #include <sys/wait.h>
 #include <sys/stat.h>
+#include <fcntl.h>
 
 #define WAYLAND_SOCKET_PATH  "/tmp/wayland-0.lock" /* lockfile (real VFS file) */
 #define SOCKET_WAIT_TRIES    200      /* 200 × 20 ms = 4 s */
@@ -95,6 +96,45 @@ static void cleanup(void)
     kill_and_reap(&wlcomp_pid);
 }
 
+static int token_is_disabled(const char *cmdline, const char *key)
+{
+    size_t key_len = strlen(key);
+    const char *p = cmdline;
+
+    while (*p) {
+        while (*p == ' ' || *p == '\t' || *p == '\n')
+            p++;
+        if (strncmp(p, key, key_len) == 0 && p[key_len] == '=' &&
+            p[key_len + 1] == '0' &&
+            (p[key_len + 2] == '\0' || p[key_len + 2] == ' ' ||
+             p[key_len + 2] == '\t' || p[key_len + 2] == '\n'))
+            return 1;
+        while (*p && *p != ' ' && *p != '\t' && *p != '\n')
+            p++;
+    }
+    return 0;
+}
+
+static int netsurf_disabled_by_cmdline(void)
+{
+    char buf[512];
+    int fd = open("/proc/cmdline", O_RDONLY);
+    if (fd < 0) {
+        fprintf(stderr, "[desktop] /proc/cmdline unavailable\n");
+        return 0;
+    }
+
+    int n = read(fd, buf, sizeof(buf) - 1);
+    close(fd);
+    if (n <= 0) {
+        fprintf(stderr, "[desktop] /proc/cmdline empty\n");
+        return 0;
+    }
+    buf[n] = '\0';
+
+    return token_is_disabled(buf, "netsurf");
+}
+
 int main(void)
 {
     signal(SIGINT,  sighandler);
@@ -118,14 +158,19 @@ int main(void)
         return 1;
     }
 
-    /* 3. Launch NetSurf as a Wayland GTK3 client. */
-    client_pid = launch_client("/bin/netsurf", "netsurf", NULL);
-    if (client_pid < 0) {
-        perror("[desktop] fork netsurf");
-        cleanup();
-        return 1;
+    /* 3. Launch NetSurf as a Wayland GTK3 client unless disabled. */
+    if (netsurf_disabled_by_cmdline()) {
+        client_pid = 0;
+        fprintf(stderr, "[desktop] netsurf disabled by cmdline\n");
+    } else {
+        client_pid = launch_client("/bin/netsurf", "netsurf", NULL);
+        if (client_pid < 0) {
+            perror("[desktop] fork netsurf");
+            cleanup();
+            return 1;
+        }
+        fprintf(stderr, "[desktop] netsurf pid=%d\n", client_pid);
     }
-    fprintf(stderr, "[desktop] netsurf pid=%d\n", client_pid);
 
     /* 4. Supervise compositor and client */
     while (g_running) {
