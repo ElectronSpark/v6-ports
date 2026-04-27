@@ -67,6 +67,14 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1)
         int is_netsurf = strcmp(name, "netsurf") == 0;
         int is_minibrowser = strcmp(name, "MiniBrowser") == 0;
 
+        int logfd = open("/tmp/app_log.txt",
+                         O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        if (logfd >= 0) {
+            dup2(logfd, 1);
+            dup2(logfd, 2);
+            close(logfd);
+        }
+
         if (is_netsurf) {
             mkdir("/.netsurf", 0755);
             mkdir("/tmp/.cache", 0755);

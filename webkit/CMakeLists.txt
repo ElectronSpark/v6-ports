@@ -7,13 +7,19 @@ endif()
 
 if(DEFINED ENV{XV6_WEBKIT_REF_SYSROOT})
     set(_webkit_default_ref_sysroot "$ENV{XV6_WEBKIT_REF_SYSROOT}")
+    set(_webkit_force_ref_sysroot TRUE)
 else()
     set(_webkit_default_ref_sysroot "${CMAKE_CURRENT_LIST_DIR}/sysroot")
+    set(_webkit_force_ref_sysroot FALSE)
 endif()
 
 set(XV6_WEBKIT_REF_SYSROOT "${_webkit_default_ref_sysroot}"
     CACHE PATH "Optional sysroot containing a WebKitGTK xv6 runtime to stage")
-if(XV6_WEBKIT_REF_SYSROOT MATCHES "/xv6-tmp/build-x86/sysroot$"
+if(_webkit_force_ref_sysroot
+   AND NOT XV6_WEBKIT_REF_SYSROOT STREQUAL _webkit_default_ref_sysroot)
+    set(XV6_WEBKIT_REF_SYSROOT "${_webkit_default_ref_sysroot}" CACHE PATH
+        "Optional sysroot containing a WebKitGTK xv6 runtime to stage" FORCE)
+elseif(XV6_WEBKIT_REF_SYSROOT MATCHES "/xv6-tmp/build-x86/sysroot$"
    AND NOT DEFINED ENV{XV6_WEBKIT_REF_SYSROOT})
     set(XV6_WEBKIT_REF_SYSROOT "${_webkit_default_ref_sysroot}" CACHE PATH
         "Optional sysroot containing a WebKitGTK xv6 runtime to stage" FORCE)
