@@ -176,6 +176,33 @@ cp -f \"\${NS_RES}\"/*.css \"\${NS_RES}\"/*.html \"\${NS_RES}\"/*.png \"\${NS_SH
 cp -f \"\${NS_RES}\"/*.ico \"\${NS_RES}\"/*.xpm \"\${NS_SHARE}/\" 2>/dev/null || true
 cp -f \"\${NS_RES}/SearchEngines\" \"\${NS_RES}/Messages\" \"\${NS_RES}/accelerators\" \"\${NS_SHARE}/\" 2>/dev/null || true
 [ -f \"\${NS_SRC}/resources/ca-bundle\" ] && cp -f \"\${NS_SRC}/resources/ca-bundle\" \"\${NS_SHARE}/ca-bundle\"
+cat > \"\${NS_SHARE}/welcome.html\" << 'WELCOME_EOF'
+<!doctype html>
+<html>
+<head>
+<meta charset=\"utf-8\">
+<title>Welcome to NetSurf</title>
+<style>
+html,body{margin:0;padding:0;background:#fff;color:#111;font-family:sans-serif}
+.banner{background:#94adff;padding:16px 20px}
+.banner img{display:block;width:308px;height:86px}
+main{max-width:760px;margin:28px auto;padding:0 24px;line-height:1.45}
+.panel{background:#eef3ff;border:2px solid #c7d5ff;padding:16px;margin-top:20px}
+code{background:#f5f5f5;padding:1px 4px}
+</style>
+</head>
+<body>
+<div class=\"banner\"><img src=\"about:logo\" alt=\"NetSurf\"></div>
+<main>
+<h1>Welcome to NetSurf</h1>
+<p>This xv6 build is using a local start page so opening the browser does not immediately depend on external networking.</p>
+<div class=\"panel\">
+<p>Try local URLs such as <code>file:///share/netsurf/welcome.html</code>, or enter a network URL manually when you want to test the TCP/IP path.</p>
+</div>
+</main>
+</body>
+</html>
+WELCOME_EOF
 cp -rf \"\${NS_RES}/icons/.\"   \"\${NS_SHARE}/icons/\"   2>/dev/null || true
 cp -rf \"\${NS_RES}/throbber/.\" \"\${NS_SHARE}/throbber/\" 2>/dev/null || true
 cp -f  \"\${NS_RES}/gtk3/\"*.ui \"\${NS_SHARE}/gtk3/\" 2>/dev/null || true
