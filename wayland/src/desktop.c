@@ -65,6 +65,7 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1)
     pid_t pid = fork();
     if (pid == 0) {
         int is_netsurf = strcmp(name, "netsurf") == 0;
+        int is_minibrowser = strcmp(name, "MiniBrowser") == 0;
 
         if (is_netsurf) {
             mkdir("/.netsurf", 0755);
@@ -82,10 +83,15 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1)
             }
         }
 
-        char *argv[] = { (char *)name, (char *)arg1, NULL };
+        char *argv_default[] = { (char *)name, (char *)arg1, NULL };
         if (arg1 == NULL)
-            argv[1] = NULL;
-        char *envp[] = {
+            argv_default[1] = NULL;
+        char *argv_minibrowser[] = {
+            (char *)name,
+            (char *)(arg1 ? arg1 : "https://www.google.com/"),
+            NULL,
+        };
+        char *envp_default[] = {
             "HOME=/",
             "PATH=/bin:/usr/bin",
             "XDG_RUNTIME_DIR=/tmp",
@@ -97,7 +103,28 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1)
             "SSL_CERT_FILE=/share/netsurf/ca-bundle",
             NULL
         };
-        execve(path, argv, envp);
+        char *envp_minibrowser[] = {
+            "HOME=/",
+            "PATH=/bin:/usr/bin",
+            "XDG_RUNTIME_DIR=/tmp",
+            "XDG_CACHE_HOME=/tmp/.cache",
+            "WAYLAND_DISPLAY=wayland-0",
+            "GDK_BACKEND=wayland",
+            "XCURSOR_PATH=/share/icons",
+            "XCURSOR_THEME=Adwaita",
+            "SSL_CERT_FILE=/share/netsurf/ca-bundle",
+            "GIO_MODULE_DIR=/lib/gio/modules",
+            "GIO_USE_TLS=openssl",
+            "WEBKIT_EXEC_PATH=/libexec/webkit2gtk-4.1",
+            "WEBKIT_INJECTED_BUNDLE_PATH=/lib/webkit2gtk-4.1/injected-bundle",
+            "WEBKIT_DISABLE_NETWORK_CACHE=1",
+            "WEBKIT_DISABLE_COMPOSITING_MODE=1",
+            "SOUP_FORCE_HTTP1=1",
+            NULL
+        };
+        execve(path,
+               is_minibrowser ? argv_minibrowser : argv_default,
+               is_minibrowser ? envp_minibrowser : envp_default);
         _exit(127);
     }
     return pid;
@@ -157,6 +184,22 @@ static int netsurf_disabled_by_cmdline(void)
     return token_is_disabled(buf, "netsurf");
 }
 
+static int webkit_enabled_by_cmdline(void)
+{
+    char buf[512];
+    int fd = open("/proc/cmdline", O_RDONLY);
+    if (fd < 0)
+        return 0;
+
+    int n = read(fd, buf, sizeof(buf) - 1);
+    close(fd);
+    if (n <= 0)
+        return 0;
+    buf[n] = '\0';
+
+    return !token_is_disabled(buf, "webkit") && strstr(buf, "webkit=1") != NULL;
+}
+
 int main(void)
 {
     signal(SIGINT,  sighandler);
@@ -181,7 +224,17 @@ int main(void)
     }
 
     /* 3. Launch NetSurf as a Wayland GTK3 client unless disabled. */
-    if (netsurf_disabled_by_cmdline()) {
+    if (webkit_enabled_by_cmdline()) {
+        client_pid = launch_client("/libexec/webkit2gtk-4.1/MiniBrowser",
+                                   "MiniBrowser",
+                                   "https://www.google.com/");
+        if (client_pid < 0) {
+            perror("[desktop] fork MiniBrowser");
+            cleanup();
+            return 1;
+        }
+        fprintf(stderr, "[desktop] MiniBrowser pid=%d\n", client_pid);
+    } else if (netsurf_disabled_by_cmdline()) {
         client_pid = 0;
         fprintf(stderr, "[desktop] netsurf disabled by cmdline\n");
     } else {

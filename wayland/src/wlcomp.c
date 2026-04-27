@@ -1874,6 +1874,7 @@ static void launch_desktop_app_arg(const char *path, const char *name,
             "WEBKIT_DEBUG=all",
             "WEBKIT_EXEC_PATH=/libexec/webkit2gtk-4.1",
             "WEBKIT_INJECTED_BUNDLE_PATH=/lib/webkit2gtk-4.1/injected-bundle",
+            "WEBKIT_DISABLE_NETWORK_CACHE=1",
             "WEBKIT_DISABLE_COMPOSITING_MODE=1",
             "SOUP_FORCE_HTTP1=1",
             NULL

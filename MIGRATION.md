@@ -131,7 +131,7 @@ For each port:
 
 1. **Source provisioning.** Either:
    - `git submodule add <upstream-url> ports/<name>/src`
-   - Or symlink `ports/<name>/src` → `/home/es/xv6/xv6-tmp/user/<name>` for fast iteration.
+   - Or symlink `ports/<name>/src` to a local reference checkout for fast iteration.
 
    Upstream URLs (from `xv6-tmp/.gitmodules`):
    - openssl  → `https://github.com/openssl/openssl.git` (branch `openssl-3.0`)

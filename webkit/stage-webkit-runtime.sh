@@ -1,12 +1,27 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ref="${1:?reference sysroot required}"
+ref="${1:-}"
 dst="${2:?destination sysroot required}"
 
-if [[ ! -x "${ref}/libexec/webkit2gtk-4.1/MiniBrowser" ]]; then
+if [[ -z "${ref}" || ! -x "${ref}/libexec/webkit2gtk-4.1/MiniBrowser" ]]; then
     echo "ports/webkit: warning: ${ref} does not contain WebKitGTK; skipping stage" >&2
     mkdir -p "${dst}/libexec/webkit2gtk-4.1"
+    rm -rf \
+        "${dst}/lib/webkit2gtk-4.1" \
+        "${dst}/include/webkitgtk-4.1"
+    rm -f \
+        "${dst}/bin/jsc" \
+        "${dst}/lib/libwebkit2gtk-4.1.so"* \
+        "${dst}/lib/libjavascriptcoregtk-4.1.so"* \
+        "${dst}/lib/pkgconfig/webkit2gtk-4.1.pc" \
+        "${dst}/lib/pkgconfig/webkit2gtk-web-extension-4.1.pc" \
+        "${dst}/lib/pkgconfig/javascriptcoregtk-4.1.pc" \
+        "${dst}/libexec/webkit2gtk-4.1/MiniBrowser" \
+        "${dst}/libexec/webkit2gtk-4.1/WebKitNetworkProcess" \
+        "${dst}/libexec/webkit2gtk-4.1/WebKitWebProcess" \
+        "${dst}/libexec/webkit2gtk-4.1/jsc" \
+        "${dst}/libexec/webkit2gtk-4.1/.webkit_install_stamp"
     touch "${dst}/libexec/webkit2gtk-4.1/.webkit-stage.stamp"
     exit 0
 fi
