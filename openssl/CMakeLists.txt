@@ -12,6 +12,7 @@
 # Outputs (installed into ${XV6_SYSROOT}):
 #   /lib/libcrypto.a, /lib/libssl.a
 #   /include/openssl/*.h
+#   /bin/openssl
 
 cmake_minimum_required(VERSION 3.16)
 project(xv6-port-openssl LANGUAGES NONE)
@@ -51,6 +52,8 @@ endif()
 set(_libcrypto ${XV6_SYSROOT}/lib/libcrypto.a)
 set(_libssl    ${XV6_SYSROOT}/lib/libssl.a)
 set(_header    ${XV6_SYSROOT}/include/openssl/ssl.h)
+set(_openssl_cli_build ${_build}/apps/openssl)
+set(_openssl_cli       ${XV6_SYSROOT}/bin/openssl)
 
 # Parallel jobs (umbrella sets XV6_PARALLEL_JOBS; standalone falls back).
 if(NOT DEFINED XV6_PARALLEL_JOBS OR XV6_PARALLEL_JOBS STREQUAL "")
@@ -94,9 +97,18 @@ add_custom_command(
     VERBATIM)
 
 add_custom_target(port-openssl ALL
-    DEPENDS ${_libcrypto} ${_libssl} ${_header})
+    DEPENDS ${_libcrypto} ${_libssl} ${_header} ${_openssl_cli})
+
+add_custom_command(
+    OUTPUT ${_openssl_cli}
+    COMMAND ${CMAKE_COMMAND} -E chdir ${_build} make build_programs -j${XV6_PARALLEL_JOBS}
+    COMMAND ${CMAKE_COMMAND} -E make_directory ${XV6_SYSROOT}/bin
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different ${_openssl_cli_build} ${_openssl_cli}
+    DEPENDS ${_libcrypto} ${_libssl} ${_header}
+    COMMENT "Installing port openssl CLI"
+    VERBATIM)
 
 add_custom_target(port-openssl-clean
     COMMAND ${CMAKE_COMMAND} -E rm -rf ${_build}
-    COMMAND ${CMAKE_COMMAND} -E rm -f  ${_libcrypto} ${_libssl}
+    COMMAND ${CMAKE_COMMAND} -E rm -f  ${_libcrypto} ${_libssl} ${_openssl_cli}
     COMMENT "Removing openssl build artifacts")

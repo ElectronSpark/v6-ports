@@ -140,3 +140,6 @@
 [submodule "netsurf/src"]
 	path = netsurf/src
 	url = git://git.netsurf-browser.org/netsurf.git
+[submodule "openssh/src"]
+	path = openssh/src
+	url = https://github.com/openssh/openssh-portable.git
