@@ -1785,8 +1785,13 @@ static void launch_desktop_app_arg(const char *path, const char *name,
             "XCURSOR_PATH=/share/icons",
             "XCURSOR_THEME=Adwaita",
             "SSL_CERT_FILE=/share/netsurf/ca-bundle",
+            "GIO_MODULE_DIR=/lib/gio/modules",
+            "GIO_USE_TLS=openssl",
             "G_MESSAGES_DEBUG=all",
             "WEBKIT_DEBUG=all",
+            "WEBKIT_EXEC_PATH=/libexec/webkit2gtk-4.1",
+            "WEBKIT_INJECTED_BUNDLE_PATH=/lib/webkit2gtk-4.1/injected-bundle",
+            "WEBKIT_DISABLE_COMPOSITING_MODE=1",
             "SOUP_FORCE_HTTP1=1",
             NULL
         };
