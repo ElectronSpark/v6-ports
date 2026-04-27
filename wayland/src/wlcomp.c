@@ -1787,28 +1787,6 @@ static void destroy_surface_client(struct wlcomp_surface *surf)
         wl_client_destroy(client);
 }
 
-static void destroy_clients_for_pid(pid_t pid)
-{
-    int again;
-
-    if (pid <= 0)
-        return;
-
-    do {
-        struct wlcomp_surface *surf;
-        again = 0;
-        wl_list_for_each(surf, &g_surfaces, link) {
-            if (surf->client_pid == pid && surf->resource) {
-                struct wl_client *client = wl_resource_get_client(surf->resource);
-                if (client)
-                    wl_client_destroy(client);
-                again = 1;
-                break;
-            }
-        }
-    } while (again);
-}
-
 static void launch_desktop_app_arg(const char *path, const char *name,
                                    const char *arg)
 {
@@ -1935,8 +1913,6 @@ static void reap_children(void)
                 else
                     fprintf(stderr, "wlcomp: child pid %d wait status 0x%x\n",
                             g_children[i], status);
-                destroy_clients_for_pid(g_children[i]);
-                terminate_client_pid(g_children[i]);
                 g_children[i] = 0;
             }
         }
