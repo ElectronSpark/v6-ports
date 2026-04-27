@@ -131,6 +131,7 @@ struct wlcomp_surface {
     int     minimized;
     int     maximized;        /* 1 = currently maximized */
     int     is_cursor;        /* 1 = cursor surface, skip normal rendering */
+    pid_t   client_pid;       /* pid from Wayland credentials, if known */
     /* Saved geometry for restore from maximize */
     int32_t saved_x, saved_y, saved_w, saved_h;
     char    title[64];
@@ -153,6 +154,8 @@ static int g_grab_mode;  /* 0=none, 1=move, 2=resize */
 static uint32_t g_grab_edges;  /* resize edges bitmask */
 static int32_t g_grab_start_mx, g_grab_start_my;  /* cursor pos at grab start */
 static int32_t g_grab_start_x, g_grab_start_y;    /* surface pos at grab start */
+
+#define WAYLAND_CLOSE_SZ 18
 static int32_t g_grab_start_w, g_grab_start_h;    /* surface size at grab start */
 
 static struct wlcomp_surface *surface_from_resource(struct wl_resource *r)
@@ -635,6 +638,9 @@ static void comp_create_surface(struct wl_client *client,
                                 uint32_t id)
 {
     (void)resource;
+    pid_t client_pid = 0;
+    uid_t client_uid = 0;
+    gid_t client_gid = 0;
 
     struct wlcomp_surface *surf = calloc(1, sizeof(*surf));
     if (!surf) {
@@ -651,6 +657,8 @@ static void comp_create_surface(struct wl_client *client,
     }
 
     surf->resource = res;
+    wl_client_get_credentials(client, &client_pid, &client_uid, &client_gid);
+    surf->client_pid = client_pid;
     wl_resource_set_implementation(res, &surface_impl, surf,
                                   surface_destroy_handler);
     wl_list_insert(&g_surfaces, &surf->link);
@@ -1689,6 +1697,32 @@ static int g_selected_icon = -1;       /* currently selected desktop icon */
 #define MAX_CHILDREN 16
 static pid_t g_children[MAX_CHILDREN];
 
+static void terminate_client_pid(pid_t pid)
+{
+    if (pid <= 0)
+        return;
+
+    if (kill(-pid, SIGTERM) == 0) {
+        kill(-pid, SIGKILL);
+    } else {
+        kill(pid, SIGTERM);
+        kill(pid, SIGKILL);
+    }
+}
+
+static void destroy_surface_client(struct wlcomp_surface *surf)
+{
+    struct wl_client *client;
+
+    if (!surf || !surf->resource)
+        return;
+
+    terminate_client_pid(surf->client_pid);
+    client = wl_resource_get_client(surf->resource);
+    if (client)
+        wl_client_destroy(client);
+}
+
 static void launch_desktop_app_arg(const char *path, const char *name,
                                    const char *arg)
 {
@@ -1705,6 +1739,8 @@ static void launch_desktop_app_arg(const char *path, const char *name,
     if (pid < 0) return;
 
     if (pid == 0) {
+        setpgid(0, 0);
+
         /* Child: redirect stderr to a log file for debugging */
         int logfd = open("/tmp/app_log.txt",
                          O_WRONLY | O_CREAT | O_TRUNC, 0644);
@@ -1804,6 +1840,7 @@ static void launch_desktop_app_arg(const char *path, const char *name,
         _exit(127);
     }
 
+    setpgid(pid, pid);
     g_children[slot] = pid;
     fprintf(stderr, "wlcomp: launched %s (pid %d)\n", name, pid);
 }
@@ -1829,6 +1866,7 @@ static void reap_children(void)
                 else
                     fprintf(stderr, "wlcomp: child pid %d wait status 0x%x\n",
                             g_children[i], status);
+                terminate_client_pid(g_children[i]);
                 g_children[i] = 0;
             }
         }
@@ -2226,6 +2264,21 @@ static uint32_t surface_taskbar_color(const struct wlcomp_surface *surf,
     if (strcmp(surf->app_id, "netsurf") == 0)
         return 0xFF315A66;
     return 0xFF2E3440;
+}
+
+static int surface_close_hit(const struct wlcomp_surface *surf, int mx, int my)
+{
+    int x, y, w;
+
+    if (!surf || !surf->mapped || surf->minimized || !surf->committed_buf ||
+        surf->is_cursor)
+        return 0;
+
+    w = surf->committed_buf->width;
+    x = surf->x + w - WAYLAND_CLOSE_SZ - 4;
+    y = surf->y + 4;
+    return mx >= x && mx < x + WAYLAND_CLOSE_SZ &&
+           my >= y && my < y + WAYLAND_CLOSE_SZ;
 }
 
 /* Draw the bottom taskbar */
@@ -4240,6 +4293,16 @@ static void composite_and_flip(void)
                 }
             }
         }
+
+        {
+            int cx = surf->x + bw - WAYLAND_CLOSE_SZ - 4;
+            int cy = surf->y + 4;
+            uint32_t bg = (surf == g_focused) ? 0xFFE05252 : 0xFF6C3333;
+            draw_rect(g_fb_buf, fb_w, fb_h, cx, cy,
+                      WAYLAND_CLOSE_SZ, WAYLAND_CLOSE_SZ, bg);
+            draw_string(g_fb_buf, fb_w, fb_h, cx + 5, cy + 2,
+                        "x", 0xFFFFFFFF, 1);
+        }
     }
 
     /* Draw foreground layer: internal windows on top when an iwin is focused */
@@ -4508,6 +4571,10 @@ static void process_mouse(void)
          * This prevents icons from stealing clicks from overlapping windows. */
         if (handle_iwin_click(g_cursor_x, g_cursor_y)) {
             /* Internal window consumed the click */
+        } else if (target && surface_close_hit(target, g_cursor_x, g_cursor_y)) {
+            destroy_surface_client(target);
+            target = NULL;
+            desktop_handled = 1;
         } else if (target) {
             /* Clicking on Wayland surface — unfocus internal windows */
             g_iwin_focus = -1;
@@ -4822,7 +4889,7 @@ int main(int argc, char **argv)
 
     signal(SIGINT, sig_handler);
     signal(SIGTERM, sig_handler);
-    signal(SIGCHLD, SIG_IGN);  /* auto-reap children */
+    signal(SIGCHLD, SIG_DFL);
 
     fprintf(stderr, "wlcomp: starting Wayland compositor\n");
 
