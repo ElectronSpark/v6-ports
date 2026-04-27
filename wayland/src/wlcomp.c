@@ -134,6 +134,7 @@ struct wlcomp_surface {
     /* Saved geometry for restore from maximize */
     int32_t saved_x, saved_y, saved_w, saved_h;
     char    title[64];
+    char    app_id[64];
     struct wl_list link;  /* in g_surfaces */
 };
 
@@ -157,6 +158,22 @@ static int32_t g_grab_start_w, g_grab_start_h;    /* surface size at grab start 
 static struct wlcomp_surface *surface_from_resource(struct wl_resource *r)
 {
     return (struct wlcomp_surface *)wl_resource_get_user_data(r);
+}
+
+static inline uint32_t buffer_pixel_alpha(struct wlcomp_buffer *buf,
+                                          uint32_t pixel)
+{
+    if (buf->format == WL_SHM_FORMAT_XRGB8888)
+        return 0xFF;
+    return (pixel >> 24) & 0xFF;
+}
+
+static inline uint32_t buffer_pixel_argb(struct wlcomp_buffer *buf,
+                                         uint32_t pixel)
+{
+    if (buf->format == WL_SHM_FORMAT_XRGB8888)
+        return pixel | 0xFF000000;
+    return pixel;
 }
 
 /* Find top surface at a point */
@@ -706,7 +723,14 @@ static void toplevel_set_title(struct wl_client *c, struct wl_resource *r,
 static void toplevel_set_app_id(struct wl_client *c, struct wl_resource *r,
                                 const char *app_id)
 {
-    (void)c; (void)r;
+    (void)c;
+    struct wlcomp_surface *surf = wl_resource_get_user_data(r);
+    if (surf && app_id) {
+        int i;
+        for (i = 0; i < 63 && app_id[i]; i++)
+            surf->app_id[i] = app_id[i];
+        surf->app_id[i] = '\0';
+    }
     fprintf(stderr, "wlcomp: client app_id: %s\n", app_id);
 }
 
@@ -1697,15 +1721,15 @@ static void launch_desktop_app(const char *path, const char *name)
             if (fd >= 0) {
                 const char *ch =
                     "ca_bundle:/share/netsurf/ca-bundle\n"
-                    "homepage_url:http://127.0.0.1/\n"
+                    "homepage_url:file:///share/netsurf/welcome.html\n"
                     "curl_fetch_timeout:30\n";
                 write(fd, ch, strlen(ch));
                 close(fd);
             }
         }
 
-        if (is_netsurf || is_minibrowser) {
-            /* Wait for Flask web server on port 80 before launching */
+        if (is_minibrowser) {
+            /* Wait for Flask web server on port 80 before launching. */
             for (int i = 0; i < 60; i++) {
                 int s = socket(AF_INET, SOCK_STREAM, 0);
                 if (s < 0) break;
@@ -1735,6 +1759,7 @@ static void launch_desktop_app(const char *path, const char *name)
             "WAYLAND_DISPLAY=wayland-0",
             "GDK_BACKEND=wayland",
             "XCURSOR_PATH=/share/icons",
+            "XCURSOR_THEME=Adwaita",
             "SSL_CERT_FILE=/share/netsurf/ca-bundle",
             "G_MESSAGES_DEBUG=all",
             "WEBKIT_DEBUG=all",
@@ -1747,6 +1772,7 @@ static void launch_desktop_app(const char *path, const char *name)
             "WAYLAND_DISPLAY=wayland-0",
             "GDK_BACKEND=wayland",
             "XCURSOR_PATH=/share/icons",
+            "XCURSOR_THEME=Adwaita",
             "SSL_CERT_FILE=/share/netsurf/ca-bundle",
             "G_MESSAGES_DEBUG=all",
             "WEBKIT_DEBUG=all",
@@ -1970,6 +1996,33 @@ static int g_iwin_cascade;      /* cascade counter for positioning */
 #define TB_TASK_W   120   /* max width of each task button */
 #define TB_TASK_GAP  4    /* gap between task buttons */
 
+static int surface_has_taskbar_button(const struct wlcomp_surface *surf)
+{
+    return surf && surf->xdg_toplevel && !surf->is_cursor &&
+           (surf->mapped || surf->title[0] || surf->app_id[0]);
+}
+
+static const char *surface_taskbar_label(const struct wlcomp_surface *surf)
+{
+    if (strcmp(surf->app_id, "netsurf") == 0)
+        return "NetSurf";
+    if (surf->title[0])
+        return surf->title;
+    if (surf->app_id[0])
+        return surf->app_id;
+    return "Window";
+}
+
+static uint32_t surface_taskbar_color(const struct wlcomp_surface *surf,
+                                      int focused)
+{
+    if (focused)
+        return 0xFF4A6FA5;
+    if (strcmp(surf->app_id, "netsurf") == 0)
+        return 0xFF315A66;
+    return 0xFF2E3440;
+}
+
 /* Draw the bottom taskbar */
 static void draw_taskbar(uint32_t *fb, int fb_w, int fb_h)
 {
@@ -2009,11 +2062,12 @@ static void draw_taskbar(uint32_t *fb, int fb_w, int fb_h)
     /* Wayland surfaces */
     struct wlcomp_surface *surf;
     wl_list_for_each(surf, &g_surfaces, link) {
-        if (!surf->mapped || tx + TB_TASK_W > right_limit) continue;
+        if (!surface_has_taskbar_button(surf) ||
+            tx + TB_TASK_W > right_limit) continue;
         int focused = (surf == g_focused && g_iwin_focus < 0);
-        uint32_t bg = focused ? 0xFF4A6FA5 : 0xFF2E3440;
+        uint32_t bg = surface_taskbar_color(surf, focused);
         draw_rounded_rect(fb, fb_w, fb_h, tx, btn_y, TB_TASK_W, TB_BTN_H, 3, bg);
-        const char *name = surf->title[0] ? surf->title : "Window";
+        const char *name = surface_taskbar_label(surf);
         char lbl[16];
         int j;
         for (j = 0; j < 14 && name[j]; j++)
@@ -2078,7 +2132,8 @@ static int taskbar_task_hit(int mx, int my, int fb_w, int fb_h)
     /* Wayland surfaces */
     struct wlcomp_surface *surf;
     wl_list_for_each(surf, &g_surfaces, link) {
-        if (!surf->mapped || tx + TB_TASK_W > right_limit) continue;
+        if (!surface_has_taskbar_button(surf) ||
+            tx + TB_TASK_W > right_limit) continue;
         if (mx >= tx && mx < tx + TB_TASK_W) {
             g_iwin_focus = -1;
             if (surf->minimized) {
@@ -3859,8 +3914,9 @@ static void composite_and_flip(void)
             for (int32_t col = 0; col < bw; col++) {
                 int32_t dx = surf->x + col;
                 if (dx < 0 || dx >= (int32_t)g_fb_w) continue;
-                uint32_t pixel = src[row * src_stride_px + col];
-                uint32_t a = (pixel >> 24) & 0xFF;
+                uint32_t pixel = buffer_pixel_argb(buf,
+                    src[row * src_stride_px + col]);
+                uint32_t a = buffer_pixel_alpha(buf, pixel);
                 if (a == 0xFF) {
                     g_fb_buf[dy * g_fb_w + dx] = pixel;
                 } else if (a > 0) {
@@ -3905,8 +3961,9 @@ static void composite_and_flip(void)
             for (int32_t col = 0; col < cw; col++) {
                 int32_t dx = ox + col;
                 if (dx < 0 || dx >= (int32_t)g_fb_w) continue;
-                uint32_t pixel = csrc[row * cstride + col];
-                uint32_t a = (pixel >> 24) & 0xFF;
+                uint32_t pixel = buffer_pixel_argb(cbuf,
+                    csrc[row * cstride + col]);
+                uint32_t a = buffer_pixel_alpha(cbuf, pixel);
                 if (a == 0xFF) {
                     g_fb_buf[dy * g_fb_w + dx] = pixel;
                 } else if (a > 0) {
@@ -3970,18 +4027,15 @@ static void composite_and_flip(void)
     cmd.pixels = (uint64_t)(uintptr_t)g_fb_buf;
     ioctl(g_fb_fd, FB_GPU_BLIT, &cmd);
 
-    /* Fire frame callbacks and release buffers */
+    /* Fire frame callbacks.  Keep current committed buffers owned until
+     * replacement; releasing them here lets clients reuse storage that we
+     * still composite from. */
     uint32_t now = get_time_ms();
     wl_list_for_each(surf, &g_surfaces, link) {
         if (surf->frame_cb) {
             wl_callback_send_done(surf->frame_cb, now);
             wl_resource_destroy(surf->frame_cb);
             surf->frame_cb = NULL;
-        }
-        if (surf->committed_buf && surf->committed_buf->resource &&
-            !surf->buffer_released) {
-            wl_buffer_send_release(surf->committed_buf->resource);
-            surf->buffer_released = 1;
         }
     }
 }

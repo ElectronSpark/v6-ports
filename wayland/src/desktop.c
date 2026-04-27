@@ -64,6 +64,22 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1)
 {
     pid_t pid = fork();
     if (pid == 0) {
+        int is_netsurf = strcmp(name, "netsurf") == 0;
+
+        if (is_netsurf) {
+            mkdir("/.netsurf", 0755);
+            int fd = open("/.netsurf/Choices",
+                          O_WRONLY | O_CREAT | O_TRUNC, 0644);
+            if (fd >= 0) {
+                const char *ch =
+                    "ca_bundle:/share/netsurf/ca-bundle\n"
+                    "homepage_url:file:///share/netsurf/welcome.html\n"
+                    "curl_fetch_timeout:30\n";
+                write(fd, ch, strlen(ch));
+                close(fd);
+            }
+        }
+
         char *argv[] = { (char *)name, (char *)arg1, NULL };
         if (arg1 == NULL)
             argv[1] = NULL;
@@ -74,6 +90,8 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1)
             "WAYLAND_DISPLAY=wayland-0",
             "GDK_BACKEND=wayland",
             "XCURSOR_PATH=/share/icons",
+            "XCURSOR_THEME=Adwaita",
+            "SSL_CERT_FILE=/share/netsurf/ca-bundle",
             NULL
         };
         execve(path, argv, envp);
