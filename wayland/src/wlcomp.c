@@ -13,9 +13,6 @@
 #include <fcntl.h>
 #include <errno.h>
 #include <signal.h>
-#include <sys/socket.h>
-#include <sys/un.h>
-#include <netinet/in.h>
 #include <sys/epoll.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
@@ -104,6 +101,7 @@ static struct wl_global *g_xdg_wm_global;
  * ══════════════════════════════════════════════════════════════════════ */
 
 #define MAX_SURFACES 32
+#define WAYLAND_CLIENT_BUFFER_LIMIT (1024 * 1024)
 
 struct wlcomp_shm_pool;
 
@@ -1769,23 +1767,6 @@ static void launch_desktop_app_arg(const char *path, const char *name,
                     "curl_fetch_timeout:30\n";
                 write(fd, ch, strlen(ch));
                 close(fd);
-            }
-        }
-
-        if (is_minibrowser) {
-            /* Wait for Flask web server on port 80 before launching. */
-            for (int i = 0; i < 60; i++) {
-                int s = socket(AF_INET, SOCK_STREAM, 0);
-                if (s < 0) break;
-                struct sockaddr_in sa;
-                memset(&sa, 0, sizeof(sa));
-                sa.sin_family = AF_INET;
-                sa.sin_port = htons(80);
-                sa.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-                int r = connect(s, (struct sockaddr *)&sa, sizeof(sa));
-                close(s);
-                if (r == 0) break;
-                usleep(500000);
             }
         }
 
@@ -4905,6 +4886,8 @@ int main(int argc, char **argv)
         fprintf(stderr, "wlcomp: wl_display_create failed\n");
         return 1;
     }
+    wl_display_set_default_max_buffer_size(g_display,
+                                           WAYLAND_CLIENT_BUFFER_LIMIT);
 
     /* Register globals */
     g_compositor_global = wl_global_create(g_display, &wl_compositor_interface,
