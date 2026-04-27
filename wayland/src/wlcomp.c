@@ -1757,7 +1757,7 @@ static void launch_desktop_app_arg(const char *path, const char *name,
         char *argv_noarg[] = { (char *)name, NULL };
         char *argv_minibrowser[] = {
             (char *)name,
-            (char *)(arg ? arg : "http://127.0.0.1/"),
+            (char *)(arg ? arg : "https://www.google.com/"),
             NULL,
         };
         char **argv = arg ? argv_def : argv_noarg;
@@ -1898,6 +1898,17 @@ static void shortcut_add_default(const char *label, int action,
                  color, symbol);
 }
 
+static void shortcut_add_default_arg(const char *label, int action,
+                                     const char *path, const char *name,
+                                     const char *arg,
+                                     uint32_t color, char symbol)
+{
+    if (g_icon_count >= DESKTOP_ICON_MAX)
+        return;
+    shortcut_set(&g_icons[g_icon_count++], label, action, path, name, arg,
+                 color, symbol);
+}
+
 static void load_default_shortcuts(void)
 {
     shortcut_add_default("Terminal", SHORTCUT_TERMINAL, NULL, NULL, 0xFF3D6E9E, '>');
@@ -1911,9 +1922,10 @@ static void load_default_shortcuts(void)
     shortcut_add_default("Editor",   SHORTCUT_EDITOR,   NULL, NULL, 0xFFA65C3D, 'V');
     shortcut_add_default("Browser",  SHORTCUT_EXEC, "/bin/netsurf", "netsurf",
                          0xFF3D6E9E, 'W');
-    shortcut_add_default("WebKit",   SHORTCUT_EXEC,
-                         "/libexec/webkit2gtk-4.1/MiniBrowser", "MiniBrowser",
-                         0xFF9B59B6, 'K');
+    shortcut_add_default_arg("WebKit", SHORTCUT_EXEC,
+                             "/libexec/webkit2gtk-4.1/MiniBrowser",
+                             "MiniBrowser", "https://www.google.com/",
+                             0xFF9B59B6, 'K');
 }
 
 static int parse_desktop_shortcut(const char *path, desktop_icon_t *out)
