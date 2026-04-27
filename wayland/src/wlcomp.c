@@ -130,6 +130,8 @@ struct wlcomp_surface {
     int     maximized;        /* 1 = currently maximized */
     int     is_cursor;        /* 1 = cursor surface, skip normal rendering */
     pid_t   client_pid;       /* pid from Wayland credentials, if known */
+    int     has_window_geometry;
+    int32_t window_x, window_y, window_w, window_h;
     /* Saved geometry for restore from maximize */
     int32_t saved_x, saved_y, saved_w, saved_h;
     char    title[64];
@@ -177,6 +179,58 @@ static inline uint32_t buffer_pixel_argb(struct wlcomp_buffer *buf,
     return pixel;
 }
 
+static inline void blend_pixel(uint32_t *dst, struct wlcomp_buffer *buf,
+                               uint32_t src_pixel)
+{
+    uint32_t pixel = buffer_pixel_argb(buf, src_pixel);
+    uint32_t a = buffer_pixel_alpha(buf, pixel);
+
+    if (a == 0xFF) {
+        *dst = pixel;
+    } else if (a > 0) {
+        uint32_t bg = *dst;
+        uint32_t inv_a = 255 - a;
+        uint32_t r, g, b;
+
+        if (buf->format == WL_SHM_FORMAT_ARGB8888) {
+            /* Wayland ARGB8888 is premultiplied. */
+            r = ((pixel >> 16) & 0xFF) + (((bg >> 16) & 0xFF) * inv_a) / 255;
+            g = ((pixel >> 8) & 0xFF) + (((bg >> 8) & 0xFF) * inv_a) / 255;
+            b = (pixel & 0xFF) + ((bg & 0xFF) * inv_a) / 255;
+        } else {
+            r = (((pixel >> 16) & 0xFF) * a +
+                 ((bg >> 16) & 0xFF) * inv_a) / 255;
+            g = (((pixel >> 8) & 0xFF) * a +
+                 ((bg >> 8) & 0xFF) * inv_a) / 255;
+            b = ((pixel & 0xFF) * a + (bg & 0xFF) * inv_a) / 255;
+        }
+        if (r > 255) r = 255;
+        if (g > 255) g = 255;
+        if (b > 255) b = 255;
+        *dst = 0xFF000000 | (r << 16) | (g << 8) | b;
+    }
+}
+
+static void surface_window_geometry(const struct wlcomp_surface *s,
+                                    int32_t *gx, int32_t *gy,
+                                    int32_t *gw, int32_t *gh)
+{
+    int32_t bw = s && s->committed_buf ? s->committed_buf->width : 1;
+    int32_t bh = s && s->committed_buf ? s->committed_buf->height : 1;
+
+    if (s && s->has_window_geometry && s->window_w > 0 && s->window_h > 0) {
+        *gx = s->window_x;
+        *gy = s->window_y;
+        *gw = s->window_w;
+        *gh = s->window_h;
+    } else {
+        *gx = 0;
+        *gy = 0;
+        *gw = bw;
+        *gh = bh;
+    }
+}
+
 /* Find top surface at a point */
 static struct wlcomp_surface *surface_at(int32_t px, int32_t py,
                                           int32_t *sx, int32_t *sy)
@@ -190,12 +244,15 @@ static struct wlcomp_surface *surface_at(int32_t px, int32_t py,
     wl_list_for_each_reverse(s, &g_surfaces, link) {
         if (!s->mapped || s->minimized || !s->committed_buf || s->is_cursor)
             continue;
-        int32_t bw = s->committed_buf->width;
-        int32_t bh = s->committed_buf->height;
-        if (px >= s->x && px < s->x + bw &&
-            py >= s->y && py < s->y + bh) {
-            if (sx) *sx = px - s->x;
-            if (sy) *sy = py - s->y;
+        int32_t gx, gy, gw, gh;
+        int32_t draw_x, draw_y;
+        surface_window_geometry(s, &gx, &gy, &gw, &gh);
+        draw_x = s->x - gx;
+        draw_y = s->y - gy;
+        if (px >= s->x && px < s->x + gw &&
+            py >= s->y && py < s->y + gh) {
+            if (sx) *sx = px - draw_x;
+            if (sy) *sy = py - draw_y;
             return s;
         }
     }
@@ -1001,7 +1058,16 @@ static void xdg_surface_set_window_geometry(struct wl_client *c,
                                             int32_t x, int32_t y,
                                             int32_t w, int32_t h)
 {
-    (void)c; (void)r; (void)x; (void)y; (void)w; (void)h;
+    (void)c;
+    struct wlcomp_surface *surf = wl_resource_get_user_data(r);
+    if (!surf || w <= 0 || h <= 0)
+        return;
+
+    surf->has_window_geometry = 1;
+    surf->window_x = x;
+    surf->window_y = y;
+    surf->window_w = w;
+    surf->window_h = h;
 }
 
 static void xdg_surface_ack_configure(struct wl_client *c,
@@ -1721,6 +1787,28 @@ static void destroy_surface_client(struct wlcomp_surface *surf)
         wl_client_destroy(client);
 }
 
+static void destroy_clients_for_pid(pid_t pid)
+{
+    int again;
+
+    if (pid <= 0)
+        return;
+
+    do {
+        struct wlcomp_surface *surf;
+        again = 0;
+        wl_list_for_each(surf, &g_surfaces, link) {
+            if (surf->client_pid == pid && surf->resource) {
+                struct wl_client *client = wl_resource_get_client(surf->resource);
+                if (client)
+                    wl_client_destroy(client);
+                again = 1;
+                break;
+            }
+        }
+    } while (again);
+}
+
 static void launch_desktop_app_arg(const char *path, const char *name,
                                    const char *arg)
 {
@@ -1847,6 +1935,7 @@ static void reap_children(void)
                 else
                     fprintf(stderr, "wlcomp: child pid %d wait status 0x%x\n",
                             g_children[i], status);
+                destroy_clients_for_pid(g_children[i]);
                 terminate_client_pid(g_children[i]);
                 g_children[i] = 0;
             }
@@ -2249,17 +2338,10 @@ static uint32_t surface_taskbar_color(const struct wlcomp_surface *surf,
 
 static int surface_close_hit(const struct wlcomp_surface *surf, int mx, int my)
 {
-    int x, y, w;
-
-    if (!surf || !surf->mapped || surf->minimized || !surf->committed_buf ||
-        surf->is_cursor)
-        return 0;
-
-    w = surf->committed_buf->width;
-    x = surf->x + w - WAYLAND_CLOSE_SZ - 4;
-    y = surf->y + 4;
-    return mx >= x && mx < x + WAYLAND_CLOSE_SZ &&
-           my >= y && my < y + WAYLAND_CLOSE_SZ;
+    (void)surf;
+    (void)mx;
+    (void)my;
+    return 0;
 }
 
 /* Draw the bottom taskbar */
@@ -4249,40 +4331,24 @@ static void composite_and_flip(void)
         int32_t bw = buf->width;
         int32_t bh = buf->height;
         int32_t src_stride_px = buf->stride / 4;
+        int32_t gx, gy, gw, gh;
+        int32_t draw_x, draw_y;
+
+        (void)gw;
+        (void)gh;
+        surface_window_geometry(surf, &gx, &gy, &gw, &gh);
+        draw_x = surf->x - gx;
+        draw_y = surf->y - gy;
 
         for (int32_t row = 0; row < bh; row++) {
-            int32_t dy = surf->y + row;
+            int32_t dy = draw_y + row;
             if (dy < 0 || dy >= (int32_t)g_fb_h) continue;
             for (int32_t col = 0; col < bw; col++) {
-                int32_t dx = surf->x + col;
+                int32_t dx = draw_x + col;
                 if (dx < 0 || dx >= (int32_t)g_fb_w) continue;
-                uint32_t pixel = buffer_pixel_argb(buf,
-                    src[row * src_stride_px + col]);
-                uint32_t a = buffer_pixel_alpha(buf, pixel);
-                if (a == 0xFF) {
-                    g_fb_buf[dy * g_fb_w + dx] = pixel;
-                } else if (a > 0) {
-                    uint32_t bg = g_fb_buf[dy * g_fb_w + dx];
-                    uint32_t inv_a = 255 - a;
-                    uint32_t r = (((pixel >> 16) & 0xFF) * a +
-                                  ((bg >> 16) & 0xFF) * inv_a) / 255;
-                    uint32_t g = (((pixel >> 8) & 0xFF) * a +
-                                  ((bg >> 8) & 0xFF) * inv_a) / 255;
-                    uint32_t b = ((pixel & 0xFF) * a +
-                                  (bg & 0xFF) * inv_a) / 255;
-                    g_fb_buf[dy * g_fb_w + dx] = 0xFF000000 | (r << 16) | (g << 8) | b;
-                }
+                blend_pixel(&g_fb_buf[dy * g_fb_w + dx], buf,
+                            src[row * src_stride_px + col]);
             }
-        }
-
-        {
-            int cx = surf->x + bw - WAYLAND_CLOSE_SZ - 4;
-            int cy = surf->y + 4;
-            uint32_t bg = (surf == g_focused) ? 0xFFE05252 : 0xFF6C3333;
-            draw_rect(g_fb_buf, fb_w, fb_h, cx, cy,
-                      WAYLAND_CLOSE_SZ, WAYLAND_CLOSE_SZ, bg);
-            draw_string(g_fb_buf, fb_w, fb_h, cx + 5, cy + 2,
-                        "x", 0xFFFFFFFF, 1);
         }
     }
 
@@ -4313,22 +4379,8 @@ static void composite_and_flip(void)
             for (int32_t col = 0; col < cw; col++) {
                 int32_t dx = ox + col;
                 if (dx < 0 || dx >= (int32_t)g_fb_w) continue;
-                uint32_t pixel = buffer_pixel_argb(cbuf,
-                    csrc[row * cstride + col]);
-                uint32_t a = buffer_pixel_alpha(cbuf, pixel);
-                if (a == 0xFF) {
-                    g_fb_buf[dy * g_fb_w + dx] = pixel;
-                } else if (a > 0) {
-                    uint32_t bg = g_fb_buf[dy * g_fb_w + dx];
-                    uint32_t inv_a = 255 - a;
-                    uint32_t r = (((pixel >> 16) & 0xFF) * a +
-                                  ((bg >> 16) & 0xFF) * inv_a) / 255;
-                    uint32_t g = (((pixel >> 8) & 0xFF) * a +
-                                  ((bg >> 8) & 0xFF) * inv_a) / 255;
-                    uint32_t b = ((pixel & 0xFF) * a +
-                                  (bg & 0xFF) * inv_a) / 255;
-                    g_fb_buf[dy * g_fb_w + dx] = 0xFF000000 | (r << 16) | (g << 8) | b;
-                }
+                blend_pixel(&g_fb_buf[dy * g_fb_w + dx], cbuf,
+                            csrc[row * cstride + col]);
             }
         }
     } else {
