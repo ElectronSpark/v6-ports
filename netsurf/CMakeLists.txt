@@ -170,7 +170,8 @@ install -m 0755 \"\$BIN\" \"\${SYSROOT}/bin/netsurf\"
 # ---- Resources ----
 NS_RES=\"\${NS_SRC}/frontends/gtk/res\"
 NS_SHARE=\"\${SYSROOT}/share/netsurf\"
-mkdir -p \"\${NS_SHARE}/icons\" \"\${NS_SHARE}/throbber\" \"\${NS_SHARE}/gtk3\" \"\${NS_SHARE}/fonts\"
+FC_FONT_DIR=\"\${SYSROOT}/usr/share/fonts/truetype/dejavu\"
+mkdir -p \"\${NS_SHARE}/icons\" \"\${NS_SHARE}/throbber\" \"\${NS_SHARE}/gtk3\" \"\${NS_SHARE}/fonts\" \"\${FC_FONT_DIR}\"
 cp -f \"\${NS_RES}\"/*.css \"\${NS_RES}\"/*.html \"\${NS_RES}\"/*.png \"\${NS_SHARE}/\" 2>/dev/null || true
 cp -f \"\${NS_RES}\"/*.ico \"\${NS_RES}\"/*.xpm \"\${NS_SHARE}/\" 2>/dev/null || true
 cp -f \"\${NS_RES}/SearchEngines\" \"\${NS_RES}/Messages\" \"\${NS_RES}/accelerators\" \"\${NS_SHARE}/\" 2>/dev/null || true
@@ -189,7 +190,10 @@ if [ -d \"\$DEJAVU\" ]; then
   for f in DejaVuSans.ttf DejaVuSans-Bold.ttf DejaVuSans-Oblique.ttf \\
            DejaVuSans-BoldOblique.ttf DejaVuSerif.ttf DejaVuSerif-Bold.ttf \\
            DejaVuSansMono.ttf DejaVuSansMono-Bold.ttf; do
-    [ -f \"\$DEJAVU/\$f\" ] && cp -f \"\$DEJAVU/\$f\" \"\${NS_SHARE}/fonts/\"
+    if [ -f \"\$DEJAVU/\$f\" ]; then
+      cp -f \"\$DEJAVU/\$f\" \"\${NS_SHARE}/fonts/\"
+      cp -f \"\$DEJAVU/\$f\" \"\${FC_FONT_DIR}/\"
+    fi
   done
 fi
 

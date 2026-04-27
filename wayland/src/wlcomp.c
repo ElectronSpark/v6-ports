@@ -1716,6 +1716,8 @@ static void launch_desktop_app(const char *path, const char *name)
         /* For netsurf, create Choices file with ca_bundle + homepage */
         if (is_netsurf) {
             mkdir("/.netsurf", 0755);
+            mkdir("/tmp/.cache", 0755);
+            mkdir("/tmp/.cache/fontconfig", 0755);
             int fd = open("/.netsurf/Choices",
                           O_WRONLY | O_CREAT | O_TRUNC, 0644);
             if (fd >= 0) {
@@ -1756,6 +1758,7 @@ static void launch_desktop_app(const char *path, const char *name)
             "HOME=/",
             "PATH=/bin:/usr/bin",
             "XDG_RUNTIME_DIR=/tmp",
+            "XDG_CACHE_HOME=/tmp/.cache",
             "WAYLAND_DISPLAY=wayland-0",
             "GDK_BACKEND=wayland",
             "XCURSOR_PATH=/share/icons",
@@ -1769,6 +1772,7 @@ static void launch_desktop_app(const char *path, const char *name)
             "HOME=/",
             "PATH=/bin:/usr/bin",
             "XDG_RUNTIME_DIR=/tmp",
+            "XDG_CACHE_HOME=/tmp/.cache",
             "WAYLAND_DISPLAY=wayland-0",
             "GDK_BACKEND=wayland",
             "XCURSOR_PATH=/share/icons",
