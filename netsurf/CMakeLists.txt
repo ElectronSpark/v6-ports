@@ -242,7 +242,7 @@ add_custom_target(port-netsurf ALL DEPENDS ${NS_BIN})
 # Inter-port build ordering (other ports' targets are added by the
 # umbrella discovery loop).
 set(_ns_deps
-    netsurf-buildsystem netsurf-nsgenbind libpng-host
+    netsurf-buildsystem netsurf-nsgenbind libpng-host curl openssl
     netsurf-libwapcaplet netsurf-libparserutils netsurf-libhubbub
     netsurf-libcss netsurf-libdom netsurf-libnsgif netsurf-libnsbmp
     netsurf-libnsutils netsurf-libnslog netsurf-libnspsl netsurf-libsvgtiny
