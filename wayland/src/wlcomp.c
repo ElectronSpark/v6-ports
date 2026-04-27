@@ -2672,9 +2672,22 @@ static void open_terminal(void)
         dup2(slave, 1);
         dup2(slave, 2);
         if (slave > 2) close(slave);
-        char *argv[] = { "sh", NULL };
-        char *envp[] = { "TERM=dumb", "HOME=/root", "PATH=/bin:/usr/bin",
-                         "PS1=\\w# ", NULL };
+        char *argv[] = { "sh", "--gui-session", NULL };
+        char *envp[] = {
+            "TERM=dumb",
+            "HOME=/root",
+            "PATH=/bin:/usr/bin",
+            "PS1=\\w# ",
+            "XDG_RUNTIME_DIR=/tmp",
+            "XDG_CACHE_HOME=/tmp/.cache",
+            "WAYLAND_DISPLAY=wayland-0",
+            "GDK_BACKEND=wayland",
+            "XCURSOR_PATH=/share/icons",
+            "XCURSOR_THEME=Adwaita",
+            "SSL_CERT_FILE=/share/netsurf/ca-bundle",
+            "XV6_GUI_SESSION=wayland",
+            NULL
+        };
         execve("/bin/sh", argv, envp);
         _exit(1);
     }
