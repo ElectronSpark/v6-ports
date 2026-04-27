@@ -73,6 +73,7 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1)
             "XDG_RUNTIME_DIR=/tmp",
             "WAYLAND_DISPLAY=wayland-0",
             "GDK_BACKEND=wayland",
+            "XCURSOR_PATH=/share/icons",
             NULL
         };
         execve(path, argv, envp);

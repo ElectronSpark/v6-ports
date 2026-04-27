@@ -1734,6 +1734,7 @@ static void launch_desktop_app(const char *path, const char *name)
             "XDG_RUNTIME_DIR=/tmp",
             "WAYLAND_DISPLAY=wayland-0",
             "GDK_BACKEND=wayland",
+            "XCURSOR_PATH=/share/icons",
             "SSL_CERT_FILE=/share/netsurf/ca-bundle",
             "G_MESSAGES_DEBUG=all",
             "WEBKIT_DEBUG=all",
@@ -1745,6 +1746,7 @@ static void launch_desktop_app(const char *path, const char *name)
             "XDG_RUNTIME_DIR=/tmp",
             "WAYLAND_DISPLAY=wayland-0",
             "GDK_BACKEND=wayland",
+            "XCURSOR_PATH=/share/icons",
             "SSL_CERT_FILE=/share/netsurf/ca-bundle",
             "G_MESSAGES_DEBUG=all",
             "WEBKIT_DEBUG=all",
@@ -4475,13 +4477,6 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    /* Add socket */
-    if (wl_display_add_socket(g_display, "wayland-0") < 0) {
-        fprintf(stderr, "wlcomp: wl_display_add_socket failed\n");
-        return 1;
-    }
-    fprintf(stderr, "wlcomp: listening on wayland-0\n");
-
     /* Register globals */
     g_compositor_global = wl_global_create(g_display, &wl_compositor_interface,
                                            5, NULL, compositor_bind);
@@ -4495,6 +4490,13 @@ int main(int argc, char **argv)
                                         2, NULL, xdg_wm_bind);
     g_ddm_global = wl_global_create(g_display, &wl_data_device_manager_interface,
                                     3, NULL, ddm_bind);
+
+    /* Add socket */
+    if (wl_display_add_socket(g_display, "wayland-0") < 0) {
+        fprintf(stderr, "wlcomp: wl_display_add_socket failed\n");
+        return 1;
+    }
+    fprintf(stderr, "wlcomp: listening on wayland-0\n");
 
     /* Get the wayland event loop fd for polling */
     struct wl_event_loop *loop = wl_display_get_event_loop(g_display);

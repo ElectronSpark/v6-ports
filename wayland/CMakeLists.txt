@@ -37,9 +37,6 @@ add_custom_command(
                 -e "s|(uint32_t)ev\\.dy|(uint32_t)(uint16_t)ev.dy|"
                 -e "s|homepage_url:http://127.0.0.1/|homepage_url:file:///share/netsurf/welcome.html|"
                 -e "s|for (int i = 0\\; i < 60\\; i++)|for (int i = 0; i < 0; i++)|"
-                -e "s|{ \"Browser\",  \"/bin/netsurf\",   \"netsurf\",  0xFF3D6E9E, 'W' },|{ \"Browser\",  NULL,             NULL,       0xFF3D6E9E, 'W' },|"
-                -e "s|{ \"Web Browser\",     \"/bin/netsurf\",   \"netsurf\"  },|{ \"---\",             NULL,             NULL       },|"
-                -e "s|case 9: launch_desktop_app(\"/bin/netsurf\", \"netsurf\"); break;|case 9: break;|g"
                 ${WAYLAND_SRC_DIR}/wlcomp.c > ${_wl_src}
     COMMAND perl -0pi -e [=[s{        if \(surf->committed_buf && surf->committed_buf->resource &&\n            !surf->buffer_released\) \{\n            wl_buffer_send_release\(surf->committed_buf->resource\);\n            surf->buffer_released = 1;\n        \}\n}{        /* Keep the current committed buffer owned until replacement. */\n}]=]
                 ${_wl_src}
