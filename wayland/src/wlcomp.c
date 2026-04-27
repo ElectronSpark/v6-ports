@@ -1637,19 +1637,34 @@ static void draw_circle(uint32_t *fb, int fb_w, int fb_h,
             }
 }
 
-/* ── Desktop icon definitions ──────────────────────────────────────── */
+/* ── Desktop shortcut definitions ──────────────────────────────────── */
+
+enum shortcut_action {
+    SHORTCUT_EXEC = 0,
+    SHORTCUT_TERMINAL,
+    SHORTCUT_FILES,
+    SHORTCUT_SYSINFO,
+    SHORTCUT_CALC,
+    SHORTCUT_NETWORK,
+    SHORTCUT_SETTINGS,
+    SHORTCUT_MONITOR,
+    SHORTCUT_3DDEMO,
+    SHORTCUT_EDITOR,
+};
 
 typedef struct {
-    const char *label;
-    const char *exec_path;    /* NULL = not launchable */
-    const char *exec_name;
+    char        label[48];
+    char        exec_path[256];
+    char        exec_name[64];
+    char        exec_arg[256];
+    int         action;
     uint32_t    icon_color;
     char        symbol;       /* single char rendered as icon */
-    /* computed layout (set once) */
-    int         x, y, w, h;
+    int         x, y, w, h;    /* computed layout */
 } desktop_icon_t;
 
-#define DESKTOP_ICON_COUNT 11
+#define DESKTOP_DIR        "/root/Desktop"
+#define DESKTOP_ICON_MAX   32
 #define ICON_CELL_W        80
 #define ICON_CELL_H        72
 #define ICON_BOX_SIZE      42
@@ -1657,19 +1672,9 @@ typedef struct {
 #define ICON_GRID_Y0       16
 #define APP_AREA_TOP       (ICON_GRID_Y0 + ICON_CELL_H)  /* 88: below icon row */
 
-static desktop_icon_t g_icons[DESKTOP_ICON_COUNT] = {
-    { "Terminal", NULL,             NULL,       0xFF3D6E9E, '>' },
-    { "Files",    NULL,             NULL,       0xFFA67C52, 'F' },
-    { "Info",     NULL,             NULL,       0xFF3DA67C, 'i' },
-    { "Calc",     NULL,             NULL,       0xFF7C3DA6, 'C' },
-    { "Network",  NULL,             NULL,       0xFF3DA6A6, 'N' },
-    { "Settings", NULL,             NULL,       0xFF7B7B7B, 'S' },
-    { "Monitor",  NULL,             NULL,       0xFFA63D7C, 'M' },
-    { "3D Demo",  NULL,             NULL,       0xFF6EA63D, '3' },
-    { "Editor",   NULL,             NULL,       0xFFA65C3D, 'V' },
-    { "Browser",  "/bin/netsurf",   "netsurf",  0xFF3D6E9E, 'W' },
-    { "WebKit",   "/libexec/webkit2gtk-4.1/MiniBrowser", "MiniBrowser", 0xFF9B59B6, 'K' },
-};
+static desktop_icon_t g_icons[DESKTOP_ICON_MAX];
+static int g_icon_count;
+static int g_shortcuts_loaded;
 static int g_icons_laid_out;
 static int g_selected_icon = -1;       /* currently selected desktop icon */
 
@@ -1684,7 +1689,8 @@ static int g_selected_icon = -1;       /* currently selected desktop icon */
 #define MAX_CHILDREN 16
 static pid_t g_children[MAX_CHILDREN];
 
-static void launch_desktop_app(const char *path, const char *name)
+static void launch_desktop_app_arg(const char *path, const char *name,
+                                   const char *arg)
 {
     if (!path) return;
 
@@ -1747,13 +1753,14 @@ static void launch_desktop_app(const char *path, const char *name)
             }
         }
 
-        char *argv_def[] = { (char *)name, NULL };
+        char *argv_def[] = { (char *)name, (char *)arg, NULL };
+        char *argv_noarg[] = { (char *)name, NULL };
         char *argv_minibrowser[] = {
             (char *)name,
-            "http://127.0.0.1/",
+            (char *)(arg ? arg : "http://127.0.0.1/"),
             NULL,
         };
-        char **argv = argv_def;
+        char **argv = arg ? argv_def : argv_noarg;
         char *envp_default[] = {
             "HOME=/",
             "PATH=/bin:/usr/bin",
@@ -1796,6 +1803,11 @@ static void launch_desktop_app(const char *path, const char *name)
     fprintf(stderr, "wlcomp: launched %s (pid %d)\n", name, pid);
 }
 
+static void launch_desktop_app(const char *path, const char *name)
+{
+    launch_desktop_app_arg(path, name, NULL);
+}
+
 static void reap_children(void)
 {
     for (int i = 0; i < MAX_CHILDREN; i++) {
@@ -1816,6 +1828,177 @@ static void reap_children(void)
             }
         }
     }
+}
+
+static const char *path_basename(const char *path)
+{
+    const char *base = path;
+    if (!path)
+        return "";
+    for (const char *p = path; *p; p++) {
+        if (*p == '/')
+            base = p + 1;
+    }
+    return base;
+}
+
+static char *trim_space(char *s)
+{
+    while (*s == ' ' || *s == '\t' || *s == '\r' || *s == '\n')
+        s++;
+    char *end = s + strlen(s);
+    while (end > s &&
+           (end[-1] == ' ' || end[-1] == '\t' ||
+            end[-1] == '\r' || end[-1] == '\n')) {
+        *--end = '\0';
+    }
+    return s;
+}
+
+static void shortcut_set(desktop_icon_t *sc, const char *label, int action,
+                         const char *exec_path, const char *exec_name,
+                         const char *exec_arg, uint32_t color, char symbol)
+{
+    memset(sc, 0, sizeof(*sc));
+    snprintf(sc->label, sizeof(sc->label), "%s", label ? label : "");
+    snprintf(sc->exec_path, sizeof(sc->exec_path), "%s", exec_path ? exec_path : "");
+    snprintf(sc->exec_name, sizeof(sc->exec_name), "%s", exec_name ? exec_name : "");
+    snprintf(sc->exec_arg, sizeof(sc->exec_arg), "%s", exec_arg ? exec_arg : "");
+    sc->action = action;
+    sc->icon_color = color;
+    sc->symbol = symbol ? symbol : '?';
+}
+
+static int shortcut_action_from_name(const char *name)
+{
+    if (strcmp(name, "terminal") == 0) return SHORTCUT_TERMINAL;
+    if (strcmp(name, "files") == 0) return SHORTCUT_FILES;
+    if (strcmp(name, "sysinfo") == 0) return SHORTCUT_SYSINFO;
+    if (strcmp(name, "calc") == 0) return SHORTCUT_CALC;
+    if (strcmp(name, "network") == 0) return SHORTCUT_NETWORK;
+    if (strcmp(name, "settings") == 0) return SHORTCUT_SETTINGS;
+    if (strcmp(name, "monitor") == 0) return SHORTCUT_MONITOR;
+    if (strcmp(name, "3ddemo") == 0) return SHORTCUT_3DDEMO;
+    if (strcmp(name, "editor") == 0) return SHORTCUT_EDITOR;
+    return SHORTCUT_EXEC;
+}
+
+static void shortcut_add_default(const char *label, int action,
+                                 const char *path, const char *name,
+                                 uint32_t color, char symbol)
+{
+    if (g_icon_count >= DESKTOP_ICON_MAX)
+        return;
+    shortcut_set(&g_icons[g_icon_count++], label, action, path, name, NULL,
+                 color, symbol);
+}
+
+static void load_default_shortcuts(void)
+{
+    shortcut_add_default("Terminal", SHORTCUT_TERMINAL, NULL, NULL, 0xFF3D6E9E, '>');
+    shortcut_add_default("Files",    SHORTCUT_FILES,    NULL, NULL, 0xFFA67C52, 'F');
+    shortcut_add_default("Info",     SHORTCUT_SYSINFO,  NULL, NULL, 0xFF3DA67C, 'i');
+    shortcut_add_default("Calc",     SHORTCUT_CALC,     NULL, NULL, 0xFF7C3DA6, 'C');
+    shortcut_add_default("Network",  SHORTCUT_NETWORK,  NULL, NULL, 0xFF3DA6A6, 'N');
+    shortcut_add_default("Settings", SHORTCUT_SETTINGS, NULL, NULL, 0xFF7B7B7B, 'S');
+    shortcut_add_default("Monitor",  SHORTCUT_MONITOR,  NULL, NULL, 0xFFA63D7C, 'M');
+    shortcut_add_default("3D Demo",  SHORTCUT_3DDEMO,   NULL, NULL, 0xFF6EA63D, '3');
+    shortcut_add_default("Editor",   SHORTCUT_EDITOR,   NULL, NULL, 0xFFA65C3D, 'V');
+    shortcut_add_default("Browser",  SHORTCUT_EXEC, "/bin/netsurf", "netsurf",
+                         0xFF3D6E9E, 'W');
+    shortcut_add_default("WebKit",   SHORTCUT_EXEC,
+                         "/libexec/webkit2gtk-4.1/MiniBrowser", "MiniBrowser",
+                         0xFF9B59B6, 'K');
+}
+
+static int parse_desktop_shortcut(const char *path, desktop_icon_t *out)
+{
+    FILE *fp = fopen(path, "r");
+    if (!fp)
+        return -1;
+
+    char name[48] = "";
+    char exec[256] = "";
+    char arg[256] = "";
+    char builtin[32] = "";
+    uint32_t color = 0xFF5A7090;
+    char symbol = 'A';
+    char line[320];
+
+    while (fgets(line, sizeof(line), fp)) {
+        char *s = trim_space(line);
+        if (!s[0] || s[0] == '#' || s[0] == '[')
+            continue;
+        char *eq = strchr(s, '=');
+        if (!eq)
+            continue;
+        *eq++ = '\0';
+        char *key = trim_space(s);
+        char *val = trim_space(eq);
+        if (strcmp(key, "Name") == 0)
+            snprintf(name, sizeof(name), "%s", val);
+        else if (strcmp(key, "Exec") == 0)
+            snprintf(exec, sizeof(exec), "%s", val);
+        else if (strcmp(key, "Arg") == 0)
+            snprintf(arg, sizeof(arg), "%s", val);
+        else if (strcmp(key, "X-XV6-Builtin") == 0)
+            snprintf(builtin, sizeof(builtin), "%s", val);
+        else if (strcmp(key, "IconChar") == 0 && val[0])
+            symbol = val[0];
+        else if (strcmp(key, "IconColor") == 0 && val[0])
+            color = (uint32_t)strtoul(val, NULL, 0);
+    }
+
+    fclose(fp);
+
+    if (!name[0])
+        snprintf(name, sizeof(name), "%s", path_basename(path));
+
+    int action = builtin[0] ? shortcut_action_from_name(builtin) : SHORTCUT_EXEC;
+    if (action == SHORTCUT_EXEC && !exec[0])
+        return -1;
+
+    shortcut_set(out, name, action, exec, exec[0] ? path_basename(exec) : "",
+                 arg[0] ? arg : NULL, color, symbol);
+    return 0;
+}
+
+static void load_desktop_shortcuts(void)
+{
+    if (g_shortcuts_loaded)
+        return;
+    g_shortcuts_loaded = 1;
+    g_icon_count = 0;
+
+    DIR *dir = opendir(DESKTOP_DIR);
+    if (dir) {
+        struct dirent *de;
+        while ((de = readdir(dir)) != NULL && g_icon_count < DESKTOP_ICON_MAX) {
+            if (!de->d_name[0] || de->d_name[0] == '.')
+                continue;
+
+            char full[320];
+            snprintf(full, sizeof(full), "%s/%s", DESKTOP_DIR, de->d_name);
+
+            struct stat st;
+            if (stat(full, &st) != 0)
+                continue;
+
+            desktop_icon_t sc;
+            if (S_ISREG(st.st_mode) && strstr(de->d_name, ".desktop")) {
+                if (parse_desktop_shortcut(full, &sc) == 0)
+                    g_icons[g_icon_count++] = sc;
+            } else if (S_ISREG(st.st_mode) &&
+                       (st.st_mode & (S_IXUSR | S_IXGRP | S_IXOTH))) {
+                shortcut_set(&g_icons[g_icon_count++], de->d_name, SHORTCUT_EXEC,
+                             full, de->d_name, NULL, 0xFF5A7090, 'X');
+            }
+        }
+        closedir(dir);
+    }
+
+    if (g_icon_count == 0)
+        load_default_shortcuts();
 }
 
 /* ── Clock ─────────────────────────────────────────────────────────── */
@@ -1846,10 +2029,11 @@ static void update_clock(void)
 /* Lay out icons once we know screen dimensions */
 static void layout_icons(int fb_w, int fb_h)
 {
+    load_desktop_shortcuts();
     if (g_icons_laid_out) return;
     int cols = (fb_w - ICON_GRID_X0 * 2) / ICON_CELL_W;
     if (cols < 1) cols = 1;
-    for (int i = 0; i < DESKTOP_ICON_COUNT; i++) {
+    for (int i = 0; i < g_icon_count; i++) {
         int col = i % cols;
         int row = i / cols;
         g_icons[i].x = ICON_GRID_X0 + col * ICON_CELL_W;
@@ -1987,7 +2171,7 @@ typedef struct {
     /* File manager */
     char  fm_path[256];        /* current directory */
     char  fm_entries[64][64];  /* file/dir names */
-    int   fm_types[64];        /* 0=file, 1=dir */
+    int   fm_types[64];        /* 0=file, 1=dir, 2=launchable */
     int   fm_count;
     int   fm_scroll;
     int   fm_selected;
@@ -2095,7 +2279,8 @@ static void draw_taskbar(uint32_t *fb, int fb_w, int fb_h)
 /* Check if (mx,my) hits a desktop icon; returns index or -1 */
 static int icon_hit_test(int mx, int my)
 {
-    for (int i = 0; i < DESKTOP_ICON_COUNT; i++) {
+    load_desktop_shortcuts();
+    for (int i = 0; i < g_icon_count; i++) {
         if (mx >= g_icons[i].x && mx < g_icons[i].x + g_icons[i].w &&
             my >= g_icons[i].y && my < g_icons[i].y + g_icons[i].h)
             return i;
@@ -2166,37 +2351,31 @@ static int taskbar_task_hit(int mx, int my, int fb_w, int fb_h)
 
 static int g_menu_open;
 
-typedef struct {
-    const char *label;
-    const char *exec_path;
-    const char *exec_name;
-} menu_item_t;
-
-#define MENU_ITEM_COUNT 13
-static const menu_item_t g_menu_items[MENU_ITEM_COUNT] = {
-    { "Terminal",        NULL,             NULL       },
-    { "Files",           NULL,             NULL       },
-    { "System Info",     NULL,             NULL       },
-    { "Calculator",      NULL,             NULL       },
-    { "Network",         NULL,             NULL       },
-    { "Settings",        NULL,             NULL       },
-    { "System Monitor",  NULL,             NULL       },
-    { "3D Demo",         NULL,             NULL       },
-    { "Editor",          NULL,             NULL       },
-    { "Web Browser",     "/bin/netsurf",   "netsurf"  },
-    { "WebKit",          "/libexec/webkit2gtk-4.1/MiniBrowser", "MiniBrowser" },
-    { "---",             NULL,             NULL       },
-    { "Power Off",       NULL,             NULL       },
-};
-
 #define MENU_W          160
 #define MENU_ITEM_H      24
+
+static int menu_item_count(void)
+{
+    load_desktop_shortcuts();
+    return g_icon_count + 2; /* separator + Power Off */
+}
+
+static const char *menu_item_label(int idx)
+{
+    load_desktop_shortcuts();
+    if (idx < g_icon_count)
+        return g_icons[idx].label;
+    if (idx == g_icon_count)
+        return "---";
+    return "Power Off";
+}
 
 static void draw_menu(uint32_t *fb, int fb_w, int fb_h)
 {
     if (!g_menu_open) return;
 
-    int menu_h = MENU_ITEM_COUNT * MENU_ITEM_H + 8;
+    int item_count = menu_item_count();
+    int menu_h = item_count * MENU_ITEM_H + 8;
     int menu_x = TB_BTN_PAD;
     int menu_y = fb_h - TASKBAR_H - menu_h;
 
@@ -2212,9 +2391,10 @@ static void draw_menu(uint32_t *fb, int fb_w, int fb_h)
     draw_rect(fb, fb_w, fb_h, menu_x, menu_y, 1, menu_h, 0xFF3C5078);
     draw_rect(fb, fb_w, fb_h, menu_x + MENU_W - 1, menu_y, 1, menu_h, 0xFF3C5078);
 
-    for (int i = 0; i < MENU_ITEM_COUNT; i++) {
+    for (int i = 0; i < item_count; i++) {
         int iy = menu_y + 4 + i * MENU_ITEM_H;
-        if (g_menu_items[i].label[0] == '-') {
+        const char *label = menu_item_label(i);
+        if (label[0] == '-') {
             /* Separator */
             draw_rect(fb, fb_w, fb_h, menu_x + 8, iy + MENU_ITEM_H / 2,
                       MENU_W - 16, 1, 0xFF485460);
@@ -2226,9 +2406,8 @@ static void draw_menu(uint32_t *fb, int fb_w, int fb_h)
                 draw_rect(fb, fb_w, fb_h, menu_x + 2, iy,
                           MENU_W - 4, MENU_ITEM_H, 0xFF3C5078);
             }
-            uint32_t color = (g_menu_items[i].label[0] != '-') ? 0xFFD2DAE2 : 0xFF808E9B;
             draw_string(fb, fb_w, fb_h, menu_x + 12, iy + 4,
-                        g_menu_items[i].label, color, 1);
+                        label, 0xFFD2DAE2, 1);
         }
     }
 }
@@ -2237,15 +2416,16 @@ static void draw_menu(uint32_t *fb, int fb_w, int fb_h)
 static int menu_click_test(int mx, int my, int fb_h)
 {
     if (!g_menu_open) return -1;
-    int menu_h = MENU_ITEM_COUNT * MENU_ITEM_H + 8;
+    int item_count = menu_item_count();
+    int menu_h = item_count * MENU_ITEM_H + 8;
     int menu_x = TB_BTN_PAD;
     int menu_y = fb_h - TASKBAR_H - menu_h;
     if (mx < menu_x || mx >= menu_x + MENU_W ||
         my < menu_y || my >= menu_y + menu_h)
         return -2;  /* clicked outside menu → close it */
     int idx = (my - menu_y - 4) / MENU_ITEM_H;
-    if (idx < 0 || idx >= MENU_ITEM_COUNT) return -1;
-    if (g_menu_items[idx].label[0] == '-') return -1;
+    if (idx < 0 || idx >= item_count) return -1;
+    if (menu_item_label(idx)[0] == '-') return -1;
     return idx;
 }
 
@@ -2266,6 +2446,7 @@ enum {
 };
 static void open_terminal(void);
 static void open_editor(void);
+static void open_editor_path(const char *path);
 static void open_text_app(int type, const char *title, int win_w, int win_h);
 static void open_calc(void);
 static void open_3ddemo(void);
@@ -2276,6 +2457,49 @@ static void iwin_key_input(uint8_t keycode, uint8_t scancode, uint8_t pressed, u
 static void draw_iwin_all(uint32_t *fb, int fb_w, int fb_h);
 static void process_terminals(void);
 
+static void run_shortcut(const desktop_icon_t *sc)
+{
+    if (!sc)
+        return;
+
+    switch (sc->action) {
+    case SHORTCUT_TERMINAL:
+        open_terminal();
+        break;
+    case SHORTCUT_FILES:
+        open_filemgr();
+        break;
+    case SHORTCUT_SYSINFO:
+        open_text_app(APP_SYSINFO_FWD, "System Info", 500, 400);
+        break;
+    case SHORTCUT_CALC:
+        open_calc();
+        break;
+    case SHORTCUT_NETWORK:
+        open_text_app(APP_NETWORK_FWD, "Network", 500, 400);
+        break;
+    case SHORTCUT_SETTINGS:
+        open_text_app(APP_SETTINGS_FWD, "Settings", 480, 400);
+        break;
+    case SHORTCUT_MONITOR:
+        open_text_app(APP_MONITOR_FWD, "System Monitor", 500, 400);
+        break;
+    case SHORTCUT_3DDEMO:
+        open_3ddemo();
+        break;
+    case SHORTCUT_EDITOR:
+        open_editor();
+        break;
+    case SHORTCUT_EXEC:
+    default:
+        if (sc->exec_path[0])
+            launch_desktop_app_arg(sc->exec_path,
+                                   sc->exec_name[0] ? sc->exec_name : path_basename(sc->exec_path),
+                                   sc->exec_arg[0] ? sc->exec_arg : NULL);
+        break;
+    }
+}
+
 static void handle_desktop_click(int mx, int my, int fb_w, int fb_h,
                                  int force_dblclick)
 {
@@ -2283,20 +2507,10 @@ static void handle_desktop_click(int mx, int my, int fb_w, int fb_h,
     if (g_menu_open) {
         int idx = menu_click_test(mx, my, fb_h);
         if (idx >= 0) {
-            switch (idx) {
-            case 0: open_terminal(); break;
-            case 1: open_filemgr(); break;
-            case 2: open_text_app(APP_SYSINFO_FWD, "System Info", 500, 400); break;
-            case 3: open_calc(); break;
-            case 4: open_text_app(APP_NETWORK_FWD, "Network", 500, 400); break;
-            case 5: open_text_app(APP_SETTINGS_FWD, "Settings", 480, 400); break;
-            case 6: open_text_app(APP_MONITOR_FWD, "System Monitor", 500, 400); break;
-            case 7: open_3ddemo(); break;
-            case 8: open_editor(); break;
-            case 9: launch_desktop_app("/bin/netsurf", "netsurf"); break;
-            case 10: launch_desktop_app("/libexec/webkit2gtk-4.1/MiniBrowser", "MiniBrowser"); break;
-            case 12: syscall(XV6_SYS_poweroff); break;
-            }
+            if (idx < g_icon_count)
+                run_shortcut(&g_icons[idx]);
+            else if (idx == g_icon_count + 1)
+                syscall(XV6_SYS_poweroff);
             g_menu_open = 0;
         } else {
             g_menu_open = 0;  /* close on outside click or separator */
@@ -2319,20 +2533,7 @@ static void handle_desktop_click(int mx, int my, int fb_w, int fb_h,
     if (hit >= 0) {
         int is_launch = force_dblclick || (hit == g_selected_icon);
         if (is_launch) {
-            /* Clicking already-selected icon — launch */
-            switch (hit) {
-            case 0: open_terminal(); break;
-            case 1: open_filemgr(); break;
-            case 2: open_text_app(APP_SYSINFO_FWD, "System Info", 500, 400); break;
-            case 3: open_calc(); break;
-            case 4: open_text_app(APP_NETWORK_FWD, "Network", 500, 400); break;
-            case 5: open_text_app(APP_SETTINGS_FWD, "Settings", 480, 400); break;
-            case 6: open_text_app(APP_MONITOR_FWD, "System Monitor", 500, 400); break;
-            case 7: open_3ddemo(); break;
-            case 8: open_editor(); break;
-            case 9: launch_desktop_app("/bin/netsurf", "netsurf"); break;
-            case 10: launch_desktop_app("/libexec/webkit2gtk-4.1/MiniBrowser", "MiniBrowser"); break;
-            }
+            run_shortcut(&g_icons[hit]);
             g_selected_icon = -1;
         } else {
             /* First click — select */
@@ -2698,7 +2899,7 @@ static void open_terminal(void)
     fprintf(stderr, "wlcomp: terminal opened (master=%d shell=%d)\n", master, pid);
 }
 
-static void open_editor(void)
+static void open_editor_path(const char *path)
 {
     iwin_t *w = iwin_alloc();
     if (!w) return;
@@ -2707,7 +2908,10 @@ static void open_editor(void)
     w->active = 1;
     w->type = APP_TERMINAL;
     w->master_fd = -1;
-    snprintf(w->title, sizeof(w->title), "Editor");
+    if (path && path[0])
+        snprintf(w->title, sizeof(w->title), "Editor - %s", path_basename(path));
+    else
+        snprintf(w->title, sizeof(w->title), "Editor");
 
     iwin_setup_pos(w, TERM_COLS * 8 + 12, TERM_ROWS * 16 + IWIN_TITLE_H + 8);
     term_clear(w);
@@ -2751,7 +2955,9 @@ static void open_editor(void)
         dup2(slave, 1);
         dup2(slave, 2);
         if (slave > 2) close(slave);
-        char *argv[] = { "vim", NULL };
+        char *argv_noarg[] = { "vim", NULL };
+        char *argv_file[] = { "vim", (char *)path, NULL };
+        char **argv = (path && path[0]) ? argv_file : argv_noarg;
         char *envp[] = { "TERM=dumb", "HOME=/root", "PATH=/bin:/usr/bin",
                          NULL };
         execve("/bin/vim", argv, envp);
@@ -2762,6 +2968,11 @@ static void open_editor(void)
     w->shell_pid = pid;
     iwin_focus(iwin_index(w));
     fprintf(stderr, "wlcomp: editor opened (master=%d vim=%d)\n", master, pid);
+}
+
+static void open_editor(void)
+{
+    open_editor_path(NULL);
 }
 
 /* ── Text-display apps ─────────────────────────────────────────────── */
@@ -3502,10 +3713,15 @@ static void fm_read_dir(iwin_t *w)
             snprintf(full, sizeof(full), "%s/%s", w->fm_path, w->fm_entries[w->fm_count]);
 
         struct stat st;
-        if (stat(full, &st) == 0 && S_ISDIR(st.st_mode))
+        if (stat(full, &st) == 0 && S_ISDIR(st.st_mode)) {
             w->fm_types[w->fm_count] = 1;
-        else
+        } else if ((stat(full, &st) == 0 &&
+                    (st.st_mode & (S_IXUSR | S_IXGRP | S_IXOTH))) ||
+                   strstr(w->fm_entries[w->fm_count], ".desktop")) {
+            w->fm_types[w->fm_count] = 2;
+        } else {
             w->fm_types[w->fm_count] = 0;
+        }
 
         w->fm_count++;
     }
@@ -3549,8 +3765,10 @@ static void draw_filemgr_content(uint32_t *fb, int fb_w, int fb_h, iwin_t *w)
         /* Icon */
         int bx = ix + (FM_ICON_W - 28) / 2;
         int by = iy + 2;
-        uint32_t icol = w->fm_types[i] ? 0xFFA67C52 : 0xFF5A7090;
-        char sym = w->fm_types[i] ? 'D' : 'f';
+        uint32_t icol = w->fm_types[i] == 1 ? 0xFFA67C52 :
+                         w->fm_types[i] == 2 ? 0xFF3D6E9E : 0xFF5A7090;
+        char sym = w->fm_types[i] == 1 ? 'D' :
+                   w->fm_types[i] == 2 ? 'X' : 'f';
         draw_rounded_rect(fb, fb_w, fb_h, bx, by, 28, 24, 3, icol);
         draw_char(fb, fb_w, fb_h, bx + 10, by + 4, sym, 0xFFFFFFFF, 1);
 
@@ -3586,6 +3804,72 @@ static int fm_icon_hit(iwin_t *w, int mx, int my)
             return i;
     }
     return -1;
+}
+
+static void fm_entry_path(iwin_t *w, int idx, char *out, size_t out_sz)
+{
+    if (strcmp(w->fm_path, "/") == 0)
+        snprintf(out, out_sz, "/%s", w->fm_entries[idx]);
+    else
+        snprintf(out, out_sz, "%s/%s", w->fm_path, w->fm_entries[idx]);
+}
+
+static void fm_navigate(iwin_t *w, int idx)
+{
+    if (strcmp(w->fm_entries[idx], "..") == 0) {
+        char *slash = strrchr(w->fm_path, '/');
+        if (slash && slash != w->fm_path) *slash = '\0';
+        else snprintf(w->fm_path, sizeof(w->fm_path), "/");
+    } else if (strcmp(w->fm_entries[idx], ".") != 0) {
+        char tmp[256];
+        fm_entry_path(w, idx, tmp, sizeof(tmp));
+        snprintf(w->fm_path, sizeof(w->fm_path), "%s", tmp);
+    }
+    char title[sizeof(w->title)];
+    snprintf(title, sizeof(title), "Files - %s", w->fm_path);
+    snprintf(w->title, sizeof(w->title), "%s", title);
+    fm_read_dir(w);
+}
+
+static int path_has_suffix(const char *path, const char *suffix)
+{
+    size_t lp = strlen(path);
+    size_t ls = strlen(suffix);
+    return lp >= ls && strcmp(path + lp - ls, suffix) == 0;
+}
+
+static void open_regular_file(const char *path)
+{
+    if (path_has_suffix(path, ".desktop")) {
+        desktop_icon_t sc;
+        if (parse_desktop_shortcut(path, &sc) == 0) {
+            run_shortcut(&sc);
+            return;
+        }
+    }
+
+    if (path_has_suffix(path, ".html") || path_has_suffix(path, ".htm")) {
+        char url[320];
+        snprintf(url, sizeof(url), "file://%s", path);
+        launch_desktop_app_arg("/bin/netsurf", "netsurf", url);
+        return;
+    }
+
+    if (path_has_suffix(path, ".txt") || path_has_suffix(path, ".log") ||
+        path_has_suffix(path, ".md") || path_has_suffix(path, ".c") ||
+        path_has_suffix(path, ".h") || path_has_suffix(path, ".sh")) {
+        open_editor_path(path);
+        return;
+    }
+
+    struct stat st;
+    if (stat(path, &st) == 0 &&
+        (st.st_mode & (S_IXUSR | S_IXGRP | S_IXOTH))) {
+        launch_desktop_app(path, path_basename(path));
+        return;
+    }
+
+    open_editor_path(path);
 }
 
 static void open_filemgr(void)
@@ -3732,24 +4016,14 @@ static int handle_iwin_click(int mx, int my)
     if (w->type == APP_FILEMGR) {
         int fmi = fm_icon_hit(w, mx, my);
         if (fmi >= 0) {
-            if (fmi == w->fm_selected && w->fm_types[fmi]) {
-                /* Double-click on dir: navigate */
-                if (strcmp(w->fm_entries[fmi], "..") == 0) {
-                    char *slash = strrchr(w->fm_path, '/');
-                    if (slash && slash != w->fm_path) *slash = '\0';
-                    else snprintf(w->fm_path, sizeof(w->fm_path), "/");
-                } else if (strcmp(w->fm_entries[fmi], ".") != 0) {
-                    char tmp[256];
-                    if (w->fm_path[1])
-                        snprintf(tmp, sizeof(tmp), "%s/%s", w->fm_path, w->fm_entries[fmi]);
-                    else
-                        snprintf(tmp, sizeof(tmp), "/%s", w->fm_entries[fmi]);
-                    snprintf(w->fm_path, sizeof(w->fm_path), "%s", tmp);
+            if (fmi == w->fm_selected) {
+                if (w->fm_types[fmi] == 1) {
+                    fm_navigate(w, fmi);
+                } else {
+                    char full[320];
+                    fm_entry_path(w, fmi, full, sizeof(full));
+                    open_regular_file(full);
                 }
-                char title[sizeof(w->title)];
-                snprintf(title, sizeof(title), "Files - %s", w->fm_path);
-                snprintf(w->title, sizeof(w->title), "%s", title);
-                fm_read_dir(w);
             } else {
                 w->fm_selected = fmi;
             }
@@ -3903,7 +4177,7 @@ static void composite_and_flip(void)
     draw_wallpaper(g_fb_buf, fb_w, fb_h);
 
     /* Draw desktop icons */
-    for (int i = 0; i < DESKTOP_ICON_COUNT; i++)
+    for (int i = 0; i < g_icon_count; i++)
         draw_icon(g_fb_buf, fb_w, fb_h, &g_icons[i], i == g_selected_icon);
 
     /* Draw background layer: internal windows behind Wayland when no iwin focused */
