@@ -43,10 +43,6 @@ add_custom_command(
                 ${WAYLAND_SRC_DIR}/wlcomp.c > ${_wl_src}
     COMMAND perl -0pi -e [=[s{        if \(surf->committed_buf && surf->committed_buf->resource &&\n            !surf->buffer_released\) \{\n            wl_buffer_send_release\(surf->committed_buf->resource\);\n            surf->buffer_released = 1;\n        \}\n}{        /* Keep the current committed buffer owned until replacement. */\n}]=]
                 ${_wl_src}
-    COMMAND perl -0pi -e [=[s{        /\* Wait for events \(16ms timeout ~ 60fps\) \*/\n        struct epoll_event events\[8\];\n        epoll_wait\(epfd, events, 8, 16\);\n}{        /* Keep the compositor loop cycling so Wayland roundtrips complete. */\n        usleep(16000);\n}]=]
-                ${_wl_src}
-    COMMAND perl -0pi -e [=[s{wl_event_loop_dispatch\(loop, 0\);}{wl_event_loop_dispatch(loop, 1);}g]=]
-                ${_wl_src}
     DEPENDS ${WAYLAND_SRC_DIR}/wlcomp.c ${WAYLAND_SRC_DIR}/font8x16.h
     COMMENT "Patching wlcomp.c"
     VERBATIM)

@@ -2762,6 +2762,37 @@ static void fill_sysinfo(iwin_t *w)
     w->text_len = (int)(p - w->text);
 }
 
+#define NETCONF_MODE_DHCP   0
+#define NETCONF_MODE_STATIC 1
+#define NETCONF_HOSTNAME_MAX 32
+
+struct netconf_req {
+    int mode;
+    unsigned int ip;
+    unsigned int netmask;
+    unsigned int gateway;
+    unsigned int dns;
+    char hostname[NETCONF_HOSTNAME_MAX];
+};
+
+static void format_ip4(char *buf, size_t bufsz, unsigned int ip)
+{
+    snprintf(buf, bufsz, "%u.%u.%u.%u",
+             ip & 0xff,
+             (ip >> 8) & 0xff,
+             (ip >> 16) & 0xff,
+             (ip >> 24) & 0xff);
+}
+
+static const char *netconf_mode_name(int mode)
+{
+    if (mode == NETCONF_MODE_DHCP)
+        return "DHCP";
+    if (mode == NETCONF_MODE_STATIC)
+        return "Static";
+    return "Unknown";
+}
+
 static void fill_network(iwin_t *w)
 {
     w->text_len = 0;
@@ -2772,34 +2803,51 @@ static void fill_network(iwin_t *w)
     n = snprintf(p, rem, "=== Network Information ===\n\n");
     p += n; rem -= n;
 
-    /* resolv.conf */
-    {
-        char buf[256] = "";
-        int fd = open("/etc/resolv.conf", O_RDONLY);
-        if (fd >= 0) {
-            int r = read(fd, buf, sizeof(buf) - 1);
-            if (r > 0) buf[r] = '\0';
-            close(fd);
-        }
-        n = snprintf(p, rem, "DNS:\n%s\n", buf[0] ? buf : "not configured");
+    int fd = open("/dev/netconf", O_RDONLY);
+    if (fd < 0) {
+        n = snprintf(p, rem, "Network device: unavailable\n");
         p += n; rem -= n;
+        w->text_len = (int)(p - w->text);
+        w->last_refresh = get_time_ms();
+        return;
     }
 
-    /* Net stats from /proc */
-    {
-        char buf[512] = "";
-        int fd = open("/proc/net/dev", O_RDONLY);
-        if (fd >= 0) {
-            int r = read(fd, buf, sizeof(buf) - 1);
-            if (r > 0) buf[r] = '\0';
-            close(fd);
-        }
-        n = snprintf(p, rem, "--- Interfaces ---\n%s\n",
-                     buf[0] ? buf : "unavailable");
+    struct netconf_req req;
+    int r = read(fd, &req, sizeof(req));
+    close(fd);
+    if (r != (int)sizeof(req)) {
+        n = snprintf(p, rem, "Network status: waiting for lwIP\n");
         p += n; rem -= n;
+        w->text_len = (int)(p - w->text);
+        w->last_refresh = get_time_ms();
+        return;
     }
+
+    char ip[16], mask[16], gw[16], dns[16];
+    format_ip4(ip, sizeof(ip), req.ip);
+    format_ip4(mask, sizeof(mask), req.netmask);
+    format_ip4(gw, sizeof(gw), req.gateway);
+    format_ip4(dns, sizeof(dns), req.dns);
+
+    n = snprintf(p, rem,
+                 "Interface: e1000\n"
+                 "Mode:      %s\n"
+                 "Hostname:  %s\n"
+                 "IPv4:      %s\n"
+                 "Netmask:   %s\n"
+                 "Gateway:   %s\n"
+                 "DNS:       %s\n\n"
+                 "(auto-refreshes every 2s)\n",
+                 netconf_mode_name(req.mode),
+                 req.hostname[0] ? req.hostname : "xv6",
+                 req.ip ? ip : "not assigned",
+                 req.netmask ? mask : "not assigned",
+                 req.gateway ? gw : "not assigned",
+                 req.dns ? dns : "not assigned");
+    p += n; rem -= n;
 
     w->text_len = (int)(p - w->text);
+    w->last_refresh = get_time_ms();
 }
 
 static void fill_files(iwin_t *w)
@@ -3520,13 +3568,16 @@ static void process_terminals(void)
         if (w->active && w->type == APP_TERMINAL && w->master_fd >= 0)
             term_process_output(w);
     }
-    /* Auto-refresh monitor windows */
+    /* Auto-refresh monitor and network windows */
     uint32_t now = get_time_ms();
     for (int i = 0; i < MAX_IWIN; i++) {
         iwin_t *w = &g_iwin[i];
         if (w->active && w->type == APP_MONITOR &&
             now - w->last_refresh > 2000) {
             fill_monitor(w);
+        } else if (w->active && w->type == APP_NETWORK &&
+                   now - w->last_refresh > 2000) {
+            fill_network(w);
         }
     }
 }
