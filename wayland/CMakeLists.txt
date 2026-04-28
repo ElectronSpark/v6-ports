@@ -10,7 +10,7 @@ endif()
 
 set(WAYLAND_SRC_DIR "${CMAKE_CURRENT_SOURCE_DIR}/src")
 
-foreach(_src wlcomp.c desktop.c font8x16.h)
+foreach(_src wlcomp.c desktop.c glsmoke.c font8x16.h)
     if(NOT EXISTS "${WAYLAND_SRC_DIR}/${_src}")
         message(FATAL_ERROR "ports/wayland: missing ${WAYLAND_SRC_DIR}/${_src}")
     endif()
@@ -23,10 +23,14 @@ set(_wl_font      ${_wl_build}/font8x16.h)
 set(_xdg_xml      ${CMAKE_CURRENT_SOURCE_DIR}/../wayland-protocols/src/stable/xdg-shell/xdg-shell.xml)
 set(_xdg_header   ${_wl_proto_dir}/xdg-shell-server-protocol.h)
 set(_xdg_code     ${_wl_build}/xdg-shell-protocol.c)
+set(_xdg_client_header ${_wl_proto_dir}/xdg-shell-client-protocol.h)
+set(_xdg_client_code   ${_wl_build}/xdg-shell-client-protocol.c)
 set(_wl_bin       ${_wl_build}/wlcomp)
 set(_desktop_bin  ${_wl_build}/desktop)
+set(_glsmoke_bin  ${_wl_build}/glsmoke)
 set(_wl_installed ${XV6_SYSROOT}/bin/wlcomp)
 set(_desktop_installed ${XV6_SYSROOT}/bin/desktop)
+set(_glsmoke_installed ${XV6_SYSROOT}/bin/glsmoke)
 file(MAKE_DIRECTORY ${_wl_build} ${_wl_proto_dir} ${XV6_SYSROOT}/bin)
 
 add_custom_command(
@@ -58,6 +62,17 @@ add_custom_command(
     VERBATIM)
 
 add_custom_command(
+    OUTPUT  ${_xdg_client_header} ${_xdg_client_code}
+    COMMAND ${CMAKE_COMMAND} -E make_directory ${_wl_proto_dir}
+    COMMAND ${XV6_SYSROOT}/host-tools/bin/wayland-scanner client-header
+                ${_xdg_xml} ${_xdg_client_header}
+    COMMAND ${XV6_SYSROOT}/host-tools/bin/wayland-scanner private-code
+                ${_xdg_xml} ${_xdg_client_code}
+    DEPENDS ${_xdg_xml}
+    COMMENT "Generating xdg-shell Wayland client protocol sources"
+    VERBATIM)
+
+add_custom_command(
     OUTPUT  ${_wl_bin}
     COMMAND ${CMAKE_C_COMPILER} -O2 -g -Wall -Wno-unused-result -static
                 -isystem ${XV6_SYSROOT}/include
@@ -82,19 +97,38 @@ add_custom_command(
     VERBATIM)
 
 add_custom_command(
-    OUTPUT  ${_wl_installed} ${_desktop_installed}
+    OUTPUT  ${_glsmoke_bin}
+    COMMAND ${CMAKE_C_COMPILER} -O2 -g -Wall -static
+                -isystem ${XV6_SYSROOT}/include
+                -I ${_wl_proto_dir}
+                -I ${XV6_SYSROOT}/include/wayland
+                -L ${XV6_SYSROOT}/lib
+                -Wl,-rpath-link,${XV6_SYSROOT}/lib
+                -o ${_glsmoke_bin}
+                ${WAYLAND_SRC_DIR}/glsmoke.c ${_xdg_client_code}
+                ${XV6_SYSROOT}/lib/libwayland-client.a
+                -lffi -lpthread -lrt -lm
+    DEPENDS ${WAYLAND_SRC_DIR}/glsmoke.c ${_xdg_client_header} ${_xdg_client_code}
+    COMMENT "Compiling glsmoke Wayland client"
+    VERBATIM)
+
+add_custom_command(
+    OUTPUT  ${_wl_installed} ${_desktop_installed} ${_glsmoke_installed}
     COMMAND ${CMAKE_COMMAND} -E copy ${_wl_bin} ${_wl_installed}
     COMMAND ${CMAKE_COMMAND} -E copy ${_desktop_bin} ${_desktop_installed}
-    DEPENDS ${_wl_bin} ${_desktop_bin}
+    COMMAND ${CMAKE_COMMAND} -E copy ${_glsmoke_bin} ${_glsmoke_installed}
+    DEPENDS ${_wl_bin} ${_desktop_bin} ${_glsmoke_bin}
     COMMENT "Installing GUI session into ${XV6_SYSROOT}/bin"
     VERBATIM)
 
-add_custom_target(port-wayland ALL DEPENDS ${_wl_installed} ${_desktop_installed})
+add_custom_target(port-wayland ALL DEPENDS
+    ${_wl_installed} ${_desktop_installed} ${_glsmoke_installed})
 if(TARGET port-wayland-libs)
     add_dependencies(port-wayland port-wayland-libs)
 endif()
 
 add_custom_target(port-wayland-clean
     COMMAND ${CMAKE_COMMAND} -E rm -rf ${_wl_build}
-    COMMAND ${CMAKE_COMMAND} -E remove -f ${_wl_installed} ${_desktop_installed}
+    COMMAND ${CMAKE_COMMAND} -E remove -f
+            ${_wl_installed} ${_desktop_installed} ${_glsmoke_installed}
     COMMENT "Removing wayland artifacts from ${XV6_SYSROOT}")

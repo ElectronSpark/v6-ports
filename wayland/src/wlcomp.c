@@ -2131,6 +2131,8 @@ static void load_default_shortcuts(void)
     shortcut_add_default("Settings", SHORTCUT_SETTINGS, NULL, NULL, 0xFF7B7B7B, 'S');
     shortcut_add_default("Monitor",  SHORTCUT_MONITOR,  NULL, NULL, 0xFFA63D7C, 'M');
     shortcut_add_default("3D Demo",  SHORTCUT_3DDEMO,   NULL, NULL, 0xFF6EA63D, '3');
+    shortcut_add_default("GL Smoke", SHORTCUT_EXEC, "/bin/glsmoke", "glsmoke",
+                         0xFF3D5CA6, 'G');
     shortcut_add_default("Editor",   SHORTCUT_EDITOR,   NULL, NULL, 0xFFA65C3D, 'V');
     shortcut_add_default("Browser",  SHORTCUT_EXEC, "/bin/netsurf", "netsurf",
                          0xFF3D6E9E, 'W');

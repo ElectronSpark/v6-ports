@@ -232,6 +232,23 @@ static int webkit_enabled_by_cmdline(void)
     return !token_is_disabled(buf, "webkit") && strstr(buf, "webkit=1") != NULL;
 }
 
+static int glsmoke_enabled_by_cmdline(void)
+{
+    char buf[512];
+    int fd = open("/proc/cmdline", O_RDONLY);
+    if (fd < 0)
+        return 0;
+
+    int n = read(fd, buf, sizeof(buf) - 1);
+    close(fd);
+    if (n <= 0)
+        return 0;
+    buf[n] = '\0';
+
+    return !token_is_disabled(buf, "glsmoke") &&
+           strstr(buf, "glsmoke=1") != NULL;
+}
+
 int main(void)
 {
     signal(SIGINT,  sighandler);
@@ -255,8 +272,16 @@ int main(void)
         return 1;
     }
 
-    /* 3. Launch NetSurf as a Wayland GTK3 client unless disabled. */
-    if (webkit_enabled_by_cmdline()) {
+    /* 3. Launch the requested Wayland client. */
+    if (glsmoke_enabled_by_cmdline()) {
+        client_pid = launch_client("/bin/glsmoke", "glsmoke", NULL);
+        if (client_pid < 0) {
+            perror("[desktop] fork glsmoke");
+            cleanup();
+            return 1;
+        }
+        fprintf(stderr, "[desktop] glsmoke pid=%d\n", client_pid);
+    } else if (webkit_enabled_by_cmdline()) {
         client_pid = launch_client("/libexec/webkit2gtk-4.1/MiniBrowser",
                                    "MiniBrowser",
                                    "https://www.google.com/");
@@ -290,7 +315,7 @@ int main(void)
                 wlcomp_pid = 0;
                 break;  /* compositor gone → session over */
             } else if (exited == client_pid) {
-                fprintf(stderr, "[desktop] netsurf exited (status %d)\n",
+                fprintf(stderr, "[desktop] client exited (status %d)\n",
                         WEXITSTATUS(status));
                 client_pid = 0;
             }
