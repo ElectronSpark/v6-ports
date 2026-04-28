@@ -2411,8 +2411,16 @@ enum {
 };
 
 /* ── Terminal constants ────────────────────────────────────────────── */
-#define TERM_ROWS   24
-#define TERM_COLS   80
+#define TERM_DEFAULT_ROWS  24
+#define TERM_DEFAULT_COLS  80
+#define TERM_MIN_ROWS       8
+#define TERM_MIN_COLS      24
+#define TERM_MAX_ROWS      48
+#define TERM_MAX_COLS     120
+#define TERM_SCROLLBACK   512
+#define TERM_CELL_W         8
+#define TERM_CELL_H        16
+#define TERM_SCROLLBAR_W   14
 
 typedef struct {
     int   active;
@@ -2433,7 +2441,11 @@ typedef struct {
     /* Terminal state */
     int   master_fd;
     pid_t shell_pid;
-    char  cells[TERM_ROWS][TERM_COLS];
+    char  cells[TERM_MAX_ROWS][TERM_MAX_COLS];
+    char  scrollback[TERM_SCROLLBACK][TERM_MAX_COLS];
+    int   term_rows, term_cols;
+    int   scrollback_count;
+    int   scroll_offset;
     int   cur_row, cur_col;
 
     /* Text apps (Info, Network, Monitor, Files) */
@@ -2953,10 +2965,12 @@ static void draw_iwin(uint32_t *fb, int fb_w, int fb_h, iwin_t *w, int focused)
     draw_rect(fb, fb_w, fb_h, w->x, w->y, 1, w->h, 0xFF3C5078);
     draw_rect(fb, fb_w, fb_h, w->x + w->w - 1, w->y, 1, w->h, 0xFF3C5078);
 
-    /* Resize grip (bottom-right corner, 3 diagonal dots) */
+    /* Resize grip (bottom-right corner) */
     uint32_t gc = 0xFF5A6878;
     int gx = w->x + w->w - 4;
     int gy = w->y + w->h - 4;
+    draw_rect(fb, fb_w, fb_h, w->x + w->w - 18, w->y + w->h - 18,
+              17, 17, 0xFF242B33);
     draw_rect(fb, fb_w, fb_h, gx, gy, 2, 2, gc);
     draw_rect(fb, fb_w, fb_h, gx - 4, gy, 2, 2, gc);
     draw_rect(fb, fb_w, fb_h, gx, gy - 4, 2, 2, gc);
@@ -2967,26 +2981,122 @@ static void draw_iwin(uint32_t *fb, int fb_w, int fb_h, iwin_t *w, int focused)
 
 /* ── Terminal app ──────────────────────────────────────────────────── */
 
+static int term_content_cols_for_width(int win_w)
+{
+    int text_w = win_w - TERM_SCROLLBAR_W - 16;
+    int cols = text_w / TERM_CELL_W;
+    if (cols < TERM_MIN_COLS) cols = TERM_MIN_COLS;
+    if (cols > TERM_MAX_COLS) cols = TERM_MAX_COLS;
+    return cols;
+}
+
+static int term_content_rows_for_height(int win_h)
+{
+    int text_h = win_h - IWIN_TITLE_H - 8;
+    int rows = text_h / TERM_CELL_H;
+    if (rows < TERM_MIN_ROWS) rows = TERM_MIN_ROWS;
+    if (rows > TERM_MAX_ROWS) rows = TERM_MAX_ROWS;
+    return rows;
+}
+
+static int term_window_w_for_cols(int cols)
+{
+    return TERM_SCROLLBAR_W + 16 + cols * TERM_CELL_W;
+}
+
+static int term_window_h_for_rows(int rows)
+{
+    return IWIN_TITLE_H + 8 + rows * TERM_CELL_H;
+}
+
+static void term_send_winsz(iwin_t *w)
+{
+    if (w->master_fd < 0)
+        return;
+
+    struct { unsigned short ws_row, ws_col, ws_xpixel, ws_ypixel; } ws;
+    memset(&ws, 0, sizeof(ws));
+    ws.ws_row = (unsigned short)w->term_rows;
+    ws.ws_col = (unsigned short)w->term_cols;
+    ws.ws_xpixel = (unsigned short)(w->term_cols * TERM_CELL_W);
+    ws.ws_ypixel = (unsigned short)(w->term_rows * TERM_CELL_H);
+    ioctl(w->master_fd, XV6_TIOCSWINSZ, &ws);
+}
+
+static void term_apply_window_size(iwin_t *w, int notify_pty)
+{
+    int old_rows = w->term_rows;
+    int old_cols = w->term_cols;
+    int rows = term_content_rows_for_height(w->h);
+    int cols = term_content_cols_for_width(w->w);
+
+    if (old_rows == 0) old_rows = TERM_DEFAULT_ROWS;
+    if (old_cols == 0) old_cols = TERM_DEFAULT_COLS;
+    w->term_rows = rows;
+    w->term_cols = cols;
+
+    if (cols > old_cols) {
+        for (int r = 0; r < TERM_MAX_ROWS; r++)
+            memset(w->cells[r] + old_cols, ' ', cols - old_cols);
+    }
+    if (rows > old_rows) {
+        for (int r = old_rows; r < rows; r++)
+            memset(w->cells[r], ' ', TERM_MAX_COLS);
+    }
+
+    if (w->cur_row >= rows) w->cur_row = rows - 1;
+    if (w->cur_col >= cols) w->cur_col = cols - 1;
+    if (w->cur_row < 0) w->cur_row = 0;
+    if (w->cur_col < 0) w->cur_col = 0;
+
+    if (w->scroll_offset > w->scrollback_count)
+        w->scroll_offset = w->scrollback_count;
+
+    if (notify_pty && (rows != old_rows || cols != old_cols))
+        term_send_winsz(w);
+}
+
 static void term_clear(iwin_t *w)
 {
     memset(w->cells, ' ', sizeof(w->cells));
+    w->scrollback_count = 0;
+    w->scroll_offset = 0;
+    if (w->term_rows <= 0) w->term_rows = TERM_DEFAULT_ROWS;
+    if (w->term_cols <= 0) w->term_cols = TERM_DEFAULT_COLS;
     w->cur_row = 0;
     w->cur_col = 0;
 }
 
+static void term_push_scrollback(iwin_t *w, const char *line)
+{
+    if (w->scrollback_count >= TERM_SCROLLBACK) {
+        memmove(w->scrollback[0], w->scrollback[1],
+                (TERM_SCROLLBACK - 1) * TERM_MAX_COLS);
+        w->scrollback_count = TERM_SCROLLBACK - 1;
+    }
+    memcpy(w->scrollback[w->scrollback_count], line, TERM_MAX_COLS);
+    w->scrollback_count++;
+    if (w->scroll_offset > 0 && w->scroll_offset < w->scrollback_count)
+        w->scroll_offset++;
+    if (w->scroll_offset > w->scrollback_count)
+        w->scroll_offset = w->scrollback_count;
+}
+
 static void term_scroll_up(iwin_t *w)
 {
-    memmove(w->cells[0], w->cells[1], (TERM_ROWS - 1) * TERM_COLS);
-    memset(w->cells[TERM_ROWS - 1], ' ', TERM_COLS);
+    term_push_scrollback(w, w->cells[0]);
+    for (int r = 1; r < w->term_rows; r++)
+        memcpy(w->cells[r - 1], w->cells[r], TERM_MAX_COLS);
+    memset(w->cells[w->term_rows - 1], ' ', TERM_MAX_COLS);
 }
 
 static void term_putc(iwin_t *w, char c)
 {
     if (c == '\n') {
         w->cur_row++;
-        if (w->cur_row >= TERM_ROWS) {
+        if (w->cur_row >= w->term_rows) {
             term_scroll_up(w);
-            w->cur_row = TERM_ROWS - 1;
+            w->cur_row = w->term_rows - 1;
         }
     } else if (c == '\r') {
         w->cur_col = 0;
@@ -2994,16 +3104,16 @@ static void term_putc(iwin_t *w, char c)
         if (w->cur_col > 0) w->cur_col--;
     } else if (c == '\t') {
         w->cur_col = (w->cur_col + 8) & ~7;
-        if (w->cur_col >= TERM_COLS) w->cur_col = TERM_COLS - 1;
+        if (w->cur_col >= w->term_cols) w->cur_col = w->term_cols - 1;
     } else if (c == '\033') {
         /* Start of ESC sequence — handled by term_process_output */
     } else if ((unsigned char)c >= 0x20) {
-        if (w->cur_col >= TERM_COLS) {
+        if (w->cur_col >= w->term_cols) {
             w->cur_col = 0;
             w->cur_row++;
-            if (w->cur_row >= TERM_ROWS) {
+            if (w->cur_row >= w->term_rows) {
                 term_scroll_up(w);
-                w->cur_row = TERM_ROWS - 1;
+                w->cur_row = w->term_rows - 1;
             }
         }
         w->cells[w->cur_row][w->cur_col] = c;
@@ -3036,8 +3146,8 @@ static int term_process_esc(iwin_t *w, const char *buf, int len)
         case 'H': case 'f':  /* Cursor position */
             w->cur_row = (params[0] > 0 ? params[0] - 1 : 0);
             w->cur_col = (np > 1 && params[1] > 0 ? params[1] - 1 : 0);
-            if (w->cur_row >= TERM_ROWS) w->cur_row = TERM_ROWS - 1;
-            if (w->cur_col >= TERM_COLS) w->cur_col = TERM_COLS - 1;
+            if (w->cur_row >= w->term_rows) w->cur_row = w->term_rows - 1;
+            if (w->cur_col >= w->term_cols) w->cur_col = w->term_cols - 1;
             break;
         case 'A':  /* Cursor up */
             w->cur_row -= (params[0] > 0 ? params[0] : 1);
@@ -3045,11 +3155,11 @@ static int term_process_esc(iwin_t *w, const char *buf, int len)
             break;
         case 'B':  /* Cursor down */
             w->cur_row += (params[0] > 0 ? params[0] : 1);
-            if (w->cur_row >= TERM_ROWS) w->cur_row = TERM_ROWS - 1;
+            if (w->cur_row >= w->term_rows) w->cur_row = w->term_rows - 1;
             break;
         case 'C':  /* Cursor forward */
             w->cur_col += (params[0] > 0 ? params[0] : 1);
-            if (w->cur_col >= TERM_COLS) w->cur_col = TERM_COLS - 1;
+            if (w->cur_col >= w->term_cols) w->cur_col = w->term_cols - 1;
             break;
         case 'D':  /* Cursor back */
             w->cur_col -= (params[0] > 0 ? params[0] : 1);
@@ -3059,9 +3169,9 @@ static int term_process_esc(iwin_t *w, const char *buf, int len)
             if (params[0] == 0) {
                 /* Clear from cursor to end */
                 memset(w->cells[w->cur_row] + w->cur_col, ' ',
-                       TERM_COLS - w->cur_col);
-                for (int r = w->cur_row + 1; r < TERM_ROWS; r++)
-                    memset(w->cells[r], ' ', TERM_COLS);
+                       w->term_cols - w->cur_col);
+                for (int r = w->cur_row + 1; r < w->term_rows; r++)
+                    memset(w->cells[r], ' ', w->term_cols);
             } else if (params[0] == 2 || params[0] == 3) {
                 term_clear(w);
             }
@@ -3069,11 +3179,11 @@ static int term_process_esc(iwin_t *w, const char *buf, int len)
         case 'K':  /* Erase line */
             if (params[0] == 0)
                 memset(w->cells[w->cur_row] + w->cur_col, ' ',
-                       TERM_COLS - w->cur_col);
+                       w->term_cols - w->cur_col);
             else if (params[0] == 1)
                 memset(w->cells[w->cur_row], ' ', w->cur_col + 1);
             else if (params[0] == 2)
-                memset(w->cells[w->cur_row], ' ', TERM_COLS);
+                memset(w->cells[w->cur_row], ' ', w->term_cols);
             break;
         case 'm':  /* SGR (color/style) — ignore */
             break;
@@ -3119,23 +3229,72 @@ static int term_process_output(iwin_t *w)
     return changed;
 }
 
+static const char *term_line_for_display(iwin_t *w, int row)
+{
+    static char blank[TERM_MAX_COLS];
+    int total = w->scrollback_count + w->term_rows;
+    int first = total - w->term_rows - w->scroll_offset;
+    int idx = first + row;
+
+    if (idx < 0)
+        return blank;
+    if (idx < w->scrollback_count)
+        return w->scrollback[idx];
+    idx -= w->scrollback_count;
+    if (idx >= 0 && idx < w->term_rows)
+        return w->cells[idx];
+    return blank;
+}
+
+static void term_scroll_view(iwin_t *w, int delta)
+{
+    int next = w->scroll_offset + delta;
+    if (next < 0) next = 0;
+    if (next > w->scrollback_count) next = w->scrollback_count;
+    if (next != w->scroll_offset) {
+        w->scroll_offset = next;
+        damage_iwin(w);
+    }
+}
+
 static void draw_terminal_content(uint32_t *fb, int fb_w, int fb_h, iwin_t *w)
 {
     int cx0 = w->x + 4;
     int cy0 = w->y + IWIN_TITLE_H + 2;
-    int content_w = w->w - 8;
+    int content_w = w->w - TERM_SCROLLBAR_W - 8;
     int content_h = w->h - IWIN_TITLE_H - 4;
+    int sbx = cx0 + content_w;
 
     /* Black background for terminal */
     draw_rect(fb, fb_w, fb_h, cx0, cy0, content_w, content_h, 0xFF000000);
 
+    /* Scrollbar */
+    draw_rect(fb, fb_w, fb_h, sbx, cy0, TERM_SCROLLBAR_W, content_h, 0xFF151B22);
+    draw_rect(fb, fb_w, fb_h, sbx, cy0, 1, content_h, 0xFF2B3642);
+    int total_lines = w->scrollback_count + w->term_rows;
+    if (total_lines > w->term_rows && content_h > 8) {
+        int thumb_h = content_h * w->term_rows / total_lines;
+        if (thumb_h < 18) thumb_h = 18;
+        if (thumb_h > content_h) thumb_h = content_h;
+        int range = content_h - thumb_h;
+        int thumb_y = cy0;
+        if (range > 0)
+            thumb_y += range - (range * w->scroll_offset) / w->scrollback_count;
+        draw_rect(fb, fb_w, fb_h, sbx + 3, thumb_y, TERM_SCROLLBAR_W - 6,
+                  thumb_h, 0xFF6B7786);
+    } else {
+        draw_rect(fb, fb_w, fb_h, sbx + 3, cy0 + 3, TERM_SCROLLBAR_W - 6,
+                  content_h > 6 ? content_h - 6 : content_h, 0xFF39424D);
+    }
+
     /* Draw characters */
-    for (int row = 0; row < TERM_ROWS; row++) {
-        for (int col = 0; col < TERM_COLS; col++) {
-            char c = w->cells[row][col];
+    for (int row = 0; row < w->term_rows; row++) {
+        const char *line = term_line_for_display(w, row);
+        for (int col = 0; col < w->term_cols; col++) {
+            char c = line[col];
             if (c > ' ' && c <= '~') {
-                int px = cx0 + 2 + col * 8;
-                int py = cy0 + 2 + row * 16;
+                int px = cx0 + 2 + col * TERM_CELL_W;
+                int py = cy0 + 2 + row * TERM_CELL_H;
                 draw_char(fb, fb_w, fb_h, px, py, c, 0xFF00FF00, 1);
             }
         }
@@ -3143,10 +3302,10 @@ static void draw_terminal_content(uint32_t *fb, int fb_w, int fb_h, iwin_t *w)
 
     /* Draw cursor (blinking block) */
     uint32_t t = get_time_ms();
-    if ((t / 800) & 1) {
-        int cpx = cx0 + 2 + w->cur_col * 8;
-        int cpy = cy0 + 2 + w->cur_row * 16;
-        draw_rect(fb, fb_w, fb_h, cpx, cpy, 8, 16, 0xFF00FF00);
+    if (w->scroll_offset == 0 && ((t / 800) & 1)) {
+        int cpx = cx0 + 2 + w->cur_col * TERM_CELL_W;
+        int cpy = cy0 + 2 + w->cur_row * TERM_CELL_H;
+        draw_rect(fb, fb_w, fb_h, cpx, cpy, TERM_CELL_W, TERM_CELL_H, 0xFF00FF00);
     }
 }
 
@@ -3161,8 +3320,10 @@ static void open_terminal(void)
     w->master_fd = -1;
     snprintf(w->title, sizeof(w->title), "Terminal");
 
-    /* Size: 80 cols * 8px + padding, 24 rows * 16px + title + padding */
-    iwin_setup_pos(w, TERM_COLS * 8 + 12, TERM_ROWS * 16 + IWIN_TITLE_H + 8);
+    /* Size: default terminal grid plus sidebar. */
+    iwin_setup_pos(w, term_window_w_for_cols(TERM_DEFAULT_COLS),
+                   term_window_h_for_rows(TERM_DEFAULT_ROWS));
+    term_apply_window_size(w, 0);
     term_clear(w);
 
     /* Open PTY */
@@ -3201,8 +3362,10 @@ static void open_terminal(void)
         ioctl(slave, XV6_TIOCSCTTY, 0);
         struct { unsigned short ws_row, ws_col, ws_xpixel, ws_ypixel; } ws;
         memset(&ws, 0, sizeof(ws));
-        ws.ws_row = TERM_ROWS;
-        ws.ws_col = TERM_COLS;
+        ws.ws_row = (unsigned short)w->term_rows;
+        ws.ws_col = (unsigned short)w->term_cols;
+        ws.ws_xpixel = (unsigned short)(w->term_cols * TERM_CELL_W);
+        ws.ws_ypixel = (unsigned short)(w->term_rows * TERM_CELL_H);
         ioctl(slave, XV6_TIOCSWINSZ, &ws);
         dup2(slave, 0);
         dup2(slave, 1);
@@ -3230,6 +3393,7 @@ static void open_terminal(void)
 
     w->master_fd = master;
     w->shell_pid = pid;
+    term_send_winsz(w);
     iwin_focus(iwin_index(w));
     fprintf(stderr, "wlcomp: terminal opened (master=%d shell=%d)\n", master, pid);
 }
@@ -3248,7 +3412,9 @@ static void open_editor_path(const char *path)
     else
         snprintf(w->title, sizeof(w->title), "Editor");
 
-    iwin_setup_pos(w, TERM_COLS * 8 + 12, TERM_ROWS * 16 + IWIN_TITLE_H + 8);
+    iwin_setup_pos(w, term_window_w_for_cols(TERM_DEFAULT_COLS),
+                   term_window_h_for_rows(TERM_DEFAULT_ROWS));
+    term_apply_window_size(w, 0);
     term_clear(w);
 
     int master = open("/dev/ptmx", O_RDWR | O_NOCTTY);
@@ -3284,8 +3450,10 @@ static void open_editor_path(const char *path)
         ioctl(slave, XV6_TIOCSCTTY, 0);
         struct { unsigned short ws_row, ws_col, ws_xpixel, ws_ypixel; } ws;
         memset(&ws, 0, sizeof(ws));
-        ws.ws_row = TERM_ROWS;
-        ws.ws_col = TERM_COLS;
+        ws.ws_row = (unsigned short)w->term_rows;
+        ws.ws_col = (unsigned short)w->term_cols;
+        ws.ws_xpixel = (unsigned short)(w->term_cols * TERM_CELL_W);
+        ws.ws_ypixel = (unsigned short)(w->term_rows * TERM_CELL_H);
         ioctl(slave, XV6_TIOCSWINSZ, &ws);
         dup2(slave, 0);
         dup2(slave, 1);
@@ -3302,6 +3470,7 @@ static void open_editor_path(const char *path)
 
     w->master_fd = master;
     w->shell_pid = pid;
+    term_send_winsz(w);
     iwin_focus(iwin_index(w));
     fprintf(stderr, "wlcomp: editor opened (master=%d vim=%d)\n", master, pid);
 }
@@ -4362,8 +4531,8 @@ static int handle_iwin_click(int mx, int my)
         return 1;
     }
 
-    /* Resize edges (6px border on right, bottom, and corner) */
-    #define RESIZE_BORDER 6
+    /* Resize edges: keep this generous enough to grab in the VM. */
+    #define RESIZE_BORDER 18
     {
         int on_right  = (mx >= w->x + w->w - RESIZE_BORDER && mx < w->x + w->w);
         int on_bottom = (my >= w->y + w->h - RESIZE_BORDER && my < w->y + w->h);
@@ -4454,6 +4623,37 @@ static int handle_iwin_click(int mx, int my)
     return 1;  /* consumed by window */
 }
 
+static int handle_iwin_wheel(int mx, int my, int dz)
+{
+    if (dz == 0)
+        return 0;
+
+    int idx = iwin_hit(mx, my);
+    if (idx < 0)
+        return 0;
+
+    iwin_t *w = &g_iwin[idx];
+    if (w->type == APP_TERMINAL) {
+        term_scroll_view(w, dz > 0 ? 3 : -3);
+        return 1;
+    }
+    if (w->type == APP_SYSINFO || w->type == APP_NETWORK ||
+        w->type == APP_FILES || w->type == APP_MONITOR ||
+        w->type == APP_SETTINGS) {
+        if (dz > 0) w->text_scroll = (w->text_scroll > 0) ? w->text_scroll - 1 : 0;
+        if (dz < 0) w->text_scroll++;
+        damage_iwin(w);
+        return 1;
+    }
+    if (w->type == APP_FILEMGR) {
+        if (dz > 0) w->fm_scroll = (w->fm_scroll > 0) ? w->fm_scroll - 1 : 0;
+        if (dz < 0) w->fm_scroll++;
+        damage_iwin(w);
+        return 1;
+    }
+    return 0;
+}
+
 /* Update dragging and resizing windows */
 static void iwin_update_drag(int mx, int my, int buttons)
 {
@@ -4474,13 +4674,21 @@ static void iwin_update_drag(int mx, int my, int buttons)
             int new_w = w->resize_start_w + dw;
             int new_h = w->resize_start_h + dh;
             /* Minimum size */
-            if (new_w < 120) new_w = 120;
-            if (new_h < IWIN_TITLE_H + 40) new_h = IWIN_TITLE_H + 40;
+            int min_w = 120;
+            int min_h = IWIN_TITLE_H + 40;
+            if (w->type == APP_TERMINAL) {
+                min_w = term_window_w_for_cols(TERM_MIN_COLS);
+                min_h = term_window_h_for_rows(TERM_MIN_ROWS);
+            }
+            if (new_w < min_w) new_w = min_w;
+            if (new_h < min_h) new_h = min_h;
             /* Maximum: screen bounds */
             if (w->x + new_w > (int)g_fb_w) new_w = (int)g_fb_w - w->x;
             if (w->y + new_h > (int)g_fb_h) new_h = (int)g_fb_h - w->y;
             w->w = new_w;
             w->h = new_h;
+            if (w->type == APP_TERMINAL)
+                term_apply_window_size(w, 1);
             damage_iwin(w);
             continue;
         }
@@ -4770,6 +4978,7 @@ static void process_mouse(void)
     int16_t old_cursor_y = g_cursor_y;
     int cursor_moved = 0;
     int events_processed = 0;
+    int wheel_delta = 0;
     const int max_mouse_events_per_frame = 64;
 
     while (events_processed < max_mouse_events_per_frame &&
@@ -4793,6 +5002,7 @@ static void process_mouse(void)
         released_edges |= (~g_buttons & prev);    /* 1→0 transitions */
         if ((g_buttons & 1) && !(prev & 1))
             left_press_count++;
+        wheel_delta += ev.dz;
     }
     cursor_moved = (g_cursor_x != old_cursor_x) || (g_cursor_y != old_cursor_y);
     if (cursor_moved) {
@@ -4801,6 +5011,11 @@ static void process_mouse(void)
     }
     if (pressed_edges || released_edges)
         damage_full();
+
+    if (wheel_delta != 0 && handle_iwin_wheel(g_cursor_x, g_cursor_y, wheel_delta)) {
+        g_prev_buttons = g_buttons;
+        return;
+    }
 
     /* Update internal window dragging */
     iwin_update_drag(g_cursor_x, g_cursor_y, g_buttons);
