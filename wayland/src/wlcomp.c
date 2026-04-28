@@ -81,6 +81,8 @@ static int      g_fb_fd   = -1;
 static uint32_t g_fb_w, g_fb_h;
 static uint32_t g_fb_pitch;
 static uint32_t *g_fb_buf;  /* compositing buffer */
+static int32_t  g_damage_x1, g_damage_y1, g_damage_x2, g_damage_y2;
+static int      g_damage_valid;
 
 /* Input state */
 static int      g_mouse_fd = -1;
@@ -88,6 +90,40 @@ static int      g_kbd_fd   = -1;
 static int16_t  g_cursor_x, g_cursor_y;
 static uint8_t  g_buttons;
 static uint32_t g_serial;
+
+static void damage_rect(int32_t x, int32_t y, int32_t w, int32_t h)
+{
+    int32_t x2 = x + w;
+    int32_t y2 = y + h;
+
+    if (w <= 0 || h <= 0 || g_fb_w == 0 || g_fb_h == 0)
+        return;
+    if (x < 0) x = 0;
+    if (y < 0) y = 0;
+    if (x2 > (int32_t)g_fb_w) x2 = (int32_t)g_fb_w;
+    if (y2 > (int32_t)g_fb_h) y2 = (int32_t)g_fb_h;
+    if (x >= x2 || y >= y2)
+        return;
+
+    if (!g_damage_valid) {
+        g_damage_x1 = x;
+        g_damage_y1 = y;
+        g_damage_x2 = x2;
+        g_damage_y2 = y2;
+        g_damage_valid = 1;
+        return;
+    }
+
+    if (x < g_damage_x1) g_damage_x1 = x;
+    if (y < g_damage_y1) g_damage_y1 = y;
+    if (x2 > g_damage_x2) g_damage_x2 = x2;
+    if (y2 > g_damage_y2) g_damage_y2 = y2;
+}
+
+static void damage_full(void)
+{
+    damage_rect(0, 0, (int32_t)g_fb_w, (int32_t)g_fb_h);
+}
 
 /* Protocol globals */
 static struct wl_global *g_compositor_global;
@@ -229,6 +265,46 @@ static void surface_window_geometry(const struct wlcomp_surface *s,
         *gw = bw;
         *gh = bh;
     }
+}
+
+static void damage_surface(const struct wlcomp_surface *s)
+{
+    int32_t gx, gy, gw, gh;
+    struct wlcomp_buffer *buf;
+
+    if (!s || !s->mapped || s->minimized || !s->committed_buf)
+        return;
+
+    buf = s->committed_buf;
+    surface_window_geometry(s, &gx, &gy, &gw, &gh);
+    (void)gw;
+    (void)gh;
+    damage_rect(s->x - gx, s->y - gy, buf->width, buf->height);
+}
+
+static void cursor_bounds_at(int32_t cx, int32_t cy,
+                             int32_t *x, int32_t *y,
+                             int32_t *w, int32_t *h)
+{
+    *x = cx;
+    *y = cy;
+    *w = 12;
+    *h = 19;
+
+    if (g_cursor_surface && g_cursor_surface->committed_buf) {
+        *x = cx - g_cursor_hotspot_x;
+        *y = cy - g_cursor_hotspot_y;
+        *w = g_cursor_surface->committed_buf->width;
+        *h = g_cursor_surface->committed_buf->height;
+    }
+}
+
+static void damage_cursor_at(int32_t cx, int32_t cy)
+{
+    int32_t x, y, w, h;
+
+    cursor_bounds_at(cx, cy, &x, &y, &w, &h);
+    damage_rect(x - 1, y - 1, w + 2, h + 2);
 }
 
 /* Find top surface at a point */
@@ -525,8 +601,8 @@ static void surface_attach(struct wl_client *client, struct wl_resource *resourc
 static void surface_damage(struct wl_client *client, struct wl_resource *resource,
                            int32_t x, int32_t y, int32_t w, int32_t h)
 {
-    (void)client; (void)resource; (void)x; (void)y; (void)w; (void)h;
-    /* We repaint everything each frame, so ignoring damage is fine */
+    (void)client; (void)x; (void)y; (void)w; (void)h;
+    damage_surface(surface_from_resource(resource));
 }
 
 static void surface_frame(struct wl_client *client, struct wl_resource *resource,
@@ -570,6 +646,8 @@ static void surface_commit(struct wl_client *client, struct wl_resource *resourc
     if (surf->has_pending_buffer) {
         old_committed = surf->committed_buf;
         old_buffer_released = surf->buffer_released;
+        if (old_committed)
+            damage_surface(surf);
         surf->committed_buf = surf->pending_buf;
         surf->pending_buf = NULL;
         surf->has_pending_buffer = 0;
@@ -601,6 +679,8 @@ static void surface_commit(struct wl_client *client, struct wl_resource *resourc
             g_kbd_enter_pending = 1;
         }
     }
+
+    damage_surface(surf);
 }
 
 static void surface_set_buffer_transform(struct wl_client *client,
@@ -621,7 +701,8 @@ static void surface_damage_buffer(struct wl_client *client,
                                   struct wl_resource *resource,
                                   int32_t x, int32_t y, int32_t w, int32_t h)
 {
-    (void)client; (void)resource; (void)x; (void)y; (void)w; (void)h;
+    (void)client; (void)x; (void)y; (void)w; (void)h;
+    damage_surface(surface_from_resource(resource));
 }
 
 static void surface_offset(struct wl_client *client,
@@ -652,6 +733,7 @@ static void surface_destroy_handler(struct wl_resource *resource)
         struct wlcomp_buffer *pending_buf = surf->pending_buf;
         struct wlcomp_buffer *committed_buf = surf->committed_buf;
 
+        damage_surface(surf);
         if (g_focused == surf)
             g_focused = NULL;
         if (g_kbd_focused == surf)
@@ -866,6 +948,7 @@ static void toplevel_set_maximized(struct wl_client *c, struct wl_resource *r)
     if (!surf || !surf->xdg_surface || !surf->xdg_toplevel) return;
     if (surf->maximized) return;  /* already maximized */
 
+    damage_surface(surf);
     /* Save current geometry for restore */
     surf->saved_x = surf->x;
     surf->saved_y = surf->y;
@@ -889,6 +972,7 @@ static void toplevel_set_maximized(struct wl_client *c, struct wl_resource *r)
     /* Snap to top-left */
     surf->x = 0;
     surf->y = 0;
+    damage_surface(surf);
 }
 
 static void toplevel_unset_maximized(struct wl_client *c, struct wl_resource *r)
@@ -898,6 +982,7 @@ static void toplevel_unset_maximized(struct wl_client *c, struct wl_resource *r)
     if (!surf || !surf->xdg_surface || !surf->xdg_toplevel) return;
     if (!surf->maximized) return;  /* not maximized */
 
+    damage_surface(surf);
     surf->maximized = 0;
 
     /* Restore saved geometry */
@@ -914,6 +999,7 @@ static void toplevel_unset_maximized(struct wl_client *c, struct wl_resource *r)
     xdg_toplevel_send_configure(surf->xdg_toplevel, rw, rh, &states);
     wl_array_release(&states);
     xdg_surface_send_configure(surf->xdg_surface, ++g_serial);
+    damage_surface(surf);
 }
 
 static void toplevel_set_fullscreen(struct wl_client *c, struct wl_resource *r,
@@ -934,11 +1020,13 @@ static void toplevel_set_minimized(struct wl_client *c, struct wl_resource *r)
     (void)c;
     struct wlcomp_surface *surf = wl_resource_get_user_data(r);
     if (surf) {
+        damage_surface(surf);
         surf->minimized = 1;
         if (g_focused == surf)
             g_focused = NULL;
         if (g_kbd_focused == surf)
             g_kbd_focused = NULL;
+        damage_full();
     }
 }
 
@@ -1074,11 +1162,13 @@ static void xdg_surface_set_window_geometry(struct wl_client *c,
     if (!surf || w <= 0 || h <= 0)
         return;
 
+    damage_surface(surf);
     surf->has_window_geometry = 1;
     surf->window_x = x;
     surf->window_y = y;
     surf->window_w = w;
     surf->window_h = h;
+    damage_surface(surf);
 }
 
 static void xdg_surface_ack_configure(struct wl_client *c,
@@ -1326,6 +1416,7 @@ static void pointer_set_cursor(struct wl_client *c, struct wl_resource *r,
                                int32_t hotspot_x, int32_t hotspot_y)
 {
     (void)c; (void)r; (void)serial;
+    damage_cursor_at(g_cursor_x, g_cursor_y);
     if (surface) {
         struct wlcomp_surface *surf = surface_from_resource(surface);
         if (surf) {
@@ -1341,6 +1432,7 @@ static void pointer_set_cursor(struct wl_client *c, struct wl_resource *r,
             g_cursor_surface = NULL;
         }
     }
+    damage_cursor_at(g_cursor_x, g_cursor_y);
 }
 
 static void pointer_release(struct wl_client *c, struct wl_resource *r)
@@ -2705,9 +2797,17 @@ static iwin_t *iwin_alloc(void)
 
 static int iwin_index(iwin_t *w) { return (int)(w - g_iwin); }
 
+static void damage_iwin(const iwin_t *w)
+{
+    if (!w || !w->active)
+        return;
+    damage_rect(w->x - 4, w->y - 4, w->w + 8, w->h + 8);
+}
+
 static void iwin_close(int idx)
 {
     iwin_t *w = &g_iwin[idx];
+    damage_iwin(w);
     if (w->type == APP_TERMINAL) {
         if (w->shell_pid > 0) {
             kill(w->shell_pid, SIGTERM);
@@ -2721,11 +2821,16 @@ static void iwin_close(int idx)
     }
     w->active = 0;
     if (g_iwin_focus == idx) g_iwin_focus = -1;
+    damage_full();
 }
 
 static void iwin_focus(int idx)
 {
+    if (g_iwin_focus >= 0 && g_iwin[g_iwin_focus].active)
+        damage_iwin(&g_iwin[g_iwin_focus]);
     g_iwin_focus = idx;
+    if (g_iwin_focus >= 0 && g_iwin[g_iwin_focus].active)
+        damage_iwin(&g_iwin[g_iwin_focus]);
 }
 
 static void iwin_setup_pos(iwin_t *w, int win_w, int win_h)
@@ -2739,6 +2844,7 @@ static void iwin_setup_pos(iwin_t *w, int win_w, int win_h)
     if (w->x + w->w > (int)g_fb_w - 20) w->x = 20;
     if (w->y + w->h > (int)g_fb_h - TASKBAR_H - 20) w->y = 20;
     g_iwin_cascade++;
+    damage_iwin(w);
 }
 
 /* ── Draw internal window frame ────────────────────────────────────── */
@@ -2913,12 +3019,15 @@ static int term_process_esc(iwin_t *w, const char *buf, int len)
     return 2;  /* skip unknown ESC+char */
 }
 
-static void term_process_output(iwin_t *w)
+static int term_process_output(iwin_t *w)
 {
-    if (w->master_fd < 0) return;
+    int changed = 0;
+
+    if (w->master_fd < 0) return 0;
     char buf[1024];
     int n;
     while ((n = read(w->master_fd, buf, sizeof(buf))) > 0) {
+        changed = 1;
         int i = 0;
         while (i < n) {
             if (buf[i] == '\033') {
@@ -2930,6 +3039,7 @@ static void term_process_output(iwin_t *w)
             i++;
         }
     }
+    return changed;
 }
 
 static void draw_terminal_content(uint32_t *fb, int fb_w, int fb_h, iwin_t *w)
@@ -4070,8 +4180,10 @@ static void process_terminals(void)
 {
     for (int i = 0; i < MAX_IWIN; i++) {
         iwin_t *w = &g_iwin[i];
-        if (w->active && w->type == APP_TERMINAL && w->master_fd >= 0)
-            term_process_output(w);
+        if (w->active && w->type == APP_TERMINAL && w->master_fd >= 0) {
+            if (term_process_output(w))
+                damage_iwin(w);
+        }
     }
     /* Auto-refresh monitor and network windows */
     uint32_t now = get_time_ms();
@@ -4080,9 +4192,13 @@ static void process_terminals(void)
         if (w->active && w->type == APP_MONITOR &&
             now - w->last_refresh > 2000) {
             fill_monitor(w);
+            damage_iwin(w);
         } else if (w->active && w->type == APP_NETWORK &&
                    now - w->last_refresh > 2000) {
             fill_network(w);
+            damage_iwin(w);
+        } else if (w->active && w->type == APP_3DDEMO) {
+            damage_iwin(w);
         }
     }
 }
@@ -4205,6 +4321,7 @@ static int handle_iwin_click(int mx, int my)
                     g_fb_buf = (uint32_t *)malloc(g_fb_w * g_fb_h * 4);
                     memset(g_fb_buf, 0, g_fb_w * g_fb_h * 4);
                     g_icons_laid_out = 0;  /* relayout icons */
+                    damage_full();
                     fprintf(stderr, "wlcomp: resolution changed to %ux%u\n", g_fb_w, g_fb_h);
                     /* Refresh settings text */
                     fill_settings(w);
@@ -4228,8 +4345,10 @@ static void iwin_update_drag(int mx, int my, int buttons)
         if (w->resizing) {
             if (!(buttons & 1)) {
                 w->resizing = 0;
+                damage_iwin(w);
                 continue;
             }
+            damage_iwin(w);
             int dw = (w->resize_edge & 1) ? (mx - w->resize_start_x) : 0;
             int dh = (w->resize_edge & 2) ? (my - w->resize_start_y) : 0;
             int new_w = w->resize_start_w + dw;
@@ -4242,6 +4361,7 @@ static void iwin_update_drag(int mx, int my, int buttons)
             if (w->y + new_h > (int)g_fb_h) new_h = (int)g_fb_h - w->y;
             w->w = new_w;
             w->h = new_h;
+            damage_iwin(w);
             continue;
         }
 
@@ -4249,8 +4369,10 @@ static void iwin_update_drag(int mx, int my, int buttons)
         if (!w->dragging) continue;
         if (!(buttons & 1)) {
             w->dragging = 0;
+            damage_iwin(w);
             continue;
         }
+        damage_iwin(w);
         w->x = mx - w->drag_ox;
         w->y = my - w->drag_oy;
         /* Clamp */
@@ -4258,6 +4380,7 @@ static void iwin_update_drag(int mx, int my, int buttons)
         if (w->y < 0) w->y = 0;
         if (w->x + w->w > (int)g_fb_w) w->x = (int)g_fb_w - w->w;
         if (w->y + w->h > (int)g_fb_h) w->y = (int)g_fb_h - w->h;
+        damage_iwin(w);
     }
 }
 
@@ -4316,9 +4439,33 @@ static void composite_and_flip(void)
 {
     int fb_w = (int)g_fb_w;
     int fb_h = (int)g_fb_h;
+    static uint32_t next_clock_damage_ms;
+    uint32_t now = get_time_ms();
 
     /* Lay out icons if not done */
     layout_icons(fb_w, fb_h);
+
+    if (now >= next_clock_damage_ms) {
+        damage_rect(0, fb_h - TASKBAR_H, fb_w, TASKBAR_H);
+        next_clock_damage_ms = now + 1000;
+    }
+
+    if (!g_damage_valid) {
+        struct wlcomp_surface *cb_surf;
+        wl_list_for_each(cb_surf, &g_surfaces, link) {
+            if (cb_surf->frame_cb) {
+                wl_callback_send_done(cb_surf->frame_cb, now);
+                wl_resource_destroy(cb_surf->frame_cb);
+                cb_surf->frame_cb = NULL;
+            }
+        }
+        return;
+    }
+
+    int32_t dirty_x = g_damage_x1;
+    int32_t dirty_y = g_damage_y1;
+    int32_t dirty_w = g_damage_x2 - g_damage_x1;
+    int32_t dirty_h = g_damage_y2 - g_damage_y1;
 
     /* Draw desktop wallpaper */
     draw_wallpaper(g_fb_buf, fb_w, fb_h);
@@ -4437,19 +4584,19 @@ static void composite_and_flip(void)
 
     /* Blit to /dev/fb0 via GPU ioctl */
     struct fb_gpu_blit cmd;
-    cmd.x = 0;
-    cmd.y = 0;
-    cmd.w = g_fb_w;
-    cmd.h = g_fb_h;
+    cmd.x = (uint32_t)dirty_x;
+    cmd.y = (uint32_t)dirty_y;
+    cmd.w = (uint32_t)dirty_w;
+    cmd.h = (uint32_t)dirty_h;
     cmd.src_pitch = g_fb_w * 4;
-    cmd.pixels = (uint64_t)(uintptr_t)g_fb_buf;
+    cmd.pixels = (uint64_t)(uintptr_t)(g_fb_buf + dirty_y * fb_w + dirty_x);
     ioctl(g_fb_fd, FB_GPU_BLIT, &cmd);
+    g_damage_valid = 0;
 
     /* Once the frame is copied into fb0, release committed buffers so GTK can
      * recycle its Wayland SHM storage instead of allocating a fresh memfd for
      * every paint.  The buffer_released flag keeps replacement commits from
      * sending duplicate releases for the same wl_buffer. */
-    uint32_t now = get_time_ms();
     wl_list_for_each(surf, &g_surfaces, link) {
         surface_release_committed_buffer(surf);
         if (surf->frame_cb) {
@@ -4516,6 +4663,12 @@ static void process_mouse(void)
             left_press_count++;
     }
     cursor_moved = (g_cursor_x != old_cursor_x) || (g_cursor_y != old_cursor_y);
+    if (cursor_moved) {
+        damage_cursor_at(old_cursor_x, old_cursor_y);
+        damage_cursor_at(g_cursor_x, g_cursor_y);
+    }
+    if (pressed_edges || released_edges)
+        damage_full();
 
     /* Update internal window dragging */
     iwin_update_drag(g_cursor_x, g_cursor_y, g_buttons);
@@ -4553,6 +4706,7 @@ static void process_mouse(void)
         } else {
             int32_t dx = g_cursor_x - g_grab_start_mx;
             int32_t dy = g_cursor_y - g_grab_start_my;
+            damage_surface(g_grab_surface);
             if (g_grab_mode == 1) {
                 /* Move: update surface position */
                 g_grab_surface->x = g_grab_start_x + dx;
@@ -4590,6 +4744,7 @@ static void process_mouse(void)
                 xdg_surface_send_configure(g_grab_surface->xdg_surface,
                                            ++g_serial);
             }
+            damage_surface(g_grab_surface);
         }
         /* During grab, don't forward pointer events to clients */
         g_prev_buttons = g_buttons;
@@ -4812,6 +4967,7 @@ static void process_keyboard(void)
         /* Route to internal window if one is focused */
         if (g_iwin_focus >= 0 && g_iwin[g_iwin_focus].active) {
             iwin_key_input(ev.keycode, ev.scancode, ev.pressed, ev.modifiers);
+            damage_iwin(&g_iwin[g_iwin_focus]);
             continue;
         }
         /* Otherwise send to keyboard-focused Wayland client */
@@ -4898,6 +5054,7 @@ static int init_framebuffer(void)
         return -1;
     }
     memset(g_fb_buf, 0, g_fb_w * g_fb_h * 4);
+    damage_full();
 
     fprintf(stderr, "wlcomp: fb0 %ux%u pitch=%u\n", g_fb_w, g_fb_h, g_fb_pitch);
     return 0;
