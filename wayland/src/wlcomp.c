@@ -2010,6 +2010,8 @@ static void shortcut_add_default(const char *label, int action,
 {
     if (g_icon_count >= DESKTOP_ICON_MAX)
         return;
+    if (action == SHORTCUT_EXEC && path && access(path, X_OK) != 0)
+        return;
     shortcut_set(&g_icons[g_icon_count++], label, action, path, name, NULL,
                  color, symbol);
 }
@@ -2020,6 +2022,8 @@ static void shortcut_add_default_arg(const char *label, int action,
                                      uint32_t color, char symbol)
 {
     if (g_icon_count >= DESKTOP_ICON_MAX)
+        return;
+    if (action == SHORTCUT_EXEC && path && access(path, X_OK) != 0)
         return;
     shortcut_set(&g_icons[g_icon_count++], label, action, path, name, arg,
                  color, symbol);
@@ -2089,6 +2093,8 @@ static int parse_desktop_shortcut(const char *path, desktop_icon_t *out)
 
     int action = builtin[0] ? shortcut_action_from_name(builtin) : SHORTCUT_EXEC;
     if (action == SHORTCUT_EXEC && !exec[0])
+        return -1;
+    if (action == SHORTCUT_EXEC && access(exec, X_OK) != 0)
         return -1;
 
     shortcut_set(out, name, action, exec, exec[0] ? path_basename(exec) : "",
