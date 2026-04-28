@@ -96,6 +96,12 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1)
             argv_default[1] = NULL;
         char *argv_minibrowser[] = {
             (char *)name,
+            "--enable-javascript=false",
+            "--enable-webgl=false",
+            "--enable-webaudio=false",
+            "--enable-mediasource=false",
+            "--enable-media-stream=false",
+            "--enable-page-cache=false",
             (char *)(arg1 ? arg1 : "https://www.google.com/"),
             NULL,
         };

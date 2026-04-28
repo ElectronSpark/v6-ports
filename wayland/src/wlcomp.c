@@ -1840,6 +1840,12 @@ static void launch_desktop_app_arg(const char *path, const char *name,
         char *argv_noarg[] = { (char *)name, NULL };
         char *argv_minibrowser[] = {
             (char *)name,
+            "--enable-javascript=false",
+            "--enable-webgl=false",
+            "--enable-webaudio=false",
+            "--enable-mediasource=false",
+            "--enable-media-stream=false",
+            "--enable-page-cache=false",
             (char *)(arg ? arg : "https://www.google.com/"),
             NULL,
         };
