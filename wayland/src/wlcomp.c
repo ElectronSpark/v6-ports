@@ -91,6 +91,8 @@ static int16_t  g_cursor_x, g_cursor_y;
 static uint8_t  g_buttons;
 static uint32_t g_serial;
 
+#define TASKBAR_H          36
+
 static void damage_rect(int32_t x, int32_t y, int32_t w, int32_t h)
 {
     int32_t x2 = x + w;
@@ -123,6 +125,13 @@ static void damage_rect(int32_t x, int32_t y, int32_t w, int32_t h)
 static void damage_full(void)
 {
     damage_rect(0, 0, (int32_t)g_fb_w, (int32_t)g_fb_h);
+}
+
+static void damage_taskbar(void)
+{
+    if (g_fb_h >= TASKBAR_H)
+        damage_rect(0, (int32_t)g_fb_h - TASKBAR_H,
+                    (int32_t)g_fb_w, TASKBAR_H);
 }
 
 /* Protocol globals */
@@ -903,6 +912,7 @@ static void toplevel_move(struct wl_client *c, struct wl_resource *r,
     (void)c; (void)seat; (void)serial;
     struct wlcomp_surface *surf = wl_resource_get_user_data(r);
     if (!surf || surf->maximized) return;
+    damage_surface(surf);
     g_grab_surface = surf;
     g_grab_mode = 1; /* move */
     g_grab_start_mx = g_cursor_x;
@@ -918,6 +928,7 @@ static void toplevel_resize(struct wl_client *c, struct wl_resource *r,
     (void)c; (void)seat; (void)serial;
     struct wlcomp_surface *surf = wl_resource_get_user_data(r);
     if (!surf || surf->maximized) return;
+    damage_surface(surf);
     g_grab_surface = surf;
     g_grab_mode = 2; /* resize */
     g_grab_edges = edges;
@@ -1855,7 +1866,6 @@ static int g_selected_icon = -1;       /* currently selected desktop icon */
 
 /* ── Taskbar button definitions ────────────────────────────────────── */
 
-#define TASKBAR_H          36
 #define TB_BTN_H           28
 #define TB_BTN_PAD         4
 
@@ -2553,7 +2563,10 @@ static int taskbar_task_hit(int mx, int my, int fb_w, int fb_h)
     for (int i = 0; i < MAX_IWIN && tx + TB_TASK_W <= right_limit; i++) {
         if (!g_iwin[i].active) continue;
         if (mx >= tx && mx < tx + TB_TASK_W) {
+            if (g_iwin_focus != i)
+                damage_full();
             g_iwin_focus = i;
+            damage_taskbar();
             return 1;
         }
         tx += TB_TASK_W + TB_TASK_GAP;
@@ -2565,6 +2578,7 @@ static int taskbar_task_hit(int mx, int my, int fb_w, int fb_h)
         if (!surface_has_taskbar_button(surf) ||
             tx + TB_TASK_W > right_limit) continue;
         if (mx >= tx && mx < tx + TB_TASK_W) {
+            damage_surface(surf);
             g_iwin_focus = -1;
             if (surf->minimized) {
                 /* Restore */
@@ -2581,6 +2595,8 @@ static int taskbar_task_hit(int mx, int my, int fb_w, int fb_h)
             /* Raise this surface by moving to head of list */
             wl_list_remove(&surf->link);
             wl_list_insert(&g_surfaces, &surf->link);
+            damage_surface(surf);
+            damage_taskbar();
             return 1;
         }
         tx += TB_TASK_W + TB_TASK_GAP;
@@ -2756,12 +2772,14 @@ static void handle_desktop_click(int mx, int my, int fb_w, int fb_h,
         } else {
             g_menu_open = 0;  /* close on outside click or separator */
         }
+        damage_full();
         return;
     }
 
     /* Check menu button on taskbar */
     if (menu_hit_test(mx, my, fb_h)) {
         g_menu_open = !g_menu_open;
+        damage_full();
         return;
     }
 
@@ -2780,12 +2798,14 @@ static void handle_desktop_click(int mx, int my, int fb_w, int fb_h,
             /* First click — select */
             g_selected_icon = hit;
         }
+        damage_full();
         return;
     }
 
     /* Click on empty desktop: deselect icon and close menu */
     g_selected_icon = -1;
     g_menu_open = 0;
+    damage_full();
 }
 
 /* ── Internal window management ────────────────────────────────────── */
@@ -4442,14 +4462,26 @@ static void composite_and_flip(void)
     int fb_w = (int)g_fb_w;
     int fb_h = (int)g_fb_h;
     static uint32_t next_clock_damage_ms;
+    static uint32_t next_repair_damage_ms;
     uint32_t now = get_time_ms();
 
     /* Lay out icons if not done */
     layout_icons(fb_w, fb_h);
 
     if (now >= next_clock_damage_ms) {
-        damage_rect(0, fb_h - TASKBAR_H, fb_w, TASKBAR_H);
+        damage_taskbar();
         next_clock_damage_ms = now + 1000;
+    }
+
+    /*
+     * Damage tracking keeps normal motion to partial blits, but the desktop
+     * has several independently composed layers.  This low-rate repair pass
+     * bounds any missed old region so stale pixels cannot survive until an
+     * unrelated object happens to move across them.
+     */
+    if (now >= next_repair_damage_ms) {
+        damage_full();
+        next_repair_damage_ms = now + 500;
     }
 
     if (!g_damage_valid) {
