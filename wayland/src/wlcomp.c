@@ -317,6 +317,17 @@ static void buffer_maybe_free(struct wlcomp_buffer *buf)
     buffer_free(buf);
 }
 
+static void surface_release_committed_buffer(struct wlcomp_surface *surf)
+{
+    if (!surf || !surf->committed_buf || surf->buffer_released)
+        return;
+
+    if (surf->committed_buf->resource) {
+        wl_buffer_send_release(surf->committed_buf->resource);
+        surf->buffer_released = 1;
+    }
+}
+
 static void *buffer_data(struct wlcomp_buffer *buf)
 {
     if (!buf || !buf->pool || !buf->pool->data)
@@ -4428,11 +4439,13 @@ static void composite_and_flip(void)
     cmd.pixels = (uint64_t)(uintptr_t)g_fb_buf;
     ioctl(g_fb_fd, FB_GPU_BLIT, &cmd);
 
-    /* Fire frame callbacks.  Keep current committed buffers owned until
-     * replacement; releasing them here lets clients reuse storage that we
-     * still composite from. */
+    /* Once the frame is copied into fb0, release committed buffers so GTK can
+     * recycle its Wayland SHM storage instead of allocating a fresh memfd for
+     * every paint.  The buffer_released flag keeps replacement commits from
+     * sending duplicate releases for the same wl_buffer. */
     uint32_t now = get_time_ms();
     wl_list_for_each(surf, &g_surfaces, link) {
+        surface_release_committed_buffer(surf);
         if (surf->frame_cb) {
             wl_callback_send_done(surf->frame_cb, now);
             wl_resource_destroy(surf->frame_cb);
