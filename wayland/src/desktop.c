@@ -96,7 +96,6 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1)
             argv_default[1] = NULL;
         char *argv_minibrowser[] = {
             (char *)name,
-            "--enable-javascript=false",
             "--enable-webgl=false",
             "--enable-webaudio=false",
             "--enable-mediasource=false",
@@ -112,6 +111,7 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1)
             "XDG_CACHE_HOME=/tmp/.cache",
             "WAYLAND_DISPLAY=wayland-0",
             "GDK_BACKEND=wayland",
+            "GDK_DPI_SCALE=1.35",
             "XCURSOR_PATH=/share/icons",
             "XCURSOR_THEME=Adwaita",
             "SSL_CERT_FILE=/share/netsurf/ca-bundle",
