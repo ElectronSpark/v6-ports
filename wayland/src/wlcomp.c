@@ -4908,6 +4908,8 @@ static int init_input(void)
     g_mouse_fd = open("/dev/mouse", O_RDONLY | O_NONBLOCK);
     if (g_mouse_fd < 0)
         fprintf(stderr, "wlcomp: no /dev/mouse\n");
+    else
+        fprintf(stderr, "wlcomp: opened /dev/mouse fd=%d\n", g_mouse_fd);
 
     g_kbd_fd = open("/dev/kbd", O_RDONLY | O_NONBLOCK);
     if (g_kbd_fd < 0)
