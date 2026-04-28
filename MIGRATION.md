@@ -56,6 +56,7 @@ and documents the per-port recipes still to be written.
 | netsurf-libsvgtiny  | from-source (netsurf-make, deps: libexpat/libwapcaplet) | `ports/netsurf-libsvgtiny/CMakeLists.txt` |
 | vim       | from-source (autoconf, deps: ncurses) | `ports/vim/CMakeLists.txt`               |
 | cpython   | from-source (autoconf, deps: all above) | `ports/cpython/CMakeLists.txt`         |
+| webkit    | repo-local runtime stage + xv6 source overrides | `ports/webkit/CMakeLists.txt` |
 
 ## NetSurf-GTK3 roadmap (in progress)
 
@@ -88,6 +89,27 @@ Tier 6 (browser):
   ✓ libpng-host (native libpng for NetSurf's convert_image build tool)
   ✓ netsurf (GTK3 frontend, dynamically linked, /share/netsurf/ resources)
 ```
+
+## WebKitGTK roadmap
+
+The `webkit` port is intentionally self-contained for now: it stages the
+committed `ports/webkit/sysroot` runtime into `${XV6_SYSROOT}` and applies no
+network fetches or host package installs. The source overrides under
+`ports/webkit/overrides/webkitgtk-2.42.5/` document the xv6-specific changes
+needed for a future from-source WebKitGTK build.
+
+Current behavior:
+
+- `port-webkit` validates that the selected runtime has MiniBrowser, the WebKit
+  subprocesses, JavaScriptCore/WebKit shared libraries, and the injected bundle.
+- The default runtime source is the repo-local `ports/webkit/sysroot`; an
+  explicit `XV6_WEBKIT_REF_SYSROOT` or `-DXV6_WEBKIT_REF_SYSROOT=...` can still
+  be used for local experiments.
+- `XV6_WEBKIT_STRICT_STAGE=ON` is the default, so container builds fail early if
+  the runtime payload is incomplete instead of silently producing a blank
+  WebKit desktop entry.
+- A `.webkit-stage-manifest` is emitted next to the staged executables for
+  quick inspection of what landed in the sysroot.
 
 Tier 2 done. The `meson` build mode in `xv6_port()` synthesizes a
 cross-file at configure time (CC/AR/strip/ranlib + sysroot +
