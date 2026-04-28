@@ -29,6 +29,12 @@
 /* xv6-specific syscall numbers (not in musl headers) */
 #define XV6_SYS_poweroff  166
 
+/* PTY/TTY ioctls used by the built-in terminal. */
+#define XV6_TIOCGPGRP  0x540F
+#define XV6_TIOCSCTTY  0x540E
+#define XV6_TIOCSWINSZ 0x5414
+#define XV6_TIOCGPTN   0x80045430
+
 /* ══════════════════════════════════════════════════════════════════════
  *  Framebuffer
  * ══════════════════════════════════════════════════════════════════════ */
@@ -1873,6 +1879,7 @@ static int g_selected_icon = -1;       /* currently selected desktop icon */
 
 #define MAX_CHILDREN 16
 static pid_t g_children[MAX_CHILDREN];
+static pid_t g_pending_reap[MAX_CHILDREN];
 
 static void terminate_client_pid(pid_t pid)
 {
@@ -1885,6 +1892,31 @@ static void terminate_client_pid(pid_t pid)
         kill(pid, SIGTERM);
         kill(pid, SIGKILL);
     }
+}
+
+static void remember_pending_reap(pid_t pid)
+{
+    if (pid <= 0)
+        return;
+
+    for (int i = 0; i < MAX_CHILDREN; i++) {
+        if (g_pending_reap[i] == pid)
+            return;
+    }
+    for (int i = 0; i < MAX_CHILDREN; i++) {
+        if (g_pending_reap[i] == 0) {
+            g_pending_reap[i] = pid;
+            return;
+        }
+    }
+}
+
+static void signal_process_group(pid_t pid, int sig)
+{
+    if (pid <= 0)
+        return;
+    kill(-pid, sig);
+    kill(pid, sig);
 }
 
 static void destroy_surface_client(struct wlcomp_surface *surf)
@@ -2049,6 +2081,15 @@ static void reap_children(void)
                             g_children[i], status);
                 g_children[i] = 0;
             }
+        }
+    }
+
+    for (int i = 0; i < MAX_CHILDREN; i++) {
+        if (g_pending_reap[i] > 0) {
+            int status;
+            pid_t r = waitpid(g_pending_reap[i], &status, WNOHANG);
+            if (r > 0 || (r < 0 && errno == ECHILD))
+                g_pending_reap[i] = 0;
         }
     }
 }
@@ -2831,9 +2872,23 @@ static void iwin_close(int idx)
     iwin_t *w = &g_iwin[idx];
     damage_iwin(w);
     if (w->type == APP_TERMINAL) {
+        pid_t fg_pgid = 0;
+        if (w->master_fd >= 0)
+            ioctl(w->master_fd, XV6_TIOCGPGRP, &fg_pgid);
+        fprintf(stderr, "wlcomp: closing terminal shell=%d fg_pgid=%d master=%d\n",
+                w->shell_pid, fg_pgid, w->master_fd);
+        if (fg_pgid > 0 && fg_pgid != w->shell_pid) {
+            signal_process_group(fg_pgid, SIGHUP);
+            signal_process_group(fg_pgid, SIGTERM);
+            signal_process_group(fg_pgid, SIGKILL);
+            remember_pending_reap(fg_pgid);
+        }
         if (w->shell_pid > 0) {
-            kill(w->shell_pid, SIGTERM);
-            waitpid(w->shell_pid, NULL, 0);
+            signal_process_group(w->shell_pid, SIGHUP);
+            signal_process_group(w->shell_pid, SIGTERM);
+            signal_process_group(w->shell_pid, SIGKILL);
+            waitpid(w->shell_pid, NULL, WNOHANG);
+            remember_pending_reap(w->shell_pid);
             w->shell_pid = 0;
         }
         if (w->master_fd >= 0) {
@@ -3121,7 +3176,7 @@ static void open_terminal(void)
     }
 
     unsigned int pts_idx = 0;
-    ioctl(master, 0x5430 /* TIOCGPTN */, &pts_idx);
+    ioctl(master, XV6_TIOCGPTN, &pts_idx);
 
     char pts_path[32];
     snprintf(pts_path, sizeof(pts_path), "/dev/pts/%u", pts_idx);
@@ -3143,11 +3198,12 @@ static void open_terminal(void)
         setsid();
         int slave = open(pts_path, O_RDWR);
         if (slave < 0) _exit(1);
+        ioctl(slave, XV6_TIOCSCTTY, 0);
         struct { unsigned short ws_row, ws_col, ws_xpixel, ws_ypixel; } ws;
         memset(&ws, 0, sizeof(ws));
         ws.ws_row = TERM_ROWS;
         ws.ws_col = TERM_COLS;
-        ioctl(slave, 0x5414 /* TIOCSWINSZ */, &ws);
+        ioctl(slave, XV6_TIOCSWINSZ, &ws);
         dup2(slave, 0);
         dup2(slave, 1);
         dup2(slave, 2);
@@ -3205,7 +3261,7 @@ static void open_editor_path(const char *path)
     }
 
     unsigned int pts_idx = 0;
-    ioctl(master, 0x5430 /* TIOCGPTN */, &pts_idx);
+    ioctl(master, XV6_TIOCGPTN, &pts_idx);
 
     char pts_path[32];
     snprintf(pts_path, sizeof(pts_path), "/dev/pts/%u", pts_idx);
@@ -3225,11 +3281,12 @@ static void open_editor_path(const char *path)
         setsid();
         int slave = open(pts_path, O_RDWR);
         if (slave < 0) _exit(1);
+        ioctl(slave, XV6_TIOCSCTTY, 0);
         struct { unsigned short ws_row, ws_col, ws_xpixel, ws_ypixel; } ws;
         memset(&ws, 0, sizeof(ws));
         ws.ws_row = TERM_ROWS;
         ws.ws_col = TERM_COLS;
-        ioctl(slave, 0x5414 /* TIOCSWINSZ */, &ws);
+        ioctl(slave, XV6_TIOCSWINSZ, &ws);
         dup2(slave, 0);
         dup2(slave, 1);
         dup2(slave, 2);
