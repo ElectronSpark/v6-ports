@@ -3757,7 +3757,7 @@ static void open_calc(void)
     iwin_focus(iwin_index(w));
 }
 
-/* ── 3D Demo (wireframe spinning cube) ─────────────────────────────── */
+/* ── 3D Demo (software OpenGL-style renderer) ──────────────────────── */
 
 /* Fixed-point sin/cos table (256 entries, scale 1024) */
 static int sin_tab[256];
@@ -3786,20 +3786,82 @@ static void init_sin_tab(void)
 static int fsin(int deg) { return sin_tab[((deg % 360 + 360) * 256 / 360) & 255]; }
 static int fcos(int deg) { return sin_tab[(((deg + 90) % 360 + 360) * 256 / 360) & 255]; }
 
-static void draw_line_fb(uint32_t *fb, int fb_w, int fb_h,
-                         int x0, int y0, int x1, int y1, uint32_t color)
+struct swgl_context {
+    uint32_t *fb;
+    int fb_w;
+    int fb_h;
+    int x;
+    int y;
+    int w;
+    int h;
+};
+
+struct swgl_vertex {
+    int x;
+    int y;
+    int z;
+};
+
+static uint32_t swgl_shade(uint32_t color, int shade)
 {
-    int dx = x1 - x0, dy = y1 - y0;
-    int ax = dx < 0 ? -dx : dx, ay = dy < 0 ? -dy : dy;
-    int sx = dx < 0 ? -1 : 1, sy = dy < 0 ? -1 : 1;
-    int err = ax - ay;
-    for (;;) {
-        if (x0 >= 0 && x0 < fb_w && y0 >= 0 && y0 < fb_h)
-            fb[y0 * fb_w + x0] = color;
-        if (x0 == x1 && y0 == y1) break;
-        int e2 = 2 * err;
-        if (e2 > -ay) { err -= ay; x0 += sx; }
-        if (e2 < ax)  { err += ax; y0 += sy; }
+    uint32_t r, g, b;
+
+    if (shade < 32) shade = 32;
+    if (shade > 255) shade = 255;
+    r = ((color >> 16) & 0xFF) * shade / 255;
+    g = ((color >> 8) & 0xFF) * shade / 255;
+    b = (color & 0xFF) * shade / 255;
+    return 0xFF000000 | (r << 16) | (g << 8) | b;
+}
+
+static void swgl_clear(struct swgl_context *gl, uint32_t color)
+{
+    draw_rect(gl->fb, gl->fb_w, gl->fb_h, gl->x, gl->y, gl->w, gl->h, color);
+}
+
+static int swgl_edge(struct swgl_vertex a, struct swgl_vertex b, int x, int y)
+{
+    return (x - a.x) * (b.y - a.y) - (y - a.y) * (b.x - a.x);
+}
+
+static void swgl_draw_triangle(struct swgl_context *gl,
+                               struct swgl_vertex a,
+                               struct swgl_vertex b,
+                               struct swgl_vertex c,
+                               uint32_t color)
+{
+    int min_x = a.x, max_x = a.x;
+    int min_y = a.y, max_y = a.y;
+    int area;
+
+    if (b.x < min_x) min_x = b.x;
+    if (c.x < min_x) min_x = c.x;
+    if (b.x > max_x) max_x = b.x;
+    if (c.x > max_x) max_x = c.x;
+    if (b.y < min_y) min_y = b.y;
+    if (c.y < min_y) min_y = c.y;
+    if (b.y > max_y) max_y = b.y;
+    if (c.y > max_y) max_y = c.y;
+
+    if (min_x < gl->x) min_x = gl->x;
+    if (min_y < gl->y) min_y = gl->y;
+    if (max_x >= gl->x + gl->w) max_x = gl->x + gl->w - 1;
+    if (max_y >= gl->y + gl->h) max_y = gl->y + gl->h - 1;
+
+    area = swgl_edge(a, b, c.x, c.y);
+    if (area == 0)
+        return;
+
+    for (int y = min_y; y <= max_y; y++) {
+        for (int x = min_x; x <= max_x; x++) {
+            int w0 = swgl_edge(b, c, x, y);
+            int w1 = swgl_edge(c, a, x, y);
+            int w2 = swgl_edge(a, b, x, y);
+            if ((area > 0 && w0 >= 0 && w1 >= 0 && w2 >= 0) ||
+                (area < 0 && w0 <= 0 && w1 <= 0 && w2 <= 0)) {
+                gl->fb[y * gl->fb_w + x] = color;
+            }
+        }
     }
 }
 
@@ -3809,9 +3871,9 @@ static void draw_3d_content(uint32_t *fb, int fb_w, int fb_h, iwin_t *w)
     int cy0 = w->y + IWIN_TITLE_H + 2;
     int cw = w->w - 8;
     int ch = w->h - IWIN_TITLE_H - 4;
+    struct swgl_context gl = { fb, fb_w, fb_h, cx0, cy0, cw, ch };
 
-    /* Black background */
-    draw_rect(fb, fb_w, fb_h, cx0, cy0, cw, ch, 0xFF080810);
+    swgl_clear(&gl, 0xFF080810);
 
     /* Hexagonal prism: 6 top vertices (0-5), 6 bottom vertices (6-11) */
     /* Hex radius 90, half-height 70 */
@@ -3833,7 +3895,8 @@ static void draw_3d_content(uint32_t *fb, int fb_w, int fb_h, iwin_t *w)
     int sa = fsin(a), ca = fcos(a);
     int sb = fsin(a * 7 / 10), cb = fcos(a * 7 / 10);
 
-    int sx[12], sy[12], rz_arr[12];
+    struct swgl_vertex projected[12];
+    int rz_arr[12];
     int midx = cx0 + cw / 2, midy = cy0 + ch / 2;
 
     for (int i = 0; i < 12; i++) {
@@ -3844,8 +3907,9 @@ static void draw_3d_content(uint32_t *fb, int fb_w, int fb_h, iwin_t *w)
         int rz2 = (y * sb + rz * cb) / 1024;
         int d = 450 + rz2;
         if (d < 50) d = 50;
-        sx[i] = midx + rx * 300 / d;
-        sy[i] = midy + ry * 300 / d;
+        projected[i].x = midx + rx * 300 / d;
+        projected[i].y = midy + ry * 300 / d;
+        projected[i].z = rz2;
         rz_arr[i] = rz2;
     }
 
@@ -3901,43 +3965,20 @@ static void draw_3d_content(uint32_t *fb, int fb_w, int fb_h, iwin_t *w)
 
     /* Draw filled triangles using scanline */
     for (int fi = 0; fi < nf; fi++) {
-        int x0 = sx[faces[fi].v[0]], y0 = sy[faces[fi].v[0]];
-        int x1 = sx[faces[fi].v[1]], y1 = sy[faces[fi].v[1]];
-        int x2 = sx[faces[fi].v[2]], y2 = sy[faces[fi].v[2]];
-        uint32_t col = faces[fi].color;
+        int shade = 190 + faces[fi].depth / 3;
+        uint32_t col = swgl_shade(faces[fi].color, shade);
 
-        /* Sort vertices by y */
-        if (y0 > y1) { int t; t=x0; x0=x1; x1=t; t=y0; y0=y1; y1=t; }
-        if (y0 > y2) { int t; t=x0; x0=x2; x2=t; t=y0; y0=y2; y2=t; }
-        if (y1 > y2) { int t; t=x1; x1=x2; x2=t; t=y1; y1=y2; y2=t; }
-
-        int dy02 = y2 - y0 ? y2 - y0 : 1;
-        int dy01 = y1 - y0 ? y1 - y0 : 1;
-        int dy12 = y2 - y1 ? y2 - y1 : 1;
-
-        for (int y = y0; y <= y2; y++) {
-            if (y < cy0 || y >= cy0 + ch) continue;
-            /* Interpolate x along edges */
-            int xa = x0 + (x2 - x0) * (y - y0) / dy02;
-            int xb;
-            if (y < y1)
-                xb = x0 + (x1 - x0) * (y - y0) / dy01;
-            else
-                xb = x1 + (x2 - x1) * (y - y1) / dy12;
-            if (xa > xb) { int t = xa; xa = xb; xb = t; }
-            if (xa < cx0) xa = cx0;
-            if (xb >= cx0 + cw) xb = cx0 + cw - 1;
-            for (int x = xa; x <= xb; x++) {
-                if (x >= 0 && x < fb_w && y >= 0 && y < fb_h)
-                    fb[y * fb_w + x] = col;
-            }
-        }
+        swgl_draw_triangle(&gl,
+                           projected[faces[fi].v[0]],
+                           projected[faces[fi].v[1]],
+                           projected[faces[fi].v[2]],
+                           col);
     }
 
     /* Info text */
     char buf[32];
-    snprintf(buf, sizeof(buf), "angle: %d", a % 360);
-    draw_string(fb, fb_w, fb_h, cx0 + 8, cy0 + ch - 20, buf, 0xFF808080, 1);
+    snprintf(buf, sizeof(buf), "OpenGL angle: %d", a % 360);
+    draw_string(fb, fb_w, fb_h, cx0 + 8, cy0 + ch - 20, buf, 0xFF90D8FF, 1);
 
     /* Auto-advance angle */
     w->demo_angle = (w->demo_angle + 2) % 3600;
@@ -3951,7 +3992,7 @@ static void open_3ddemo(void)
     w->active = 1;
     w->type = APP_3DDEMO;
     w->master_fd = -1;
-    snprintf(w->title, sizeof(w->title), "3D Demo");
+    snprintf(w->title, sizeof(w->title), "OpenGL Demo");
     iwin_setup_pos(w, 360, 320);
     w->demo_angle = 0;
     iwin_focus(iwin_index(w));
@@ -5113,6 +5154,37 @@ static int init_input(void)
     return 0;
 }
 
+static int cmdline_flag_enabled(const char *key)
+{
+    char buf[512];
+    int fd = open("/proc/cmdline", O_RDONLY);
+    int n;
+    size_t key_len = strlen(key);
+    const char *p;
+
+    if (fd < 0)
+        return 0;
+    n = read(fd, buf, sizeof(buf) - 1);
+    close(fd);
+    if (n <= 0)
+        return 0;
+    buf[n] = '\0';
+
+    p = buf;
+    while (*p) {
+        while (*p == ' ' || *p == '\t' || *p == '\n')
+            p++;
+        if (strncmp(p, key, key_len) == 0 && p[key_len] == '=' &&
+            p[key_len + 1] == '1' &&
+            (p[key_len + 2] == '\0' || p[key_len + 2] == ' ' ||
+             p[key_len + 2] == '\t' || p[key_len + 2] == '\n'))
+            return 1;
+        while (*p && *p != ' ' && *p != '\t' && *p != '\n')
+            p++;
+    }
+    return 0;
+}
+
 /* ══════════════════════════════════════════════════════════════════════
  *  Main
  * ══════════════════════════════════════════════════════════════════════ */
@@ -5194,6 +5266,11 @@ int main(int argc, char **argv)
     if (g_kbd_fd >= 0) {
         ev.data.fd = g_kbd_fd;
         epoll_ctl(epfd, EPOLL_CTL_ADD, g_kbd_fd, &ev);
+    }
+
+    if (cmdline_flag_enabled("demo3d")) {
+        open_3ddemo();
+        fprintf(stderr, "wlcomp: opened OpenGL Demo from demo3d=1\n");
     }
 
     /* Main compositor loop */
