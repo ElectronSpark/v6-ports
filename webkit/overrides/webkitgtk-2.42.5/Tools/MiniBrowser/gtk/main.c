@@ -1184,6 +1184,9 @@ int main(int argc, char *argv[])
     WebKitSettings *webkitSettings = webkit_settings_new();
     DBG_WRITE("[MiniBrowser] webkit_settings_new() done\n");
     webkit_settings_set_enable_developer_extras(webkitSettings, TRUE);
+    webkit_settings_set_default_font_size(webkitSettings, 18);
+    webkit_settings_set_default_monospace_font_size(webkitSettings, 16);
+    webkit_settings_set_minimum_font_size(webkitSettings, 12);
     webkit_settings_set_enable_webgl(webkitSettings, TRUE);
     webkit_settings_set_enable_media_stream(webkitSettings, TRUE);
     if (!addSettingsGroupToContext(context, webkitSettings))

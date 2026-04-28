@@ -76,7 +76,7 @@ struct _BrowserWindowClass {
 static const char *defaultWindowTitle = "WebKitGTK MiniBrowser";
 static const gdouble minimumZoomLevel = 0.5;
 static const gdouble maximumZoomLevel = 3;
-static const gdouble defaultZoomLevel = 1;
+static const gdouble defaultZoomLevel = 1.2;
 static const gdouble zoomStep = 1.2;
 
 static const char *loadEventToString(WebKitLoadEvent loadEvent)
@@ -1496,6 +1496,9 @@ static void browser_window_init(BrowserWindow *window)
     window->uriEntry = gtk_entry_new();
     gtk_widget_set_halign(window->uriEntry, GTK_ALIGN_FILL);
     gtk_widget_set_hexpand(window->uriEntry, TRUE);
+    PangoFontDescription *uriFont = pango_font_description_from_string("Sans 15");
+    gtk_widget_override_font(window->uriEntry, uriFont);
+    pango_font_description_free(uriFont);
     g_signal_connect_swapped(window->uriEntry, "activate", G_CALLBACK(activateUriEntryCallback), (gpointer)window);
     gtk_entry_set_icon_activatable(GTK_ENTRY(window->uriEntry), GTK_ENTRY_ICON_PRIMARY, FALSE);
     updateUriEntryIcon(window);

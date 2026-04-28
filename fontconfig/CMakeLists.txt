@@ -16,4 +16,6 @@ xv6_port(
         -Dtools=disabled
         -Dcache-build=disabled
         -Diconv=disabled
+        -Ddefault-fonts-dirs=/usr/share/fonts,/usr/local/share/fonts,/share/fonts,/share/netsurf/fonts
+        -Dadditional-fonts-dirs=/share/fonts,/share/netsurf/fonts
 )

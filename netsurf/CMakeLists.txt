@@ -31,6 +31,8 @@ set(NS_HOST_PNG_INC ${NS_HOST_TOOLS}/include)
 set(NS_BIN          ${XV6_SYSROOT}/bin/netsurf)
 set(NS_SHARE        ${XV6_SYSROOT}/share/netsurf)
 set(NS_RES          ${NS_SRC}/frontends/gtk/res)
+set(NS_BUNDLED_FONTS ${CMAKE_CURRENT_SOURCE_DIR}/../pango/src/tests/fonts)
+set(NS_GLYPH_DATA   ${NS_SRC}/frontends/framebuffer/res/fonts/glyph_data)
 
 set(NS_TRIPLE       ${XV6_TRIPLE})
 set(NS_CC           ${CMAKE_C_COMPILER})
@@ -62,6 +64,8 @@ NS_SHARED=\"${NS_SHARED}\"
 NS_HOST_TOOLS=\"${NS_HOST_TOOLS}\"
 NS_HOST_PNG_LIB=\"${NS_HOST_PNG_LIB}\"
 NS_HOST_PNG_INC=\"${NS_HOST_PNG_INC}\"
+NS_BUNDLED_FONTS=\"${NS_BUNDLED_FONTS}\"
+NS_GLYPH_DATA=\"${NS_GLYPH_DATA}\"
 NS_TRIPLE=\"${NS_TRIPLE}\"
 PHASE2_LIB=\"${NS_PHASE2_LIB}\"
 DYN_LINKER=\"${NS_DYNLINKER}\"
@@ -118,6 +122,16 @@ chmod +x \"\${PKG_CONFIG}\"
 
 cd \"\${NS_SRC}\"
 
+python3 - <<'PY'
+from pathlib import Path
+p = Path("frontends/gtk/gui.c")
+s = p.read_text()
+s = s.replace('strdup("Sans")', 'strdup("DejaVu Sans")')
+s = s.replace('strdup("Serif")', 'strdup("DejaVu Sans")')
+s = s.replace('strdup("Monospace")', 'strdup("DejaVu Sans Mono")')
+p.write_text(s)
+PY
+
 # Makefile.config — frontend selection + USE_* knobs
 cat > Makefile.config << EOF
 override PKGCONFIG := \${PKG_CONFIG}
@@ -171,7 +185,8 @@ install -m 0755 \"\$BIN\" \"\${SYSROOT}/bin/netsurf\"
 NS_RES=\"\${NS_SRC}/frontends/gtk/res\"
 NS_SHARE=\"\${SYSROOT}/share/netsurf\"
 FC_FONT_DIR=\"\${SYSROOT}/usr/share/fonts/truetype/dejavu\"
-mkdir -p \"\${NS_SHARE}/icons\" \"\${NS_SHARE}/throbber\" \"\${NS_SHARE}/gtk3\" \"\${NS_SHARE}/fonts\" \"\${FC_FONT_DIR}\"
+ALT_FONT_DIR=\"\${SYSROOT}/share/fonts/dejavu\"
+mkdir -p \"\${NS_SHARE}/icons\" \"\${NS_SHARE}/throbber\" \"\${NS_SHARE}/gtk3\" \"\${NS_SHARE}/fonts\" \"\${FC_FONT_DIR}\" \"\${ALT_FONT_DIR}\"
 cp -f \"\${NS_RES}\"/*.css \"\${NS_RES}\"/*.html \"\${NS_RES}\"/*.png \"\${NS_SHARE}/\" 2>/dev/null || true
 cp -f \"\${NS_RES}\"/*.ico \"\${NS_RES}\"/*.xpm \"\${NS_SHARE}/\" 2>/dev/null || true
 cp -f \"\${NS_RES}/SearchEngines\" \"\${NS_RES}/Messages\" \"\${NS_RES}/accelerators\" \"\${NS_SHARE}/\" 2>/dev/null || true
@@ -213,14 +228,27 @@ for lang in de en fr it ja nl zh_CN; do
   fi
 done
 DEJAVU=/usr/share/fonts/truetype/dejavu
+copy_font_file() {
+  local src=\"\$1\"
+  [ -f \"\$src\" ] || return 0
+  cp -f \"\$src\" \"\${NS_SHARE}/fonts/\"
+  cp -f \"\$src\" \"\${FC_FONT_DIR}/\"
+  cp -f \"\$src\" \"\${ALT_FONT_DIR}/\"
+}
+
+if [ -d \"\${NS_BUNDLED_FONTS}\" ]; then
+  for f in DejaVuSans.ttf DejaVuSans-Bold.ttf DejaVuSansMono.ttf; do
+    copy_font_file \"\${NS_BUNDLED_FONTS}/\$f\"
+  done
+fi
+if [ -f \"\${NS_GLYPH_DATA}\" ]; then
+  cp -f \"\${NS_GLYPH_DATA}\" \"\${NS_SHARE}/fonts/glyph_data\"
+fi
 if [ -d \"\$DEJAVU\" ]; then
   for f in DejaVuSans.ttf DejaVuSans-Bold.ttf DejaVuSans-Oblique.ttf \\
            DejaVuSans-BoldOblique.ttf DejaVuSerif.ttf DejaVuSerif-Bold.ttf \\
            DejaVuSansMono.ttf DejaVuSansMono-Bold.ttf; do
-    if [ -f \"\$DEJAVU/\$f\" ]; then
-      cp -f \"\$DEJAVU/\$f\" \"\${NS_SHARE}/fonts/\"
-      cp -f \"\$DEJAVU/\$f\" \"\${FC_FONT_DIR}/\"
-    fi
+    copy_font_file \"\$DEJAVU/\$f\"
   done
 fi
 
