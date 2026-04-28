@@ -1,24 +1,23 @@
 /*
- * glsmoke.c - small repo-local software OpenGL smoke client.
+ * glsmoke.c - small repo-local EGL/GLES2 smoke client.
  *
- * This intentionally does not depend on Mesa.  It exposes a tiny GL-shaped
- * raster path over a Wayland SHM buffer so xv6 can validate graphical-client
- * presentation before a real EGL/Mesa stack exists.
+ * This intentionally does not depend on Mesa.  It uses the xv6-local
+ * libEGL/libGLESv2 compatibility layer so the GUI path can validate
+ * context/surface/swap semantics before a real EGL/Mesa stack exists.
  */
 
+#include <EGL/egl.h>
+#include <GLES2/gl2.h>
 #include <errno.h>
-#include <fcntl.h>
 #include <math.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/mman.h>
-#include <sys/stat.h>
-#include <sys/types.h>
 #include <time.h>
 #include <unistd.h>
 #include <wayland-client.h>
+#include <wayland-egl.h>
 
 #include "xdg-shell-client-protocol.h"
 
@@ -29,106 +28,42 @@
 #define GL_WINDOW_W 480
 #define GL_WINDOW_H 360
 
-struct xv6gl_ctx {
-    uint32_t *pixels;
-    int width;
-    int height;
-};
-
 struct vec2 {
     float x;
     float y;
+};
+
+struct vertex {
+    GLfloat x;
+    GLfloat y;
+    GLfloat r;
+    GLfloat g;
+    GLfloat b;
+    GLfloat a;
 };
 
 struct app_state {
     struct wl_display *display;
     struct wl_registry *registry;
     struct wl_compositor *compositor;
-    struct wl_shm *shm;
     struct xdg_wm_base *wm_base;
     struct wl_surface *surface;
     struct xdg_surface *xdg_surface;
     struct xdg_toplevel *toplevel;
-    struct wl_buffer *buffer;
     struct wl_callback *frame_cb;
-    struct xv6gl_ctx gl;
-    uint32_t *pixels;
-    size_t pixels_size;
-    int shm_fd;
+    struct wl_egl_window *egl_window;
+    EGLDisplay egl_display;
+    EGLConfig egl_config;
+    EGLContext egl_context;
+    EGLSurface egl_surface;
+    GLuint program;
+    GLint attr_pos;
+    GLint attr_color;
     int configured;
     int running;
     int frame;
     int max_frames;
 };
-
-static uint32_t pack_rgba(float r, float g, float b, float a)
-{
-    uint32_t ri = (uint32_t)(r * 255.0f);
-    uint32_t gi = (uint32_t)(g * 255.0f);
-    uint32_t bi = (uint32_t)(b * 255.0f);
-    uint32_t ai = (uint32_t)(a * 255.0f);
-
-    if (ri > 255) ri = 255;
-    if (gi > 255) gi = 255;
-    if (bi > 255) bi = 255;
-    if (ai > 255) ai = 255;
-    return (ai << 24) | (ri << 16) | (gi << 8) | bi;
-}
-
-static void xv6gl_clear(struct xv6gl_ctx *gl, uint32_t color)
-{
-    for (int i = 0; i < gl->width * gl->height; i++)
-        gl->pixels[i] = color;
-}
-
-static float edge_fn(struct vec2 a, struct vec2 b, struct vec2 p)
-{
-    return (p.x - a.x) * (b.y - a.y) - (p.y - a.y) * (b.x - a.x);
-}
-
-static void xv6gl_triangle(struct xv6gl_ctx *gl, struct vec2 a, struct vec2 b,
-                           struct vec2 c, uint32_t ca, uint32_t cb,
-                           uint32_t cc)
-{
-    float area = edge_fn(a, b, c);
-    int min_x = (int)floorf(fminf(a.x, fminf(b.x, c.x)));
-    int max_x = (int)ceilf(fmaxf(a.x, fmaxf(b.x, c.x)));
-    int min_y = (int)floorf(fminf(a.y, fminf(b.y, c.y)));
-    int max_y = (int)ceilf(fmaxf(a.y, fmaxf(b.y, c.y)));
-
-    if (area == 0.0f)
-        return;
-    if (min_x < 0) min_x = 0;
-    if (min_y < 0) min_y = 0;
-    if (max_x >= gl->width) max_x = gl->width - 1;
-    if (max_y >= gl->height) max_y = gl->height - 1;
-
-    for (int y = min_y; y <= max_y; y++) {
-        for (int x = min_x; x <= max_x; x++) {
-            struct vec2 p = { (float)x + 0.5f, (float)y + 0.5f };
-            float w0 = edge_fn(b, c, p) / area;
-            float w1 = edge_fn(c, a, p) / area;
-            float w2 = edge_fn(a, b, p) / area;
-
-            if (w0 >= 0.0f && w1 >= 0.0f && w2 >= 0.0f) {
-                uint32_t ar = (ca >> 16) & 0xff;
-                uint32_t ag = (ca >> 8) & 0xff;
-                uint32_t ab = ca & 0xff;
-                uint32_t br = (cb >> 16) & 0xff;
-                uint32_t bg = (cb >> 8) & 0xff;
-                uint32_t bb = cb & 0xff;
-                uint32_t cr = (cc >> 16) & 0xff;
-                uint32_t cg = (cc >> 8) & 0xff;
-                uint32_t cblue = cc & 0xff;
-                uint32_t r = (uint32_t)(ar * w0 + br * w1 + cr * w2);
-                uint32_t g = (uint32_t)(ag * w0 + bg * w1 + cg * w2);
-                uint32_t blue = (uint32_t)(ab * w0 + bb * w1 + cblue * w2);
-                gl->pixels[y * gl->width + x] =
-                    0xff000000 | (r << 16) | (g << 8) | blue;
-            }
-        }
-    }
-}
 
 static struct vec2 rotate_point(float x, float y, float angle, float cx, float cy)
 {
@@ -143,78 +78,30 @@ static struct vec2 rotate_point(float x, float y, float angle, float cx, float c
 
 static void render_frame(struct app_state *app)
 {
-    struct xv6gl_ctx *gl = &app->gl;
-    float cx = gl->width * 0.5f;
-    float cy = gl->height * 0.52f;
+    float cx = 0.0f;
+    float cy = -0.04f;
     float angle = app->frame * 0.055f;
-    float radius = gl->height * 0.36f;
-    uint32_t bg0 = pack_rgba(0.04f, 0.07f, 0.08f, 1.0f);
-    uint32_t bg1 = pack_rgba(0.10f, 0.13f, 0.13f, 1.0f);
+    float radius = 0.72f;
+    struct vec2 a = rotate_point(0.0f, radius, angle, cx, cy);
+    struct vec2 b = rotate_point(radius * 0.92f, -radius * 0.72f, angle, cx, cy);
+    struct vec2 c = rotate_point(-radius * 0.92f, -radius * 0.72f, angle, cx, cy);
+    struct vertex vertices[3] = {
+        { a.x, a.y, 0.98f, 0.21f, 0.18f, 1.0f },
+        { b.x, b.y, 0.18f, 0.80f, 0.42f, 1.0f },
+        { c.x, c.y, 0.20f, 0.42f, 1.0f, 1.0f },
+    };
 
-    xv6gl_clear(gl, bg0);
-    for (int y = 0; y < gl->height; y++) {
-        uint32_t color = (y / 12) & 1 ? bg0 : bg1;
-        for (int x = 0; x < gl->width; x++)
-            gl->pixels[y * gl->width + x] = color;
-    }
-
-    struct vec2 a = rotate_point(0.0f, -radius, angle, cx, cy);
-    struct vec2 b = rotate_point(radius * 0.92f, radius * 0.72f, angle, cx, cy);
-    struct vec2 c = rotate_point(-radius * 0.92f, radius * 0.72f, angle, cx, cy);
-    xv6gl_triangle(gl, a, b, c,
-                   pack_rgba(0.98f, 0.21f, 0.18f, 1.0f),
-                   pack_rgba(0.18f, 0.80f, 0.42f, 1.0f),
-                   pack_rgba(0.20f, 0.42f, 1.0f, 1.0f));
-}
-
-static int create_shm_file(size_t size)
-{
-    char path[64];
-    int fd;
-
-    snprintf(path, sizeof(path), "/tmp/glsmoke-%ld", (long)getpid());
-    fd = open(path, O_RDWR | O_CREAT | O_TRUNC, 0600);
-    if (fd < 0)
-        return -1;
-    unlink(path);
-    if (ftruncate(fd, (off_t)size) < 0) {
-        close(fd);
-        return -1;
-    }
-    return fd;
-}
-
-static int init_buffer(struct app_state *app)
-{
-    struct wl_shm_pool *pool;
-    int stride = GL_WINDOW_W * 4;
-
-    app->pixels_size = stride * GL_WINDOW_H;
-    app->shm_fd = create_shm_file(app->pixels_size);
-    if (app->shm_fd < 0) {
-        fprintf(stderr, "glsmoke: create shm file: %s\n", strerror(errno));
-        return -1;
-    }
-
-    app->pixels = mmap(NULL, app->pixels_size, PROT_READ | PROT_WRITE,
-                       MAP_SHARED, app->shm_fd, 0);
-    if (app->pixels == MAP_FAILED) {
-        fprintf(stderr, "glsmoke: mmap shm: %s\n", strerror(errno));
-        app->pixels = NULL;
-        close(app->shm_fd);
-        app->shm_fd = -1;
-        return -1;
-    }
-
-    pool = wl_shm_create_pool(app->shm, app->shm_fd, (int)app->pixels_size);
-    app->buffer = wl_shm_pool_create_buffer(pool, 0, GL_WINDOW_W, GL_WINDOW_H,
-                                            stride, WL_SHM_FORMAT_XRGB8888);
-    wl_shm_pool_destroy(pool);
-
-    app->gl.pixels = app->pixels;
-    app->gl.width = GL_WINDOW_W;
-    app->gl.height = GL_WINDOW_H;
-    return 0;
+    glViewport(0, 0, GL_WINDOW_W, GL_WINDOW_H);
+    glClearColor(0.04f, 0.07f, 0.08f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glUseProgram(app->program);
+    glVertexAttribPointer((GLuint)app->attr_pos, 2, GL_FLOAT, GL_FALSE,
+                          sizeof(vertices[0]), &vertices[0].x);
+    glVertexAttribPointer((GLuint)app->attr_color, 4, GL_FLOAT, GL_FALSE,
+                          sizeof(vertices[0]), &vertices[0].r);
+    glEnableVertexAttribArray((GLuint)app->attr_pos);
+    glEnableVertexAttribArray((GLuint)app->attr_color);
+    glDrawArrays(GL_TRIANGLES, 0, 3);
 }
 
 static void draw_and_commit(struct app_state *app);
@@ -242,11 +129,103 @@ static const struct wl_callback_listener frame_listener = {
 static void draw_and_commit(struct app_state *app)
 {
     render_frame(app);
-    wl_surface_attach(app->surface, app->buffer, 0, 0);
-    wl_surface_damage(app->surface, 0, 0, GL_WINDOW_W, GL_WINDOW_H);
     app->frame_cb = wl_surface_frame(app->surface);
     wl_callback_add_listener(app->frame_cb, &frame_listener, app);
-    wl_surface_commit(app->surface);
+    eglSwapBuffers(app->egl_display, app->egl_surface);
+}
+
+static GLuint compile_shader(GLenum type, const char *src)
+{
+    GLuint shader = glCreateShader(type);
+    GLint ok = GL_FALSE;
+
+    glShaderSource(shader, 1, &src, NULL);
+    glCompileShader(shader);
+    glGetShaderiv(shader, GL_COMPILE_STATUS, &ok);
+    if (!ok)
+        fprintf(stderr, "glsmoke: shader compile failed\n");
+    return shader;
+}
+
+static int init_gl(struct app_state *app)
+{
+    static const char *vs =
+        "attribute vec2 a_pos;\n"
+        "attribute vec4 a_color;\n"
+        "varying vec4 v_color;\n"
+        "void main() { v_color = a_color; gl_Position = vec4(a_pos, 0.0, 1.0); }\n";
+    static const char *fs =
+        "precision mediump float;\n"
+        "varying vec4 v_color;\n"
+        "void main() { gl_FragColor = v_color; }\n";
+    EGLint major = 0;
+    EGLint minor = 0;
+    EGLint nconfigs = 0;
+    EGLint context_attrs[] = { EGL_CONTEXT_CLIENT_VERSION, 2, EGL_NONE };
+    GLuint vshader;
+    GLuint fshader;
+    GLint ok = GL_FALSE;
+
+    app->egl_display = eglGetDisplay((EGLNativeDisplayType)app->display);
+    if (app->egl_display == EGL_NO_DISPLAY ||
+        !eglInitialize(app->egl_display, &major, &minor)) {
+        fprintf(stderr, "glsmoke: eglInitialize failed (0x%x)\n", eglGetError());
+        return -1;
+    }
+    if (!eglChooseConfig(app->egl_display, NULL, &app->egl_config, 1,
+                         &nconfigs) || nconfigs < 1) {
+        fprintf(stderr, "glsmoke: eglChooseConfig failed\n");
+        return -1;
+    }
+    if (!eglBindAPI(EGL_OPENGL_ES_API)) {
+        fprintf(stderr, "glsmoke: eglBindAPI failed\n");
+        return -1;
+    }
+
+    app->egl_window = wl_egl_window_create(app->surface, GL_WINDOW_W,
+                                           GL_WINDOW_H);
+    if (!app->egl_window) {
+        fprintf(stderr, "glsmoke: wl_egl_window_create failed\n");
+        return -1;
+    }
+    app->egl_context = eglCreateContext(app->egl_display, app->egl_config,
+                                        EGL_NO_CONTEXT, context_attrs);
+    app->egl_surface = eglCreateWindowSurface(app->egl_display, app->egl_config,
+                                             (EGLNativeWindowType)app->egl_window,
+                                             NULL);
+    if (app->egl_context == EGL_NO_CONTEXT ||
+        app->egl_surface == EGL_NO_SURFACE ||
+        !eglMakeCurrent(app->egl_display, app->egl_surface, app->egl_surface,
+                        app->egl_context)) {
+        fprintf(stderr, "glsmoke: EGL context/surface setup failed (0x%x)\n",
+                eglGetError());
+        return -1;
+    }
+
+    vshader = compile_shader(GL_VERTEX_SHADER, vs);
+    fshader = compile_shader(GL_FRAGMENT_SHADER, fs);
+    app->program = glCreateProgram();
+    glAttachShader(app->program, vshader);
+    glAttachShader(app->program, fshader);
+    glBindAttribLocation(app->program, 0, "a_pos");
+    glBindAttribLocation(app->program, 1, "a_color");
+    glLinkProgram(app->program);
+    glGetProgramiv(app->program, GL_LINK_STATUS, &ok);
+    glDeleteShader(vshader);
+    glDeleteShader(fshader);
+    if (!ok) {
+        fprintf(stderr, "glsmoke: program link failed\n");
+        return -1;
+    }
+    app->attr_pos = glGetAttribLocation(app->program, "a_pos");
+    app->attr_color = glGetAttribLocation(app->program, "a_color");
+    if (app->attr_pos < 0 || app->attr_color < 0) {
+        fprintf(stderr, "glsmoke: shader attributes unavailable\n");
+        return -1;
+    }
+    fprintf(stderr, "glsmoke: EGL %d.%d, GL %s\n", major, minor,
+            glGetString(GL_VERSION));
+    return 0;
 }
 
 static void xdg_surface_configure(void *data, struct xdg_surface *surface,
@@ -309,8 +288,6 @@ static void registry_global(void *data, struct wl_registry *registry,
         app->compositor = wl_registry_bind(registry, name,
                                            &wl_compositor_interface,
                                            version > 4 ? 4 : version);
-    } else if (strcmp(interface, wl_shm_interface.name) == 0) {
-        app->shm = wl_registry_bind(registry, name, &wl_shm_interface, 1);
     } else if (strcmp(interface, xdg_wm_base_interface.name) == 0) {
         app->wm_base = wl_registry_bind(registry, name,
                                         &xdg_wm_base_interface,
@@ -345,13 +322,10 @@ static int init_wayland(struct app_state *app)
     wl_display_roundtrip(app->display);
     wl_display_roundtrip(app->display);
 
-    if (!app->compositor || !app->shm || !app->wm_base) {
-        fprintf(stderr, "glsmoke: compositor/shm/xdg globals unavailable\n");
+    if (!app->compositor || !app->wm_base) {
+        fprintf(stderr, "glsmoke: compositor/xdg globals unavailable\n");
         return -1;
     }
-
-    if (init_buffer(app) < 0)
-        return -1;
 
     app->surface = wl_compositor_create_surface(app->compositor);
     app->xdg_surface = xdg_wm_base_get_xdg_surface(app->wm_base, app->surface);
@@ -360,6 +334,8 @@ static int init_wayland(struct app_state *app)
     xdg_toplevel_add_listener(app->toplevel, &toplevel_listener, app);
     xdg_toplevel_set_title(app->toplevel, "xv6 GL Smoke");
     xdg_toplevel_set_app_id(app->toplevel, "glsmoke");
+    if (init_gl(app) < 0)
+        return -1;
     wl_surface_commit(app->surface);
     return 0;
 }
@@ -368,22 +344,27 @@ static void cleanup(struct app_state *app)
 {
     if (app->frame_cb)
         wl_callback_destroy(app->frame_cb);
+    if (app->egl_display != EGL_NO_DISPLAY) {
+        eglMakeCurrent(app->egl_display, EGL_NO_SURFACE, EGL_NO_SURFACE,
+                       EGL_NO_CONTEXT);
+        if (app->program)
+            glDeleteProgram(app->program);
+        if (app->egl_surface != EGL_NO_SURFACE)
+            eglDestroySurface(app->egl_display, app->egl_surface);
+        if (app->egl_context != EGL_NO_CONTEXT)
+            eglDestroyContext(app->egl_display, app->egl_context);
+        eglTerminate(app->egl_display);
+    }
+    if (app->egl_window)
+        wl_egl_window_destroy(app->egl_window);
     if (app->toplevel)
         xdg_toplevel_destroy(app->toplevel);
     if (app->xdg_surface)
         xdg_surface_destroy(app->xdg_surface);
     if (app->surface)
         wl_surface_destroy(app->surface);
-    if (app->buffer)
-        wl_buffer_destroy(app->buffer);
-    if (app->pixels)
-        munmap(app->pixels, app->pixels_size);
-    if (app->shm_fd >= 0)
-        close(app->shm_fd);
     if (app->wm_base)
         xdg_wm_base_destroy(app->wm_base);
-    if (app->shm)
-        wl_shm_destroy(app->shm);
     if (app->compositor)
         wl_compositor_destroy(app->compositor);
     if (app->registry)
@@ -397,7 +378,9 @@ int main(int argc, char **argv)
     struct app_state app;
 
     memset(&app, 0, sizeof(app));
-    app.shm_fd = -1;
+    app.egl_display = EGL_NO_DISPLAY;
+    app.egl_context = EGL_NO_CONTEXT;
+    app.egl_surface = EGL_NO_SURFACE;
     app.running = 1;
     app.max_frames = 0;
 

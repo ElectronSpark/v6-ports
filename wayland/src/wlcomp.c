@@ -21,6 +21,7 @@
 #include <sys/syscall.h>
 #include <time.h>
 #include <dirent.h>
+#include <stdarg.h>
 
 #include <wayland/wayland-server-core.h>
 #include <wayland/wayland-server-protocol.h>
@@ -42,6 +43,7 @@
 #define FBIOGET_VSCREENINFO  0x4600
 #define FB_GPU_FILL_RECT     0x4610
 #define FB_GPU_BLIT          0x4611
+#define MAX_DAMAGE_RECTS     32
 
 struct fb_var_screeninfo {
     uint32_t xres, yres, bits_per_pixel, pitch;
@@ -82,13 +84,26 @@ struct kbd_event {
 
 static struct wl_display *g_display;
 
+static void wlcomp_wayland_log(const char *fmt, va_list args)
+{
+    char buf[256];
+
+    vsnprintf(buf, sizeof(buf), fmt, args);
+    if (strstr(buf, "failed to read client connection") != NULL)
+        return;
+    fputs(buf, stderr);
+}
+
 /* Framebuffer state */
 static int      g_fb_fd   = -1;
 static uint32_t g_fb_w, g_fb_h;
 static uint32_t g_fb_pitch;
 static uint32_t *g_fb_buf;  /* compositing buffer */
-static int32_t  g_damage_x1, g_damage_y1, g_damage_x2, g_damage_y2;
-static int      g_damage_valid;
+struct damage_rect {
+    int32_t x1, y1, x2, y2;
+};
+static struct damage_rect g_damage[MAX_DAMAGE_RECTS];
+static int      g_damage_count;
 
 /* Input state */
 static int      g_mouse_fd = -1;
@@ -99,8 +114,47 @@ static uint32_t g_serial;
 
 #define TASKBAR_H          36
 
+static int rect_area(const struct damage_rect *r)
+{
+    return (r->x2 - r->x1) * (r->y2 - r->y1);
+}
+
+static int rects_touch_or_overlap(const struct damage_rect *a,
+                                  const struct damage_rect *b)
+{
+    return a->x1 <= b->x2 && a->x2 >= b->x1 &&
+           a->y1 <= b->y2 && a->y2 >= b->y1;
+}
+
+static void rect_merge(struct damage_rect *dst, const struct damage_rect *src)
+{
+    if (src->x1 < dst->x1) dst->x1 = src->x1;
+    if (src->y1 < dst->y1) dst->y1 = src->y1;
+    if (src->x2 > dst->x2) dst->x2 = src->x2;
+    if (src->y2 > dst->y2) dst->y2 = src->y2;
+}
+
+static void damage_union_bounds(struct damage_rect *out)
+{
+    *out = g_damage[0];
+    for (int i = 1; i < g_damage_count; i++)
+        rect_merge(out, &g_damage[i]);
+}
+
+static void damage_collapse_to_union(void)
+{
+    struct damage_rect u;
+
+    if (g_damage_count <= 1)
+        return;
+    damage_union_bounds(&u);
+    g_damage[0] = u;
+    g_damage_count = 1;
+}
+
 static void damage_rect(int32_t x, int32_t y, int32_t w, int32_t h)
 {
+    struct damage_rect r;
     int32_t x2 = x + w;
     int32_t y2 = y + h;
 
@@ -113,24 +167,103 @@ static void damage_rect(int32_t x, int32_t y, int32_t w, int32_t h)
     if (x >= x2 || y >= y2)
         return;
 
-    if (!g_damage_valid) {
-        g_damage_x1 = x;
-        g_damage_y1 = y;
-        g_damage_x2 = x2;
-        g_damage_y2 = y2;
-        g_damage_valid = 1;
-        return;
+    r.x1 = x;
+    r.y1 = y;
+    r.x2 = x2;
+    r.y2 = y2;
+
+    for (int i = 0; i < g_damage_count; i++) {
+        if (rects_touch_or_overlap(&g_damage[i], &r)) {
+            rect_merge(&g_damage[i], &r);
+            for (int j = 0; j < g_damage_count; j++) {
+                if (j != i && rects_touch_or_overlap(&g_damage[i], &g_damage[j])) {
+                    rect_merge(&g_damage[i], &g_damage[j]);
+                    g_damage[j] = g_damage[g_damage_count - 1];
+                    g_damage_count--;
+                    j--;
+                }
+            }
+            return;
+        }
     }
 
-    if (x < g_damage_x1) g_damage_x1 = x;
-    if (y < g_damage_y1) g_damage_y1 = y;
-    if (x2 > g_damage_x2) g_damage_x2 = x2;
-    if (y2 > g_damage_y2) g_damage_y2 = y2;
+    if (g_damage_count < MAX_DAMAGE_RECTS) {
+        g_damage[g_damage_count++] = r;
+    } else {
+        g_damage[g_damage_count - 1] = r;
+        damage_collapse_to_union();
+    }
 }
 
 static void damage_full(void)
 {
-    damage_rect(0, 0, (int32_t)g_fb_w, (int32_t)g_fb_h);
+    if (g_fb_w == 0 || g_fb_h == 0)
+        return;
+    g_damage[0].x1 = 0;
+    g_damage[0].y1 = 0;
+    g_damage[0].x2 = (int32_t)g_fb_w;
+    g_damage[0].y2 = (int32_t)g_fb_h;
+    g_damage_count = 1;
+}
+
+static int damage_repair_interval_ms(void)
+{
+    static int initialized;
+    static int interval_ms;
+    const char *env;
+
+    if (initialized)
+        return interval_ms;
+    initialized = 1;
+    env = getenv("XV6_WLCOMP_REPAIR_MS");
+    if (env && *env) {
+        interval_ms = atoi(env);
+        if (interval_ms < 0)
+            interval_ms = 0;
+    }
+    return interval_ms;
+}
+
+static void present_damage_rects(int fb_w)
+{
+    struct fb_gpu_blit cmd;
+
+    cmd.src_pitch = g_fb_w * 4;
+    for (int i = 0; i < g_damage_count; i++) {
+        struct damage_rect *r = &g_damage[i];
+        cmd.x = (uint32_t)r->x1;
+        cmd.y = (uint32_t)r->y1;
+        cmd.w = (uint32_t)(r->x2 - r->x1);
+        cmd.h = (uint32_t)(r->y2 - r->y1);
+        cmd.pixels = (uint64_t)(uintptr_t)(g_fb_buf + r->y1 * fb_w + r->x1);
+        ioctl(g_fb_fd, FB_GPU_BLIT, &cmd);
+    }
+    g_damage_count = 0;
+}
+
+static void tune_damage_for_present(void)
+{
+    struct damage_rect u;
+    int union_area;
+    int rect_area_sum = 0;
+
+    if (g_damage_count <= 1)
+        return;
+
+    damage_union_bounds(&u);
+    union_area = rect_area(&u);
+    for (int i = 0; i < g_damage_count; i++)
+        rect_area_sum += rect_area(&g_damage[i]);
+
+    if (union_area <= rect_area_sum * 2) {
+        g_damage[0] = u;
+        g_damage_count = 1;
+    }
+}
+
+static int damage_has_any(void)
+{
+    return g_damage_count > 0;
 }
 
 static void damage_taskbar(void)
@@ -195,6 +328,8 @@ static struct wlcomp_surface *g_focused;  /* pointer-focused Wayland surface */
 static struct wlcomp_surface *g_kbd_focused; /* keyboard-focused (click-to-focus) */
 static int g_kbd_enter_pending; /* deferred keyboard enter for g_kbd_focused */
 
+static void surface_set_keyboard_focus(struct wlcomp_surface *surf);
+
 /* Client cursor state */
 static struct wlcomp_surface *g_cursor_surface;   /* client-provided cursor */
 static int32_t g_cursor_hotspot_x, g_cursor_hotspot_y;
@@ -208,6 +343,19 @@ static int32_t g_grab_start_x, g_grab_start_y;    /* surface pos at grab start *
 
 #define WAYLAND_CLOSE_SZ 18
 static int32_t g_grab_start_w, g_grab_start_h;    /* surface size at grab start */
+
+static void damage_all_frame_callbacks(uint32_t now)
+{
+    struct wlcomp_surface *cb_surf;
+
+    wl_list_for_each(cb_surf, &g_surfaces, link) {
+        if (cb_surf->frame_cb) {
+            wl_callback_send_done(cb_surf->frame_cb, now);
+            wl_resource_destroy(cb_surf->frame_cb);
+            cb_surf->frame_cb = NULL;
+        }
+    }
+}
 
 static struct wlcomp_surface *surface_from_resource(struct wl_resource *r)
 {
@@ -322,6 +470,15 @@ static void damage_cursor_at(int32_t cx, int32_t cy)
     damage_rect(x - 1, y - 1, w + 2, h + 2);
 }
 
+static void surface_raise_to_top(struct wlcomp_surface *surf)
+{
+    if (!surf)
+        return;
+
+    wl_list_remove(&surf->link);
+    wl_list_insert(g_surfaces.prev, &surf->link);
+}
+
 /* Find top surface at a point */
 static struct wlcomp_surface *surface_at(int32_t px, int32_t py,
                                           int32_t *sx, int32_t *sy)
@@ -331,7 +488,7 @@ static struct wlcomp_surface *surface_at(int32_t px, int32_t py,
         return NULL;
 
     struct wlcomp_surface *s;
-    /* Walk reversed (top first = most recently added) */
+    /* Walk reversed (top first). Topmost surfaces live at the list tail. */
     wl_list_for_each_reverse(s, &g_surfaces, link) {
         if (!s->mapped || s->minimized || !s->committed_buf || s->is_cursor)
             continue;
@@ -824,7 +981,7 @@ static void comp_create_surface(struct wl_client *client,
     surf->client_pid = client_pid;
     wl_resource_set_implementation(res, &surface_impl, surf,
                                   surface_destroy_handler);
-    wl_list_insert(&g_surfaces, &surf->link);
+    wl_list_insert(g_surfaces.prev, &surf->link);
 }
 
 static void comp_create_region(struct wl_client *client,
@@ -1408,6 +1565,41 @@ static struct wl_resource *find_resource_for_client(
         if (arr[i] && wl_resource_get_client(arr[i]) == client)
             return arr[i];
     return NULL;
+}
+
+static void surface_set_keyboard_focus(struct wlcomp_surface *surf)
+{
+    if (g_kbd_focused == surf)
+        return;
+
+    if (g_kbd_focused && g_kbd_focused->resource) {
+        struct wl_client *old_client =
+            wl_resource_get_client(g_kbd_focused->resource);
+        struct wl_resource *kbd = find_resource_for_client(
+            g_keyboard_resources, MAX_INPUT_RES, old_client);
+        if (kbd)
+            wl_keyboard_send_leave(kbd, ++g_serial,
+                                   g_kbd_focused->resource);
+    }
+
+    g_kbd_focused = surf;
+    g_kbd_enter_pending = 0;
+
+    if (g_kbd_focused && g_kbd_focused->resource) {
+        struct wl_client *new_client =
+            wl_resource_get_client(g_kbd_focused->resource);
+        struct wl_resource *kbd = find_resource_for_client(
+            g_keyboard_resources, MAX_INPUT_RES, new_client);
+        if (kbd) {
+            struct wl_array keys;
+            wl_array_init(&keys);
+            wl_keyboard_send_enter(kbd, ++g_serial,
+                                   g_kbd_focused->resource, &keys);
+            wl_array_release(&keys);
+        }
+    }
+
+    damage_taskbar();
 }
 
 static void add_resource(struct wl_resource **arr, int n,
@@ -2479,6 +2671,12 @@ static iwin_t g_iwin[MAX_IWIN];
 static int g_iwin_focus = -1;   /* index of focused internal window */
 static int g_iwin_cascade;      /* cascade counter for positioning */
 
+static int surface_is_foreground(const struct wlcomp_surface *surf)
+{
+    return surf && g_iwin_focus < 0 && g_kbd_focused == surf &&
+           !surf->minimized;
+}
+
 #define TB_TASK_W   120   /* max width of each task button */
 #define TB_TASK_GAP  4    /* gap between task buttons */
 
@@ -2558,7 +2756,7 @@ static void draw_taskbar(uint32_t *fb, int fb_w, int fb_h)
     wl_list_for_each(surf, &g_surfaces, link) {
         if (!surface_has_taskbar_button(surf) ||
             tx + TB_TASK_W > right_limit) continue;
-        int focused = (surf == g_focused && g_iwin_focus < 0);
+        int focused = surface_is_foreground(surf);
         uint32_t bg = surface_taskbar_color(surf, focused);
         draw_rounded_rect(fb, fb_w, fb_h, tx, btn_y, TB_TASK_W, TB_BTN_H, 3, bg);
         const char *name = surface_taskbar_label(surf);
@@ -2633,23 +2831,26 @@ static int taskbar_task_hit(int mx, int my, int fb_w, int fb_h)
         if (!surface_has_taskbar_button(surf) ||
             tx + TB_TASK_W > right_limit) continue;
         if (mx >= tx && mx < tx + TB_TASK_W) {
+            int was_foreground = surface_is_foreground(surf);
+
             damage_surface(surf);
             g_iwin_focus = -1;
             if (surf->minimized) {
                 /* Restore */
                 surf->minimized = 0;
-                g_focused = surf;
-            } else if (surf == g_focused) {
+                surface_set_keyboard_focus(surf);
+                surface_raise_to_top(surf);
+            } else if (was_foreground) {
                 /* Already focused — minimize */
                 surf->minimized = 1;
-                g_focused = NULL;
+                if (g_focused == surf)
+                    g_focused = NULL;
+                surface_set_keyboard_focus(NULL);
             } else {
                 /* Not focused — raise and focus */
-                g_focused = surf;
+                surface_set_keyboard_focus(surf);
+                surface_raise_to_top(surf);
             }
-            /* Raise this surface by moving to head of list */
-            wl_list_remove(&surf->link);
-            wl_list_insert(&g_surfaces, &surf->link);
             damage_surface(surf);
             damage_taskbar();
             return 1;
@@ -2682,26 +2883,45 @@ static const char *menu_item_label(int idx)
     return "Power Off";
 }
 
+static void menu_bounds(int fb_h, int *x, int *y, int *w, int *h)
+{
+    int item_count = menu_item_count();
+
+    *w = MENU_W;
+    *h = item_count * MENU_ITEM_H + 8;
+    *x = TB_BTN_PAD;
+    *y = fb_h - TASKBAR_H - *h;
+}
+
+static void damage_menu(void)
+{
+    int x, y, w, h;
+
+    if (!g_menu_open || g_fb_h == 0)
+        return;
+    menu_bounds((int)g_fb_h, &x, &y, &w, &h);
+    damage_rect(x, y, w + 4, h + 4);
+}
+
 static void draw_menu(uint32_t *fb, int fb_w, int fb_h)
 {
     if (!g_menu_open) return;
 
     int item_count = menu_item_count();
-    int menu_h = item_count * MENU_ITEM_H + 8;
-    int menu_x = TB_BTN_PAD;
-    int menu_y = fb_h - TASKBAR_H - menu_h;
+    int menu_x, menu_y, menu_w, menu_h;
+    menu_bounds(fb_h, &menu_x, &menu_y, &menu_w, &menu_h);
 
     /* Shadow */
     draw_rect(fb, fb_w, fb_h, menu_x + 3, menu_y + 3,
-              MENU_W, menu_h, 0xFF101418);
+              menu_w, menu_h, 0xFF101418);
     /* Background */
     draw_rounded_rect(fb, fb_w, fb_h, menu_x, menu_y,
-                      MENU_W, menu_h, 6, 0xFF252528);
+                      menu_w, menu_h, 6, 0xFF252528);
     /* Border */
-    draw_rect(fb, fb_w, fb_h, menu_x, menu_y, MENU_W, 1, 0xFF3C5078);
-    draw_rect(fb, fb_w, fb_h, menu_x, menu_y + menu_h - 1, MENU_W, 1, 0xFF3C5078);
+    draw_rect(fb, fb_w, fb_h, menu_x, menu_y, menu_w, 1, 0xFF3C5078);
+    draw_rect(fb, fb_w, fb_h, menu_x, menu_y + menu_h - 1, menu_w, 1, 0xFF3C5078);
     draw_rect(fb, fb_w, fb_h, menu_x, menu_y, 1, menu_h, 0xFF3C5078);
-    draw_rect(fb, fb_w, fb_h, menu_x + MENU_W - 1, menu_y, 1, menu_h, 0xFF3C5078);
+    draw_rect(fb, fb_w, fb_h, menu_x + menu_w - 1, menu_y, 1, menu_h, 0xFF3C5078);
 
     for (int i = 0; i < item_count; i++) {
         int iy = menu_y + 4 + i * MENU_ITEM_H;
@@ -2709,14 +2929,14 @@ static void draw_menu(uint32_t *fb, int fb_w, int fb_h)
         if (label[0] == '-') {
             /* Separator */
             draw_rect(fb, fb_w, fb_h, menu_x + 8, iy + MENU_ITEM_H / 2,
-                      MENU_W - 16, 1, 0xFF485460);
+                      menu_w - 16, 1, 0xFF485460);
         } else {
             /* Hover highlight */
             int mx = g_cursor_x, my = g_cursor_y;
-            if (mx >= menu_x && mx < menu_x + MENU_W &&
+            if (mx >= menu_x && mx < menu_x + menu_w &&
                 my >= iy && my < iy + MENU_ITEM_H) {
                 draw_rect(fb, fb_w, fb_h, menu_x + 2, iy,
-                          MENU_W - 4, MENU_ITEM_H, 0xFF3C5078);
+                          menu_w - 4, MENU_ITEM_H, 0xFF3C5078);
             }
             draw_string(fb, fb_w, fb_h, menu_x + 12, iy + 4,
                         label, 0xFFD2DAE2, 1);
@@ -2729,10 +2949,9 @@ static int menu_click_test(int mx, int my, int fb_h)
 {
     if (!g_menu_open) return -1;
     int item_count = menu_item_count();
-    int menu_h = item_count * MENU_ITEM_H + 8;
-    int menu_x = TB_BTN_PAD;
-    int menu_y = fb_h - TASKBAR_H - menu_h;
-    if (mx < menu_x || mx >= menu_x + MENU_W ||
+    int menu_x, menu_y, menu_w, menu_h;
+    menu_bounds(fb_h, &menu_x, &menu_y, &menu_w, &menu_h);
+    if (mx < menu_x || mx >= menu_x + menu_w ||
         my < menu_y || my >= menu_y + menu_h)
         return -2;  /* clicked outside menu → close it */
     int idx = (my - menu_y - 4) / MENU_ITEM_H;
@@ -4772,6 +4991,7 @@ static void composite_and_flip(void)
     static uint32_t next_clock_damage_ms;
     static uint32_t next_repair_damage_ms;
     uint32_t now = get_time_ms();
+    int repair_ms = damage_repair_interval_ms();
 
     /* Lay out icons if not done */
     layout_icons(fb_w, fb_h);
@@ -4781,33 +5001,16 @@ static void composite_and_flip(void)
         next_clock_damage_ms = now + 1000;
     }
 
-    /*
-     * Damage tracking keeps normal motion to partial blits, but the desktop
-     * has several independently composed layers.  This low-rate repair pass
-     * bounds any missed old region so stale pixels cannot survive until an
-     * unrelated object happens to move across them.
-     */
-    if (now >= next_repair_damage_ms) {
+    if (repair_ms > 0 && now >= next_repair_damage_ms) {
         damage_full();
-        next_repair_damage_ms = now + 500;
+        next_repair_damage_ms = now + (uint32_t)repair_ms;
     }
 
-    if (!g_damage_valid) {
-        struct wlcomp_surface *cb_surf;
-        wl_list_for_each(cb_surf, &g_surfaces, link) {
-            if (cb_surf->frame_cb) {
-                wl_callback_send_done(cb_surf->frame_cb, now);
-                wl_resource_destroy(cb_surf->frame_cb);
-                cb_surf->frame_cb = NULL;
-            }
-        }
+    if (!damage_has_any()) {
+        damage_all_frame_callbacks(now);
         return;
     }
-
-    int32_t dirty_x = g_damage_x1;
-    int32_t dirty_y = g_damage_y1;
-    int32_t dirty_w = g_damage_x2 - g_damage_x1;
-    int32_t dirty_h = g_damage_y2 - g_damage_y1;
+    tune_damage_for_present();
 
     /* Draw desktop wallpaper */
     draw_wallpaper(g_fb_buf, fb_w, fb_h);
@@ -4924,16 +5127,7 @@ static void composite_and_flip(void)
         }
     }
 
-    /* Blit to /dev/fb0 via GPU ioctl */
-    struct fb_gpu_blit cmd;
-    cmd.x = (uint32_t)dirty_x;
-    cmd.y = (uint32_t)dirty_y;
-    cmd.w = (uint32_t)dirty_w;
-    cmd.h = (uint32_t)dirty_h;
-    cmd.src_pitch = g_fb_w * 4;
-    cmd.pixels = (uint64_t)(uintptr_t)(g_fb_buf + dirty_y * fb_w + dirty_x);
-    ioctl(g_fb_fd, FB_GPU_BLIT, &cmd);
-    g_damage_valid = 0;
+    present_damage_rects(fb_w);
 
     /* Once the frame is copied into fb0, release committed buffers so GTK can
      * recycle its Wayland SHM storage instead of allocating a fresh memfd for
@@ -5010,6 +5204,7 @@ static void process_mouse(void)
     if (cursor_moved) {
         damage_cursor_at(old_cursor_x, old_cursor_y);
         damage_cursor_at(g_cursor_x, g_cursor_y);
+        damage_menu();
     }
     if (pressed_edges || released_edges)
         damage_full();
@@ -5105,40 +5300,45 @@ static void process_mouse(void)
      * Otherwise Wayland surfaces are on top — check them first. */
     int32_t sx, sy;
     struct wlcomp_surface *target = NULL;
+    int iwin_under = -1;
 
     if (g_iwin_focus >= 0) {
         /* Internal windows on top: check iwin first */
-        int iwin_under = iwin_hit(g_cursor_x, g_cursor_y);
+        iwin_under = iwin_hit(g_cursor_x, g_cursor_y);
         if (iwin_under < 0)
             target = surface_at(g_cursor_x, g_cursor_y, &sx, &sy);
     } else {
         /* Wayland surfaces on top: check them first */
         target = surface_at(g_cursor_x, g_cursor_y, &sx, &sy);
+        if (!target)
+            iwin_under = iwin_hit(g_cursor_x, g_cursor_y);
     }
 
     if (pressed_edges & 1) {
         /* Left button was pressed (at least once) during this batch */
         int desktop_handled = 0;
+        int taskbar_or_menu =
+            g_menu_open || g_cursor_y >= (int16_t)(g_fb_h - TASKBAR_H);
 
-        /* Priority: windows first, then menu/taskbar, then desktop icons.
-         * This prevents icons from stealing clicks from overlapping windows. */
-        if (handle_iwin_click(g_cursor_x, g_cursor_y)) {
-            /* Internal window consumed the click */
+        if (taskbar_or_menu) {
+            g_iwin_focus = -1;
+            handle_desktop_click(g_cursor_x, g_cursor_y,
+                                 (int)g_fb_w, (int)g_fb_h,
+                                 left_press_count >= 2);
+            desktop_handled = 1;
         } else if (target && surface_close_hit(target, g_cursor_x, g_cursor_y)) {
             destroy_surface_client(target);
             target = NULL;
             desktop_handled = 1;
         } else if (target) {
             /* Clicking on Wayland surface — unfocus internal windows */
+            damage_surface(target);
             g_iwin_focus = -1;
-        } else if (g_menu_open ||
-                   g_cursor_y >= (int16_t)(g_fb_h - TASKBAR_H)) {
-            /* Menu open or click on taskbar area */
-            g_iwin_focus = -1;
-            handle_desktop_click(g_cursor_x, g_cursor_y,
-                                 (int)g_fb_w, (int)g_fb_h,
-                                 left_press_count >= 2);
-            desktop_handled = 1;
+            surface_raise_to_top(target);
+            damage_surface(target);
+        } else if (iwin_under >= 0 &&
+                   handle_iwin_click(g_cursor_x, g_cursor_y)) {
+            /* Internal window consumed the click */
         } else {
             /* No window under cursor — desktop icons / background */
             g_iwin_focus = -1;
@@ -5154,34 +5354,8 @@ static void process_mouse(void)
 
         /* Click-to-focus: only change keyboard when clicking a
          * DIFFERENT Wayland surface (not desktop/taskbar/iwin) */
-        if (!desktop_handled && target && target != g_kbd_focused) {
-            /* Keyboard leave old surface */
-            if (g_kbd_focused && g_kbd_focused->resource) {
-                struct wl_client *cl = wl_resource_get_client(
-                    g_kbd_focused->resource);
-                struct wl_resource *kbd = find_resource_for_client(
-                    g_keyboard_resources, MAX_INPUT_RES, cl);
-                if (kbd)
-                    wl_keyboard_send_leave(kbd, ++g_serial,
-                                           g_kbd_focused->resource);
-            }
-            g_kbd_focused = target;
-            /* Keyboard enter new surface */
-            if (g_kbd_focused->resource) {
-                struct wl_client *cl = wl_resource_get_client(
-                    g_kbd_focused->resource);
-                struct wl_resource *kbd = find_resource_for_client(
-                    g_keyboard_resources, MAX_INPUT_RES, cl);
-                if (kbd) {
-                    struct wl_array keys;
-                    wl_array_init(&keys);
-                    wl_keyboard_send_enter(kbd, ++g_serial,
-                                           g_kbd_focused->resource,
-                                           &keys);
-                    wl_array_release(&keys);
-                }
-            }
-        }
+        if (!desktop_handled && target)
+            surface_set_keyboard_focus(target);
     }
 
     /* Forward Wayland pointer events to clients */
@@ -5474,6 +5648,8 @@ static void sig_handler(int sig)
 int main(int argc, char **argv)
 {
     (void)argc; (void)argv;
+
+    wl_log_set_handler_server(wlcomp_wayland_log);
 
     signal(SIGINT, sig_handler);
     signal(SIGTERM, sig_handler);
