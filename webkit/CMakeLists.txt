@@ -2,10 +2,17 @@ cmake_minimum_required(VERSION 3.16)
 project(xv6-port-webkit LANGUAGES NONE)
 
 set(_webkit_overrides_dir "${CMAKE_CURRENT_LIST_DIR}/overrides/webkitgtk-2.42.5")
-if(EXISTS "${_webkit_overrides_dir}/Tools/MiniBrowser/gtk/main.c")
+file(GLOB_RECURSE _webkit_override_files
+    RELATIVE "${_webkit_overrides_dir}"
+    "${_webkit_overrides_dir}/*")
+list(LENGTH _webkit_override_files _webkit_override_count)
+if(_webkit_override_count GREATER 0)
     message(STATUS
-        "ports/webkit: WebKitGTK 2.42.5 xv6 source overrides are available at "
-        "${_webkit_overrides_dir}")
+        "ports/webkit: ${_webkit_override_count} WebKitGTK 2.42.5 xv6 "
+        "source override(s) are available at ${_webkit_overrides_dir}")
+else()
+    message(STATUS
+        "ports/webkit: no WebKitGTK 2.42.5 xv6 source overrides are active")
 endif()
 
 if(NOT DEFINED XV6_SYSROOT OR XV6_SYSROOT STREQUAL "")

@@ -19,13 +19,19 @@ if [[ ! -d "${src}" || ! -f "${src}/CMakeLists.txt" ]]; then
     exit 1
 fi
 if [[ ! -d "${overrides}" ]]; then
-    echo "ports/webkit: missing override directory ${overrides}" >&2
-    exit 1
+    echo "ports/webkit: no xv6 WebKitGTK source overrides to apply"
+    exit 0
 fi
 
-while IFS= read -r rel; do
+mapfile -t override_files < <(cd "${overrides}" && find . -type f | sed 's#^\./##' | sort)
+if [[ ${#override_files[@]} -eq 0 ]]; then
+    echo "ports/webkit: no xv6 WebKitGTK source overrides to apply"
+    exit 0
+fi
+
+for rel in "${override_files[@]}"; do
     mkdir -p "${src}/$(dirname "${rel}")"
     cp -p "${overrides}/${rel}" "${src}/${rel}"
-done < <(cd "${overrides}" && find . -type f | sed 's#^\./##' | sort)
+done
 
 echo "ports/webkit: applied xv6 WebKitGTK overrides to ${src}"

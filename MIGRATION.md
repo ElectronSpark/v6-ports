@@ -56,7 +56,7 @@ and documents the per-port recipes still to be written.
 | netsurf-libsvgtiny  | from-source (netsurf-make, deps: libexpat/libwapcaplet) | `ports/netsurf-libsvgtiny/CMakeLists.txt` |
 | vim       | from-source (autoconf, deps: ncurses) | `ports/vim/CMakeLists.txt`               |
 | cpython   | from-source (autoconf, deps: all above) | `ports/cpython/CMakeLists.txt`         |
-| webkit    | repo-local runtime stage + xv6 source overrides | `ports/webkit/CMakeLists.txt` |
+| webkit    | repo-local runtime stage, no active source overrides | `ports/webkit/CMakeLists.txt` |
 
 ## NetSurf-GTK3 roadmap (in progress)
 
@@ -94,9 +94,9 @@ Tier 6 (browser):
 
 The `webkit` port is intentionally self-contained for now: it stages the
 committed `ports/webkit/sysroot` runtime into `${XV6_SYSROOT}` and applies no
-network fetches or host package installs. The source overrides under
-`ports/webkit/overrides/webkitgtk-2.42.5/` document the xv6-specific changes
-needed for a future from-source WebKitGTK build.
+network fetches or host package installs. The previous repo-carried WebKitGTK
+2.42.5 source overrides have been retired; `apply-xv6-overrides.sh` now exits
+successfully when there are no overrides to apply.
 
 Current behavior:
 
