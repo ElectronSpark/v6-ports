@@ -2070,15 +2070,17 @@ static void reap_children(void)
             int status;
             pid_t r = waitpid(g_children[i], &status, WNOHANG);
             if (r > 0) {
-                if (WIFEXITED(status))
-                    fprintf(stderr, "wlcomp: child pid %d exited (status=%d)\n",
-                            g_children[i], WEXITSTATUS(status));
-                else if (WIFSIGNALED(status))
+                if (WIFEXITED(status)) {
+                    if (WEXITSTATUS(status) != 0)
+                        fprintf(stderr, "wlcomp: child pid %d exited (status=%d)\n",
+                                g_children[i], WEXITSTATUS(status));
+                } else if (WIFSIGNALED(status)) {
                     fprintf(stderr, "wlcomp: child pid %d killed by signal %d\n",
                             g_children[i], WTERMSIG(status));
-                else
+                } else {
                     fprintf(stderr, "wlcomp: child pid %d wait status 0x%x\n",
                             g_children[i], status);
+                }
                 g_children[i] = 0;
             }
         }

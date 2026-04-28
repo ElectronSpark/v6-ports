@@ -315,8 +315,10 @@ int main(void)
                 wlcomp_pid = 0;
                 break;  /* compositor gone → session over */
             } else if (exited == client_pid) {
-                fprintf(stderr, "[desktop] client exited (status %d)\n",
-                        WEXITSTATUS(status));
+                if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+                    fprintf(stderr, "[desktop] client exited (status %d)\n",
+                            WIFEXITED(status) ? WEXITSTATUS(status) : status);
+                }
                 client_pid = 0;
             }
         }
