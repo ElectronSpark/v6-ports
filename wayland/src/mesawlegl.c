@@ -257,11 +257,11 @@ static void render_api_frame(struct app_state *app)
     glDisable(GL_STENCIL_TEST);
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-    glEnable(GL_SCISSOR_TEST);
     glViewport(0, 0, app->width, app->height);
-    glScissor(sx, sy, sw, sh);
     glClearColor(0.03f, 0.055f, 0.07f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT);
+    glEnable(GL_SCISSOR_TEST);
+    glScissor(sx, sy, sw, sh);
     glUseProgram(app->tex_program);
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, app->fbo_tex);
@@ -445,11 +445,14 @@ static void toplevel_configure(void *data, struct xdg_toplevel *toplevel,
                                int32_t width, int32_t height,
                                struct wl_array *states)
 {
-    (void)data;
+    struct app_state *app = data;
     (void)toplevel;
-    (void)width;
-    (void)height;
     (void)states;
+
+    if (width > 0 && height > 0) {
+        app->width = width;
+        app->height = height;
+    }
 }
 
 static void toplevel_close(void *data, struct xdg_toplevel *toplevel)
@@ -617,7 +620,9 @@ static int run_client(int loop, int frames, int resize_every, int api_smoke)
     while (app.running && !app.configured &&
            wl_display_dispatch(app.display) >= 0)
         ;
-    for (app.frame = 0; app.running && app.frame < app.max_frames;
+    if (app.configured && recreate_window_surface(&app) < 0)
+        rc = 1;
+    for (app.frame = 0; rc == 0 && app.running && app.frame < app.max_frames;
          app.frame++) {
         if (app.resize_every > 0 && app.frame > 0 &&
             app.frame % app.resize_every == 0) {
@@ -671,9 +676,13 @@ int main(int argc, char **argv)
             api_smoke = 0;
         } else if (strcmp(argv[i], "--api-smoke") == 0) {
             api_smoke = 1;
+        } else if (strcmp(argv[i], "--demo") == 0) {
+            frames = 3600;
+            resize_every = 0;
+            api_smoke = 0;
         } else if (strcmp(argv[i], "--help") == 0) {
             fprintf(stderr,
-                    "usage: %s [--frames=N] [--loops=N] [--resize-every=N] [--api-smoke|--simple]\n",
+                    "usage: %s [--frames=N] [--loops=N] [--resize-every=N] [--api-smoke|--simple|--demo]\n",
                     argv[0]);
             return 0;
         } else {

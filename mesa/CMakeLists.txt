@@ -69,3 +69,20 @@ xv6_port(
         -Dtools=
         -Dhtml-docs=disabled
 )
+
+set(_mesa_libgl ${XV6_SYSROOT}/lib/libGL.so)
+set(_mesa_libgl_pc ${XV6_SYSROOT}/lib/pkgconfig/gl.pc)
+
+add_custom_command(
+    OUTPUT  ${_mesa_libgl} ${_mesa_libgl_pc}
+    COMMAND ${CMAKE_COMMAND} -E create_symlink libGLESv2.so ${_mesa_libgl}
+    COMMAND ${CMAKE_COMMAND} -E make_directory ${XV6_SYSROOT}/lib/pkgconfig
+    COMMAND ${CMAKE_COMMAND} -E copy
+            ${CMAKE_CURRENT_LIST_DIR}/gl.pc
+            ${_mesa_libgl_pc}
+    DEPENDS port-mesa
+    COMMENT "Installing xv6 Mesa libGL EGL-context shim"
+    VERBATIM)
+
+add_custom_target(port-mesa-libgl-shim ALL DEPENDS ${_mesa_libgl} ${_mesa_libgl_pc})
+add_dependencies(port-mesa-libgl-shim port-mesa)

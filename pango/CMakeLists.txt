@@ -18,6 +18,7 @@ xv6_port(
         -Dintrospection=disabled
         -Dbuild-testsuite=false
         -Dbuild-examples=false
+        -Dbuild-tools=false
         -Dfontconfig=enabled
         -Dsysprof=disabled
         -Dlibthai=disabled

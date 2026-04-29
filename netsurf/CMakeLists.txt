@@ -81,7 +81,7 @@ export AR=\"${NS_AR}\"
 export RANLIB=\"${NS_RANLIB}\"
 export CFLAGS=\"-O2 -fPIC -DHAVE_CTIME_R=1 -isystem \${SYSROOT}/include\"
 export CXXFLAGS=\"\${CFLAGS}\"
-export LDFLAGS=\"-L\${SYSROOT}/lib\"
+export LDFLAGS=\"-L\${SYSROOT}/lib -Wl,-rpath-link,\${SYSROOT}/lib\"
 
 # pkg-config wiring (talks to .pc files under sysroot)
 export PKG_CONFIG=\"\${NS_BUILD}/pkg-config-wrapper\"

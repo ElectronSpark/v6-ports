@@ -111,6 +111,8 @@ struct kbd_event {
 
 static struct wl_display *g_display;
 
+static int cmdline_flag_enabled(const char *key);
+
 static void wlcomp_wayland_log(const char *fmt, va_list args)
 {
     char buf[256];
@@ -280,21 +282,24 @@ static int alloc_framebuffer_backing(void)
 {
     struct fb_gpu_bo_create bo;
     size_t bytes = (size_t)g_fb_w * g_fb_h * 4;
+    const char *use_bo = getenv("XV6_WLCOMP_FB_BO");
 
-    memset(&bo, 0, sizeof(bo));
-    bo.width = g_fb_w;
-    bo.height = g_fb_h;
-    bo.flags = FB_GPU_BO_F_EXPORTABLE;
-    if (ioctl(g_fb_fd, FB_GPU_BO_CREATE, &bo) == 0 && bo.addr && bo.size) {
-        g_fb_buf = (uint32_t *)(uintptr_t)bo.addr;
-        g_fb_pitch = bo.pitch;
-        g_fb_bo_size = bo.size;
-        g_fb_bo_handle = bo.handle;
-        g_fb_bo_backed = 1;
-        memset(g_fb_buf, 0, (size_t)bo.size);
-        fprintf(stderr, "wlcomp: using fb GPU buffer addr=0x%lx size=%lu pitch=%u handle=%u\n",
-                (uint64_t)bo.addr, bo.size, bo.pitch, bo.handle);
-        return 0;
+    if (use_bo && strcmp(use_bo, "1") == 0) {
+        memset(&bo, 0, sizeof(bo));
+        bo.width = g_fb_w;
+        bo.height = g_fb_h;
+        bo.flags = FB_GPU_BO_F_EXPORTABLE;
+        if (ioctl(g_fb_fd, FB_GPU_BO_CREATE, &bo) == 0 && bo.addr && bo.size) {
+            g_fb_buf = (uint32_t *)(uintptr_t)bo.addr;
+            g_fb_pitch = bo.pitch;
+            g_fb_bo_size = bo.size;
+            g_fb_bo_handle = bo.handle;
+            g_fb_bo_backed = 1;
+            memset(g_fb_buf, 0, (size_t)bo.size);
+            fprintf(stderr, "wlcomp: using fb GPU buffer addr=0x%lx size=%lu pitch=%u handle=%u\n",
+                    (uint64_t)bo.addr, bo.size, bo.pitch, bo.handle);
+            return 0;
+        }
     }
 
     g_fb_buf = (uint32_t *)malloc(bytes);
@@ -545,26 +550,22 @@ static void damage_surface(const struct wlcomp_surface *s)
 
     buf = s->committed_buf;
     surface_window_geometry(s, &gx, &gy, &gw, &gh);
-    (void)gw;
-    (void)gh;
-    damage_rect(s->x - gx, s->y - gy, buf->width, buf->height);
+    (void)buf;
+    damage_rect(s->x, s->y, gw, gh);
 }
 
 static void cursor_bounds_at(int32_t cx, int32_t cy,
                              int32_t *x, int32_t *y,
                              int32_t *w, int32_t *h)
 {
-    *x = cx;
-    *y = cy;
     *w = 12;
     *h = 19;
-
-    if (g_cursor_surface && g_cursor_surface->committed_buf) {
-        *x = cx - g_cursor_hotspot_x;
-        *y = cy - g_cursor_hotspot_y;
-        *w = g_cursor_surface->committed_buf->width;
-        *h = g_cursor_surface->committed_buf->height;
-    }
+    *x = cx;
+    *y = cy;
+    if (*x + *w > (int32_t)g_fb_w) *x = (int32_t)g_fb_w - *w;
+    if (*y + *h > (int32_t)g_fb_h) *y = (int32_t)g_fb_h - *h;
+    if (*x < 0) *x = 0;
+    if (*y < 0) *y = 0;
 }
 
 static void damage_cursor_at(int32_t cx, int32_t cy)
@@ -1041,16 +1042,27 @@ static void surface_commit(struct wl_client *client, struct wl_resource *resourc
     struct wlcomp_surface *surf = surface_from_resource(resource);
     struct wlcomp_buffer *old_committed;
     int old_buffer_released;
+    int old_w = 0, old_h = 0;
+    int buffer_size_changed = 0;
+    int first_map = 0;
     if (!surf) return;
 
     if (surf->has_pending_buffer) {
         old_committed = surf->committed_buf;
         old_buffer_released = surf->buffer_released;
+        if (old_committed) {
+            old_w = old_committed->width;
+            old_h = old_committed->height;
+        }
         if (old_committed)
             damage_surface(surf);
         surf->committed_buf = surf->pending_buf;
         surf->pending_buf = NULL;
         surf->has_pending_buffer = 0;
+        if (old_committed && surf->committed_buf &&
+            (old_w != surf->committed_buf->width ||
+             old_h != surf->committed_buf->height))
+            buffer_size_changed = 1;
 
         if (old_committed && old_committed != surf->committed_buf) {
             if (old_committed->resource && !old_buffer_released)
@@ -1062,14 +1074,17 @@ static void surface_commit(struct wl_client *client, struct wl_resource *resourc
     }
 
     if (surf->committed_buf && surf->xdg_toplevel && !surf->mapped) {
-        /* Center the window on screen (above taskbar) */
-        int32_t bw = surf->committed_buf->width;
-        int32_t bh = surf->committed_buf->height;
-        surf->x = ((int32_t)g_fb_w - bw) / 2;
-        surf->y = ((int32_t)g_fb_h - 36 - bh) / 2;
+        /* Center the logical xdg window, not any buffer margins. */
+        int32_t gx, gy, gw, gh;
+        surface_window_geometry(surf, &gx, &gy, &gw, &gh);
+        (void)gx;
+        (void)gy;
+        surf->x = ((int32_t)g_fb_w - gw) / 2;
+        surf->y = ((int32_t)g_fb_h - 36 - gh) / 2;
         if (surf->x < 0) surf->x = 0;
         if (surf->y < 0) surf->y = 0;
         surf->mapped = 1;
+        first_map = 1;
 
         /* Auto-focus keyboard on first mapped surface (deferred — the
          * keyboard enter event is sent in process_mouse where
@@ -1080,7 +1095,10 @@ static void surface_commit(struct wl_client *client, struct wl_resource *resourc
         }
     }
 
-    damage_surface(surf);
+    if (first_map || buffer_size_changed)
+        damage_full();
+    else
+        damage_surface(surf);
 }
 
 static void surface_set_buffer_transform(struct wl_client *client,
@@ -1561,16 +1579,23 @@ static void xdg_surface_set_window_geometry(struct wl_client *c,
 {
     (void)c;
     struct wlcomp_surface *surf = wl_resource_get_user_data(r);
+    int geometry_changed;
     if (!surf || w <= 0 || h <= 0)
         return;
 
     damage_surface(surf);
+    geometry_changed = !surf->has_window_geometry ||
+        surf->window_x != x || surf->window_y != y ||
+        surf->window_w != w || surf->window_h != h;
     surf->has_window_geometry = 1;
     surf->window_x = x;
     surf->window_y = y;
     surf->window_w = w;
     surf->window_h = h;
-    damage_surface(surf);
+    if (geometry_changed)
+        damage_full();
+    else
+        damage_surface(surf);
 }
 
 static void xdg_surface_ack_configure(struct wl_client *c,
@@ -2415,12 +2440,26 @@ static void launch_desktop_app_arg(const char *path, const char *name,
             (char *)(arg ? arg : "https://www.google.com/"),
             NULL,
         };
+        char *argv_minibrowser_accel[] = {
+            (char *)name,
+            "--enable-webgl=true",
+            "--features=webgl",
+            "--enable-webaudio=false",
+            "--enable-mediasource=false",
+            "--enable-media-stream=false",
+            "--enable-page-cache=false",
+            "--enable-dns-prefetching=false",
+            "--enable-offline-web-application-cache=false",
+            (char *)(arg ? arg : "https://www.google.com/"),
+            NULL,
+        };
         char **argv = arg ? argv_def : argv_noarg;
         char *envp_default[] = {
             "HOME=/",
             "PATH=/bin:/usr/bin",
             "XDG_RUNTIME_DIR=/tmp",
             "XDG_CACHE_HOME=/tmp/.cache",
+            "XDG_DATA_DIRS=/share:/usr/share",
             "WAYLAND_DISPLAY=wayland-0",
             "GDK_BACKEND=wayland",
             "GDK_DPI_SCALE=1.55",
@@ -2434,6 +2473,7 @@ static void launch_desktop_app_arg(const char *path, const char *name,
             "PATH=/bin:/usr/bin",
             "XDG_RUNTIME_DIR=/tmp",
             "XDG_CACHE_HOME=/tmp/.cache",
+            "XDG_DATA_DIRS=/share:/usr/share",
             "WAYLAND_DISPLAY=wayland-0",
             "GDK_BACKEND=wayland",
             "GDK_DPI_SCALE=1.55",
@@ -2464,10 +2504,52 @@ static void launch_desktop_app_arg(const char *path, const char *name,
             "JSC_numberOfGCMarkers=1",
             NULL
         };
+        char *envp_minibrowser_accel[] = {
+            "HOME=/",
+            "PATH=/bin:/usr/bin",
+            "XDG_RUNTIME_DIR=/tmp",
+            "XDG_CACHE_HOME=/tmp/.cache",
+            "XDG_DATA_DIRS=/share:/usr/share",
+            "WAYLAND_DISPLAY=wayland-0",
+            "GDK_BACKEND=wayland",
+            "GDK_DPI_SCALE=1.55",
+            "XCURSOR_PATH=/share/icons",
+            "XCURSOR_THEME=Adwaita",
+            "SSL_CERT_FILE=/share/netsurf/ca-bundle",
+            "GIO_MODULE_DIR=/lib/gio/modules",
+            "GIO_USE_TLS=openssl",
+            "WEBKIT_EXEC_PATH=/libexec/webkit2gtk-4.1",
+            "WEBKIT_INJECTED_BUNDLE_PATH=/lib/webkit2gtk-4.1/injected-bundle",
+            "WEBKIT_DISABLE_NETWORK_CACHE=1",
+            "SOUP_FORCE_HTTP1=1",
+            "WEBKIT_FORCE_COMPOSITING_MODE=1",
+            "LIBGL_ALWAYS_SOFTWARE=0",
+            "MESA_LOADER_DRIVER_OVERRIDE=virpipe",
+            "GALLIUM_DRIVER=virpipe",
+            "ANGLE_DEFAULT_PLATFORM=gl",
+            "JSC_useJIT=0",
+            "JSC_useBaselineJIT=0",
+            "JSC_useDFGJIT=0",
+            "JSC_useFTLJIT=0",
+            "JSC_useRegExpJIT=0",
+            "JSC_useDOMJIT=0",
+            "JSC_useBBQJIT=0",
+            "JSC_useOMGJIT=0",
+            "JSC_useConcurrentJIT=0",
+            "JSC_useConcurrentGC=0",
+            "JSC_numberOfDFGCompilerThreads=1",
+            "JSC_numberOfFTLCompilerThreads=1",
+            "JSC_numberOfWasmCompilerThreads=1",
+            "JSC_numberOfWorklistThreads=1",
+            "JSC_numberOfGCMarkers=1",
+            NULL
+        };
         char **envp = envp_default;
         if (is_minibrowser) {
-            argv = argv_minibrowser;
-            envp = envp_minibrowser;
+            int accel = cmdline_flag_enabled("webkit_accel");
+
+            argv = accel ? argv_minibrowser_accel : argv_minibrowser;
+            envp = accel ? envp_minibrowser_accel : envp_minibrowser;
         }
         execve(path, argv, envp);
         _exit(127);
@@ -3172,6 +3254,48 @@ static void draw_menu(uint32_t *fb, int fb_w, int fb_h)
     }
 }
 
+static void draw_default_cursor(void)
+{
+    static const uint8_t arrow[19][12] = {
+        {1,0,0,0,0,0,0,0,0,0,0,0},
+        {1,1,0,0,0,0,0,0,0,0,0,0},
+        {1,2,1,0,0,0,0,0,0,0,0,0},
+        {1,2,2,1,0,0,0,0,0,0,0,0},
+        {1,2,2,2,1,0,0,0,0,0,0,0},
+        {1,2,2,2,2,1,0,0,0,0,0,0},
+        {1,2,2,2,2,2,1,0,0,0,0,0},
+        {1,2,2,2,2,2,2,1,0,0,0,0},
+        {1,2,2,2,2,2,2,2,1,0,0,0},
+        {1,2,2,2,2,2,2,2,2,1,0,0},
+        {1,2,2,2,2,2,2,2,2,2,1,0},
+        {1,2,2,2,2,2,2,2,2,2,2,1},
+        {1,2,2,2,2,2,1,1,1,1,1,1},
+        {1,2,2,2,2,2,1,0,0,0,0,0},
+        {1,2,2,1,1,2,2,1,0,0,0,0},
+        {1,2,1,0,0,1,2,2,1,0,0,0},
+        {1,1,0,0,0,0,1,2,2,1,0,0},
+        {1,0,0,0,0,0,0,1,2,1,0,0},
+        {0,0,0,0,0,0,0,0,1,1,0,0},
+    };
+
+    int32_t ox, oy, ow, oh;
+
+    cursor_bounds_at(g_cursor_x, g_cursor_y, &ox, &oy, &ow, &oh);
+    for (int y = 0; y < 19; y++) {
+        int py = oy + y;
+        if (py < 0 || py >= (int)g_fb_h) continue;
+        for (int x = 0; x < 12; x++) {
+            int px = ox + x;
+            if (px < 0 || px >= (int)g_fb_w) continue;
+            uint8_t v = arrow[y][x];
+            if (v == 1)
+                g_fb_buf[py * g_fb_w + px] = 0xFF000000;
+            else if (v == 2)
+                g_fb_buf[py * g_fb_w + px] = 0xFFFFFFFF;
+        }
+    }
+}
+
 /* Returns menu item index if clicked, or -1 */
 static int menu_click_test(int mx, int my, int fb_h)
 {
@@ -3828,6 +3952,7 @@ static void open_terminal(void)
             "PS1=\\w# ",
             "XDG_RUNTIME_DIR=/tmp",
             "XDG_CACHE_HOME=/tmp/.cache",
+            "XDG_DATA_DIRS=/share:/usr/share",
             "WAYLAND_DISPLAY=wayland-0",
             "GDK_BACKEND=wayland",
             "XCURSOR_PATH=/share/icons",
@@ -4661,6 +4786,12 @@ static void draw_3d_content(uint32_t *fb, int fb_w, int fb_h, iwin_t *w)
 
 static void open_3ddemo(void)
 {
+    if (access("/bin/mesawlegl", X_OK) == 0) {
+        launch_desktop_app_arg("/bin/mesawlegl", "mesawlegl",
+                               "--demo");
+        return;
+    }
+
     iwin_t *w = iwin_alloc();
     if (!w) return;
     memset(w, 0, sizeof(*w));
@@ -5240,6 +5371,7 @@ static void composite_and_flip(void)
         damage_all_frame_callbacks(now);
         return;
     }
+    damage_cursor_at(g_cursor_x, g_cursor_y);
     tune_damage_for_present();
 
     /* Draw desktop wallpaper */
@@ -5269,17 +5401,27 @@ static void composite_and_flip(void)
         int32_t src_stride_px = buf->stride / 4;
         int32_t gx, gy, gw, gh;
         int32_t draw_x, draw_y;
+        int32_t row0 = 0, row1 = bh;
+        int32_t col0 = 0, col1 = bw;
 
-        (void)gw;
-        (void)gh;
         surface_window_geometry(surf, &gx, &gy, &gw, &gh);
         draw_x = surf->x - gx;
         draw_y = surf->y - gy;
+        if (surf->has_window_geometry) {
+            row0 = gy < 0 ? 0 : gy;
+            col0 = gx < 0 ? 0 : gx;
+            row1 = gy + gh;
+            col1 = gx + gw;
+            if (row1 > bh) row1 = bh;
+            if (col1 > bw) col1 = bw;
+            if (row0 > row1) row0 = row1;
+            if (col0 > col1) col0 = col1;
+        }
 
-        for (int32_t row = 0; row < bh; row++) {
+        for (int32_t row = row0; row < row1; row++) {
             int32_t dy = draw_y + row;
             if (dy < 0 || dy >= (int32_t)g_fb_h) continue;
-            for (int32_t col = 0; col < bw; col++) {
+            for (int32_t col = col0; col < col1; col++) {
                 int32_t dx = draw_x + col;
                 if (dx < 0 || dx >= (int32_t)g_fb_w) continue;
                 blend_pixel(&g_fb_buf[dy * g_fb_w + dx], buf,
@@ -5299,6 +5441,7 @@ static void composite_and_flip(void)
     draw_menu(g_fb_buf, fb_w, fb_h);
 
     /* Draw software cursor */
+    int drew_client_cursor = 0;
     if (g_cursor_surface && g_cursor_surface->committed_buf &&
         buffer_data(g_cursor_surface->committed_buf)) {
         /* Use client-provided cursor surface */
@@ -5315,47 +5458,15 @@ static void composite_and_flip(void)
             for (int32_t col = 0; col < cw; col++) {
                 int32_t dx = ox + col;
                 if (dx < 0 || dx >= (int32_t)g_fb_w) continue;
-                blend_pixel(&g_fb_buf[dy * g_fb_w + dx], cbuf,
-                            csrc[row * cstride + col]);
-            }
-        }
-    } else {
-        /* Default arrow cursor (12×19) */
-        static const uint8_t arrow[19][12] = {
-            {1,0,0,0,0,0,0,0,0,0,0,0},
-            {1,1,0,0,0,0,0,0,0,0,0,0},
-            {1,2,1,0,0,0,0,0,0,0,0,0},
-            {1,2,2,1,0,0,0,0,0,0,0,0},
-            {1,2,2,2,1,0,0,0,0,0,0,0},
-            {1,2,2,2,2,1,0,0,0,0,0,0},
-            {1,2,2,2,2,2,1,0,0,0,0,0},
-            {1,2,2,2,2,2,2,1,0,0,0,0},
-            {1,2,2,2,2,2,2,2,1,0,0,0},
-            {1,2,2,2,2,2,2,2,2,1,0,0},
-            {1,2,2,2,2,2,2,2,2,2,1,0},
-            {1,2,2,2,2,2,2,2,2,2,2,1},
-            {1,2,2,2,2,2,1,1,1,1,1,1},
-            {1,2,2,2,2,2,1,0,0,0,0,0},
-            {1,2,2,1,1,2,2,1,0,0,0,0},
-            {1,2,1,0,0,1,2,2,1,0,0,0},
-            {1,1,0,0,0,0,1,2,2,1,0,0},
-            {1,0,0,0,0,0,0,1,2,1,0,0},
-            {0,0,0,0,0,0,0,0,1,1,0,0},
-        };
-        for (int y = 0; y < 19; y++) {
-            int py = g_cursor_y + y;
-            if (py < 0 || py >= (int)g_fb_h) continue;
-            for (int x = 0; x < 12; x++) {
-                int px = g_cursor_x + x;
-                if (px < 0 || px >= (int)g_fb_w) continue;
-                uint8_t v = arrow[y][x];
-                if (v == 1)
-                    g_fb_buf[py * g_fb_w + px] = 0xFF000000;
-                else if (v == 2)
-                    g_fb_buf[py * g_fb_w + px] = 0xFFFFFFFF;
+                uint32_t pixel = csrc[row * cstride + col];
+                if ((pixel >> 24) != 0)
+                    drew_client_cursor = 1;
+                blend_pixel(&g_fb_buf[dy * g_fb_w + dx], cbuf, pixel);
             }
         }
     }
+    (void)drew_client_cursor;
+    draw_default_cursor();
 
     present_damage_rects(fb_w);
 
@@ -5827,6 +5938,7 @@ static int init_input(void)
 
     g_cursor_x = (int16_t)(g_fb_w / 2);
     g_cursor_y = (int16_t)(g_fb_h / 2);
+    damage_cursor_at(g_cursor_x, g_cursor_y);
     return 0;
 }
 

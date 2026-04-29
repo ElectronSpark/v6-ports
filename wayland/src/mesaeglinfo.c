@@ -2,13 +2,13 @@
  * mesaeglinfo.c - xv6-local Mesa EGL smoke probe.
  *
  * This intentionally avoids the compositor and Wayland window path.  It proves
- * that the real Mesa libEGL/libGLESv2 stack can create a surfaceless software
- * context, render, and read pixels before we wire an xv6 winsys/buffer path.
+ * that the real Mesa libEGL/libGLESv2 stack can create a surfaceless context,
+ * render, and read pixels before or without the compositor window path.
  */
 
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
-#include <GLES2/gl2.h>
+#include <GL/gl.h>
 
 #include <stdint.h>
 #include <stdio.h>
@@ -49,26 +49,28 @@ static int check_pixel(const uint8_t *pixel)
            a >= 240;
 }
 
-int main(void)
+static int run_probe(EGLenum api, EGLint renderable_type, const char *api_name)
 {
-    static const EGLint config_attrs[] = {
+    static const EGLint pbuffer_attrs[] = {
+        EGL_WIDTH, 16,
+        EGL_HEIGHT, 16,
+        EGL_NONE
+    };
+    static const EGLint gles_context_attrs[] = {
+        EGL_CONTEXT_CLIENT_VERSION, 2,
+        EGL_NONE
+    };
+    EGLint config_attrs[] = {
         EGL_SURFACE_TYPE, EGL_PBUFFER_BIT,
-        EGL_RENDERABLE_TYPE, EGL_OPENGL_ES2_BIT,
+        EGL_RENDERABLE_TYPE, renderable_type,
         EGL_RED_SIZE, 8,
         EGL_GREEN_SIZE, 8,
         EGL_BLUE_SIZE, 8,
         EGL_ALPHA_SIZE, 8,
         EGL_NONE
     };
-    static const EGLint pbuffer_attrs[] = {
-        EGL_WIDTH, 16,
-        EGL_HEIGHT, 16,
-        EGL_NONE
-    };
-    static const EGLint context_attrs[] = {
-        EGL_CONTEXT_CLIENT_VERSION, 2,
-        EGL_NONE
-    };
+    const EGLint *context_attrs =
+        api == EGL_OPENGL_ES_API ? gles_context_attrs : NULL;
 
     EGLDisplay display = EGL_NO_DISPLAY;
     EGLConfig config = NULL;
@@ -82,50 +84,55 @@ int main(void)
 
     display = get_surfaceless_display();
     if (display == EGL_NO_DISPLAY) {
-        fprintf(stderr, "mesaeglinfo: no EGL display (0x%x)\n", eglGetError());
+        fprintf(stderr, "mesaeglinfo: %s no EGL display (0x%x)\n",
+                api_name, eglGetError());
         goto out;
     }
     if (!eglInitialize(display, &major, &minor)) {
-        fprintf(stderr, "mesaeglinfo: eglInitialize failed (0x%x)\n",
-                eglGetError());
+        fprintf(stderr, "mesaeglinfo: %s eglInitialize failed (0x%x)\n",
+                api_name, eglGetError());
         goto out;
     }
     if (!eglChooseConfig(display, config_attrs, &config, 1, &nconfigs) ||
         nconfigs < 1) {
-        fprintf(stderr, "mesaeglinfo: eglChooseConfig failed (0x%x)\n",
-                eglGetError());
+        fprintf(stderr, "mesaeglinfo: %s eglChooseConfig failed (0x%x)\n",
+                api_name, eglGetError());
         goto out;
     }
-    if (!eglBindAPI(EGL_OPENGL_ES_API)) {
-        fprintf(stderr, "mesaeglinfo: eglBindAPI failed (0x%x)\n",
-                eglGetError());
+    if (!eglBindAPI(api)) {
+        fprintf(stderr, "mesaeglinfo: %s eglBindAPI failed (0x%x)\n",
+                api_name, eglGetError());
         goto out;
     }
     context = eglCreateContext(display, config, EGL_NO_CONTEXT, context_attrs);
     surface = eglCreatePbufferSurface(display, config, pbuffer_attrs);
     if (context == EGL_NO_CONTEXT || surface == EGL_NO_SURFACE ||
         !eglMakeCurrent(display, surface, surface, context)) {
-        fprintf(stderr, "mesaeglinfo: context setup failed (0x%x)\n",
-                eglGetError());
+        fprintf(stderr, "mesaeglinfo: %s context setup failed (0x%x)\n",
+                api_name, eglGetError());
         goto out;
     }
 
     glViewport(0, 0, 16, 16);
     glClearColor(0.25f, 0.45f, 0.65f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT);
+    glFinish();
     glReadPixels(8, 8, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, pixel);
     glFinish();
 
-    printf("mesaeglinfo: EGL %d.%d vendor=%s\n", major, minor,
+    printf("mesaeglinfo: %s EGL %d.%d vendor=%s\n", api_name, major, minor,
            eglQueryString(display, EGL_VENDOR));
-    printf("mesaeglinfo: GL vendor=%s\n", glGetString(GL_VENDOR));
-    printf("mesaeglinfo: GL renderer=%s\n", glGetString(GL_RENDERER));
-    printf("mesaeglinfo: GL version=%s\n", glGetString(GL_VERSION));
-    printf("mesaeglinfo: pixel rgba=%u,%u,%u,%u\n",
+    printf("mesaeglinfo: %s GL vendor=%s\n", api_name, glGetString(GL_VENDOR));
+    printf("mesaeglinfo: %s GL renderer=%s\n", api_name,
+           glGetString(GL_RENDERER));
+    printf("mesaeglinfo: %s GL version=%s\n", api_name,
+           glGetString(GL_VERSION));
+    printf("mesaeglinfo: %s pixel rgba=%u,%u,%u,%u\n", api_name,
            pixel[0], pixel[1], pixel[2], pixel[3]);
 
     if (!check_pixel(pixel)) {
-        fprintf(stderr, "mesaeglinfo: unexpected clear/readback pixel\n");
+        fprintf(stderr, "mesaeglinfo: %s unexpected clear/readback pixel\n",
+                api_name);
         goto out;
     }
 
@@ -142,6 +149,36 @@ out:
         eglTerminate(display);
     }
     if (status == 0)
-        printf("mesaeglinfo: ok\n");
+        printf("mesaeglinfo: %s ok\n", api_name);
     return status;
+}
+
+int main(int argc, char **argv)
+{
+    int run_gles = 1;
+    int run_gl = 0;
+    int status = 0;
+
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--api=gl") == 0) {
+            run_gles = 0;
+            run_gl = 1;
+        } else if (strcmp(argv[i], "--api=gles") == 0) {
+            run_gles = 1;
+            run_gl = 0;
+        } else if (strcmp(argv[i], "--all") == 0) {
+            run_gles = 1;
+            run_gl = 1;
+        } else {
+            fprintf(stderr,
+                    "usage: mesaeglinfo [--api=gles|--api=gl|--all]\n");
+            return 2;
+        }
+    }
+
+    if (run_gles)
+        status |= run_probe(EGL_OPENGL_ES_API, EGL_OPENGL_ES2_BIT, "gles");
+    if (run_gl)
+        status |= run_probe(EGL_OPENGL_API, EGL_OPENGL_BIT, "gl");
+    return status ? 1 : 0;
 }

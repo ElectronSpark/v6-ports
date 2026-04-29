@@ -113,10 +113,23 @@ add_custom_command(
 # detect cross-compiled libs.
 # ---------------------------------------------------------------------
 set(_setup_local "${_build}/Modules/Setup.local")
-file(WRITE  "${_setup_local}" "*shared*\n")
-file(APPEND "${_setup_local}" "_curses _cursesmodule.c -I${XV6_SYSROOT}/include -L${XV6_SYSROOT}/lib -lncurses\n")
-file(APPEND "${_setup_local}" "_ssl _ssl.c -I${XV6_SYSROOT}/include -L${XV6_SYSROOT}/lib -lssl -lcrypto\n")
-file(APPEND "${_setup_local}" "_hashlib _hashopenssl.c -I${XV6_SYSROOT}/include -L${XV6_SYSROOT}/lib -lcrypto\n")
+set(_setup_local_content
+"*shared*
+_curses _cursesmodule.c -I${XV6_SYSROOT}/include -L${XV6_SYSROOT}/lib -lncurses
+_ssl _ssl.c -I${XV6_SYSROOT}/include -L${XV6_SYSROOT}/lib -lssl -lcrypto
+_hashlib _hashopenssl.c -I${XV6_SYSROOT}/include -L${XV6_SYSROOT}/lib -lcrypto
+")
+file(WRITE "${_setup_local}" "${_setup_local_content}")
+add_custom_command(
+    OUTPUT  ${_setup_local}
+    COMMAND ${CMAKE_COMMAND} -E make_directory ${_build}/Modules
+    COMMAND ${CMAKE_COMMAND}
+            -DOUTPUT=${_setup_local}
+            -DXV6_SYSROOT=${XV6_SYSROOT}
+            -P ${CMAKE_CURRENT_LIST_DIR}/write-setup-local.cmake
+    COMMENT "[cpython] write Modules/Setup.local"
+    VERBATIM)
+add_custom_target(cpython-setup-local DEPENDS ${_setup_local})
 
 # ---------------------------------------------------------------------
 # CFLAGS / LDFLAGS / LIBS for cross configure.

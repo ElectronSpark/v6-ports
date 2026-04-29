@@ -1,0 +1,10 @@
+prefix=/
+libdir=${prefix}/lib
+includedir=${prefix}/include
+
+Name: gl
+Description: xv6 Mesa OpenGL entrypoint shim for EGL-created contexts
+Version: 26.2.0-devel
+Requires: egl
+Libs: -L${libdir} -lGL
+Cflags: -I${includedir}

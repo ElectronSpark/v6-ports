@@ -12,4 +12,5 @@ xv6_port(
     CMAKE_ARGS
         -Ddocs=false
         -Dintrospection=false
+        -Dbuild-tests=false
 )
