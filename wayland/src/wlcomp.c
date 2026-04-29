@@ -43,6 +43,8 @@
 #define FBIOGET_VSCREENINFO  0x4600
 #define FB_GPU_FILL_RECT     0x4610
 #define FB_GPU_BLIT          0x4611
+#define FB_GPU_BO_CREATE     0x4614
+#define FB_GPU_BO_PRESENT    0x4615
 #define MAX_DAMAGE_RECTS     32
 
 struct fb_var_screeninfo {
@@ -54,6 +56,16 @@ struct fb_gpu_fill {
 };
 
 struct fb_gpu_blit {
+    uint32_t x, y, w, h, src_pitch;
+    uint64_t pixels;
+};
+
+struct fb_gpu_bo_create {
+    uint32_t width, height, flags, pitch;
+    uint64_t size, addr;
+};
+
+struct fb_gpu_bo_present {
     uint32_t x, y, w, h, src_pitch;
     uint64_t pixels;
 };
@@ -99,6 +111,8 @@ static int      g_fb_fd   = -1;
 static uint32_t g_fb_w, g_fb_h;
 static uint32_t g_fb_pitch;
 static uint32_t *g_fb_buf;  /* compositing buffer */
+static uint64_t g_fb_bo_size;
+static int      g_fb_bo_backed;
 struct damage_rect {
     int32_t x1, y1, x2, y2;
 };
@@ -224,19 +238,76 @@ static int damage_repair_interval_ms(void)
     return interval_ms;
 }
 
+static void release_framebuffer_backing(void)
+{
+    if (!g_fb_buf)
+        return;
+    if (g_fb_bo_backed)
+        munmap(g_fb_buf, g_fb_bo_size);
+    else
+        free(g_fb_buf);
+    g_fb_buf = NULL;
+    g_fb_bo_size = 0;
+    g_fb_bo_backed = 0;
+}
+
+static int alloc_framebuffer_backing(void)
+{
+    struct fb_gpu_bo_create bo;
+    size_t bytes = (size_t)g_fb_w * g_fb_h * 4;
+
+    memset(&bo, 0, sizeof(bo));
+    bo.width = g_fb_w;
+    bo.height = g_fb_h;
+    if (ioctl(g_fb_fd, FB_GPU_BO_CREATE, &bo) == 0 && bo.addr && bo.size) {
+        g_fb_buf = (uint32_t *)(uintptr_t)bo.addr;
+        g_fb_pitch = bo.pitch;
+        g_fb_bo_size = bo.size;
+        g_fb_bo_backed = 1;
+        memset(g_fb_buf, 0, (size_t)bo.size);
+        fprintf(stderr, "wlcomp: using fb GPU buffer addr=0x%lx size=%lu pitch=%u\n",
+                (uint64_t)bo.addr, bo.size, bo.pitch);
+        return 0;
+    }
+
+    g_fb_buf = (uint32_t *)malloc(bytes);
+    if (!g_fb_buf)
+        return -1;
+    g_fb_pitch = g_fb_w * 4;
+    memset(g_fb_buf, 0, bytes);
+    fprintf(stderr, "wlcomp: using malloc framebuffer backing\n");
+    return 0;
+}
+
 static void present_damage_rects(int fb_w)
 {
-    struct fb_gpu_blit cmd;
+    int stride = g_fb_pitch ? (int)(g_fb_pitch / 4) : fb_w;
 
-    cmd.src_pitch = g_fb_w * 4;
     for (int i = 0; i < g_damage_count; i++) {
         struct damage_rect *r = &g_damage[i];
-        cmd.x = (uint32_t)r->x1;
-        cmd.y = (uint32_t)r->y1;
-        cmd.w = (uint32_t)(r->x2 - r->x1);
-        cmd.h = (uint32_t)(r->y2 - r->y1);
-        cmd.pixels = (uint64_t)(uintptr_t)(g_fb_buf + r->y1 * fb_w + r->x1);
-        ioctl(g_fb_fd, FB_GPU_BLIT, &cmd);
+        uint64_t pixels = (uint64_t)(uintptr_t)(g_fb_buf + r->y1 * stride + r->x1);
+
+        if (g_fb_bo_backed) {
+            struct fb_gpu_bo_present cmd;
+
+            cmd.x = (uint32_t)r->x1;
+            cmd.y = (uint32_t)r->y1;
+            cmd.w = (uint32_t)(r->x2 - r->x1);
+            cmd.h = (uint32_t)(r->y2 - r->y1);
+            cmd.src_pitch = g_fb_pitch;
+            cmd.pixels = pixels;
+            ioctl(g_fb_fd, FB_GPU_BO_PRESENT, &cmd);
+        } else {
+            struct fb_gpu_blit cmd;
+
+            cmd.x = (uint32_t)r->x1;
+            cmd.y = (uint32_t)r->y1;
+            cmd.w = (uint32_t)(r->x2 - r->x1);
+            cmd.h = (uint32_t)(r->y2 - r->y1);
+            cmd.src_pitch = g_fb_pitch;
+            cmd.pixels = pixels;
+            ioctl(g_fb_fd, FB_GPU_BLIT, &cmd);
+        }
     }
     g_damage_count = 0;
 }
@@ -4827,9 +4898,11 @@ static int handle_iwin_click(int mx, int my)
                     g_fb_w = vinfo.xres;
                     g_fb_h = vinfo.yres;
                     g_fb_pitch = vinfo.pitch;
-                    free(g_fb_buf);
-                    g_fb_buf = (uint32_t *)malloc(g_fb_w * g_fb_h * 4);
-                    memset(g_fb_buf, 0, g_fb_w * g_fb_h * 4);
+                    release_framebuffer_backing();
+                    if (alloc_framebuffer_backing() < 0) {
+                        fprintf(stderr, "wlcomp: realloc framebuf failed\n");
+                        return 1;
+                    }
                     g_icons_laid_out = 0;  /* relayout icons */
                     damage_full();
                     fprintf(stderr, "wlcomp: resolution changed to %ux%u\n", g_fb_w, g_fb_h);
@@ -5570,13 +5643,11 @@ static int init_framebuffer(void)
     g_fb_h     = vinfo.yres;
     g_fb_pitch = vinfo.pitch;
 
-    g_fb_buf = (uint32_t *)malloc(g_fb_w * g_fb_h * 4);
-    if (!g_fb_buf) {
-        fprintf(stderr, "wlcomp: malloc framebuf failed\n");
+    if (alloc_framebuffer_backing() < 0) {
+        fprintf(stderr, "wlcomp: framebuf allocation failed\n");
         close(g_fb_fd);
         return -1;
     }
-    memset(g_fb_buf, 0, g_fb_w * g_fb_h * 4);
     damage_full();
 
     fprintf(stderr, "wlcomp: fb0 %ux%u pitch=%u\n", g_fb_w, g_fb_h, g_fb_pitch);
@@ -5756,7 +5827,7 @@ int main(int argc, char **argv)
 
     fprintf(stderr, "wlcomp: shutting down\n");
     wl_display_destroy(g_display);
-    free(g_fb_buf);
+    release_framebuffer_backing();
     if (g_fb_fd >= 0) close(g_fb_fd);
     if (g_mouse_fd >= 0) close(g_mouse_fd);
     if (g_kbd_fd >= 0) close(g_kbd_fd);

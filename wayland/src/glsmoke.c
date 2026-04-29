@@ -63,6 +63,7 @@ struct app_state {
     int running;
     int frame;
     int max_frames;
+    int loop;
 };
 
 static struct vec2 rotate_point(float x, float y, float angle, float cx, float cy)
@@ -223,7 +224,7 @@ static int init_gl(struct app_state *app)
         fprintf(stderr, "glsmoke: shader attributes unavailable\n");
         return -1;
     }
-    fprintf(stderr, "glsmoke: EGL %d.%d, GL %s\n", major, minor,
+    fprintf(stderr, "glsmoke[%d]: EGL %d.%d, GL %s\n", app->loop, major, minor,
             glGetString(GL_VERSION));
     return 0;
 }
@@ -342,6 +343,8 @@ static int init_wayland(struct app_state *app)
 
 static void cleanup(struct app_state *app)
 {
+    if (app->display)
+        wl_display_roundtrip(app->display);
     if (app->frame_cb)
         wl_callback_destroy(app->frame_cb);
     if (app->egl_display != EGL_NO_DISPLAY) {
@@ -373,21 +376,39 @@ static void cleanup(struct app_state *app)
         wl_display_disconnect(app->display);
 }
 
-int main(int argc, char **argv)
+static int parse_positive_arg(const char *arg, const char *prefix,
+                              int fallback)
+{
+    size_t len = strlen(prefix);
+    int value;
+
+    if (strncmp(arg, prefix, len) != 0)
+        return fallback;
+    value = atoi(arg + len);
+    return value > 0 ? value : fallback;
+}
+
+static void print_usage(const char *argv0)
+{
+    fprintf(stderr,
+            "usage: %s [--frames=N] [--loops=N]\n"
+            "  --frames=N  stop each EGL lifecycle after N frame callbacks\n"
+            "  --loops=N   repeat Wayland/EGL create-draw-destroy N times\n",
+            argv0);
+}
+
+static int run_loop(int loop, int frames)
 {
     struct app_state app;
+    int rc = 0;
 
     memset(&app, 0, sizeof(app));
     app.egl_display = EGL_NO_DISPLAY;
     app.egl_context = EGL_NO_CONTEXT;
     app.egl_surface = EGL_NO_SURFACE;
     app.running = 1;
-    app.max_frames = 0;
-
-    for (int i = 1; i < argc; i++) {
-        if (strncmp(argv[i], "--frames=", 9) == 0)
-            app.max_frames = atoi(argv[i] + 9);
-    }
+    app.max_frames = frames;
+    app.loop = loop;
 
     if (init_wayland(&app) < 0) {
         cleanup(&app);
@@ -397,6 +418,38 @@ int main(int argc, char **argv)
     while (app.running && wl_display_dispatch(app.display) >= 0)
         ;
 
+    if (app.running)
+        rc = 1;
     cleanup(&app);
+    fprintf(stderr, "glsmoke[%d]: complete frames=%d status=%d\n", loop,
+            app.frame, rc);
+    return rc;
+}
+
+int main(int argc, char **argv)
+{
+    int frames = 0;
+    int loops = 1;
+
+    for (int i = 1; i < argc; i++) {
+        if (strncmp(argv[i], "--frames=", 9) == 0) {
+            frames = parse_positive_arg(argv[i], "--frames=", frames);
+        } else if (strncmp(argv[i], "--loops=", 8) == 0) {
+            loops = parse_positive_arg(argv[i], "--loops=", loops);
+        } else if (strcmp(argv[i], "--help") == 0) {
+            print_usage(argv[0]);
+            return 0;
+        } else {
+            print_usage(argv[0]);
+            return 2;
+        }
+    }
+
+    for (int loop = 0; loop < loops; loop++) {
+        int rc = run_loop(loop, frames);
+
+        if (rc != 0)
+            return rc;
+    }
     return 0;
 }

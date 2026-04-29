@@ -60,19 +60,22 @@ static pid_t launch_wlcomp(void)
     return pid;
 }
 
-static pid_t launch_client(const char *path, const char *name, const char *arg1)
+static pid_t launch_client(const char *path, const char *name, const char *arg1,
+                           const char *arg2)
 {
     pid_t pid = fork();
     if (pid == 0) {
         int is_netsurf = strcmp(name, "netsurf") == 0;
         int is_minibrowser = strcmp(name, "MiniBrowser") == 0;
 
-        int logfd = open("/tmp/app_log.txt",
-                         O_WRONLY | O_CREAT | O_TRUNC, 0644);
-        if (logfd >= 0) {
-            dup2(logfd, 1);
-            dup2(logfd, 2);
-            close(logfd);
+        if (is_netsurf || is_minibrowser) {
+            int logfd = open("/tmp/app_log.txt",
+                             O_WRONLY | O_CREAT | O_TRUNC, 0644);
+            if (logfd >= 0) {
+                dup2(logfd, 1);
+                dup2(logfd, 2);
+                close(logfd);
+            }
         }
 
         if (is_netsurf) {
@@ -91,9 +94,12 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1)
             }
         }
 
-        char *argv_default[] = { (char *)name, (char *)arg1, NULL };
+        char *argv_default[] = { (char *)name, (char *)arg1, (char *)arg2,
+                                 NULL };
         if (arg1 == NULL)
             argv_default[1] = NULL;
+        if (arg2 == NULL)
+            argv_default[2] = NULL;
         char *argv_minibrowser[] = {
             (char *)name,
             "--enable-webgl=false",
@@ -196,22 +202,49 @@ static int token_is_disabled(const char *cmdline, const char *key)
     return 0;
 }
 
-static int netsurf_disabled_by_cmdline(void)
+static int read_cmdline(char *buf, size_t buf_size)
 {
-    char buf[512];
     int fd = open("/proc/cmdline", O_RDONLY);
     if (fd < 0) {
         fprintf(stderr, "[desktop] /proc/cmdline unavailable\n");
-        return 0;
+        return -1;
     }
 
-    int n = read(fd, buf, sizeof(buf) - 1);
+    int n = read(fd, buf, buf_size - 1);
     close(fd);
     if (n <= 0) {
         fprintf(stderr, "[desktop] /proc/cmdline empty\n");
-        return 0;
+        return -1;
     }
     buf[n] = '\0';
+    return 0;
+}
+
+static int cmdline_int_value(const char *cmdline, const char *key, int fallback)
+{
+    size_t key_len = strlen(key);
+    const char *p = cmdline;
+
+    while (*p) {
+        while (*p == ' ' || *p == '\t' || *p == '\n')
+            p++;
+        if (strncmp(p, key, key_len) == 0 && p[key_len] == '=') {
+            int value = atoi(p + key_len + 1);
+
+            return value > 0 ? value : fallback;
+        }
+        while (*p && *p != ' ' && *p != '\t' && *p != '\n')
+            p++;
+    }
+    return fallback;
+}
+
+static int netsurf_disabled_by_cmdline(void)
+{
+    char buf[512];
+
+    if (read_cmdline(buf, sizeof(buf)) < 0)
+        return 0;
 
     return token_is_disabled(buf, "netsurf");
 }
@@ -219,15 +252,9 @@ static int netsurf_disabled_by_cmdline(void)
 static int webkit_enabled_by_cmdline(void)
 {
     char buf[512];
-    int fd = open("/proc/cmdline", O_RDONLY);
-    if (fd < 0)
-        return 0;
 
-    int n = read(fd, buf, sizeof(buf) - 1);
-    close(fd);
-    if (n <= 0)
+    if (read_cmdline(buf, sizeof(buf)) < 0)
         return 0;
-    buf[n] = '\0';
 
     return !token_is_disabled(buf, "webkit") && strstr(buf, "webkit=1") != NULL;
 }
@@ -235,18 +262,27 @@ static int webkit_enabled_by_cmdline(void)
 static int glsmoke_enabled_by_cmdline(void)
 {
     char buf[512];
-    int fd = open("/proc/cmdline", O_RDONLY);
-    if (fd < 0)
-        return 0;
 
-    int n = read(fd, buf, sizeof(buf) - 1);
-    close(fd);
-    if (n <= 0)
+    if (read_cmdline(buf, sizeof(buf)) < 0)
         return 0;
-    buf[n] = '\0';
 
     return !token_is_disabled(buf, "glsmoke") &&
            strstr(buf, "glsmoke=1") != NULL;
+}
+
+static void glsmoke_args_from_cmdline(char *frames_arg, size_t frames_size,
+                                      char *loops_arg, size_t loops_size)
+{
+    char buf[512];
+    int frames = 120;
+    int loops = 1;
+
+    if (read_cmdline(buf, sizeof(buf)) == 0) {
+        frames = cmdline_int_value(buf, "glsmoke_frames", frames);
+        loops = cmdline_int_value(buf, "glsmoke_loops", loops);
+    }
+    snprintf(frames_arg, frames_size, "--frames=%d", frames);
+    snprintf(loops_arg, loops_size, "--loops=%d", loops);
 }
 
 int main(void)
@@ -274,17 +310,24 @@ int main(void)
 
     /* 3. Launch the requested Wayland client. */
     if (glsmoke_enabled_by_cmdline()) {
-        client_pid = launch_client("/bin/glsmoke", "glsmoke", NULL);
+        char frames_arg[32];
+        char loops_arg[32];
+
+        glsmoke_args_from_cmdline(frames_arg, sizeof(frames_arg), loops_arg,
+                                  sizeof(loops_arg));
+        client_pid = launch_client("/bin/glsmoke", "glsmoke", frames_arg,
+                                   loops_arg);
         if (client_pid < 0) {
             perror("[desktop] fork glsmoke");
             cleanup();
             return 1;
         }
-        fprintf(stderr, "[desktop] glsmoke pid=%d\n", client_pid);
+        fprintf(stderr, "[desktop] glsmoke pid=%d %s %s\n", client_pid,
+                frames_arg, loops_arg);
     } else if (webkit_enabled_by_cmdline()) {
         client_pid = launch_client("/libexec/webkit2gtk-4.1/MiniBrowser",
                                    "MiniBrowser",
-                                   "https://www.google.com/");
+                                   "https://www.google.com/", NULL);
         if (client_pid < 0) {
             perror("[desktop] fork MiniBrowser");
             cleanup();
@@ -295,7 +338,7 @@ int main(void)
         client_pid = 0;
         fprintf(stderr, "[desktop] netsurf disabled by cmdline\n");
     } else {
-        client_pid = launch_client("/bin/netsurf", "netsurf", NULL);
+        client_pid = launch_client("/bin/netsurf", "netsurf", NULL, NULL);
         if (client_pid < 0) {
             perror("[desktop] fork netsurf");
             cleanup();
