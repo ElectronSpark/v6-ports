@@ -306,6 +306,16 @@ static int glsmoke_compat_by_cmdline(void)
     return token_is_enabled(buf, "glsmoke_compat");
 }
 
+static int glsmoke_native_by_cmdline(void)
+{
+    char buf[512];
+
+    if (read_cmdline(buf, sizeof(buf)) < 0)
+        return 0;
+
+    return token_is_enabled(buf, "glsmoke_native");
+}
+
 static void glsmoke_args_from_cmdline(char *frames_arg, size_t frames_size,
                                       char *loops_arg, size_t loops_size,
                                       char *resize_arg, size_t resize_size)
@@ -358,8 +368,12 @@ int main(void)
         char loops_arg[32];
         char resize_arg[32];
         int compat = glsmoke_compat_by_cmdline();
-        const char *client_path = compat ? "/bin/glsmoke" : "/bin/mesaglsmoke";
-        const char *client_name = compat ? "glsmoke" : "mesaglsmoke";
+        int native = !compat && glsmoke_native_by_cmdline();
+        const char *client_path = compat ? "/bin/glsmoke" :
+                                  native ? "/bin/mesawlegl" :
+                                           "/bin/mesaglsmoke";
+        const char *client_name = compat ? "glsmoke" :
+                                  native ? "mesawlegl" : "mesaglsmoke";
 
         glsmoke_args_from_cmdline(frames_arg, sizeof(frames_arg), loops_arg,
                                   sizeof(loops_arg), resize_arg,

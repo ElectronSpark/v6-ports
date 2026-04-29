@@ -37,7 +37,7 @@ xv6_port(
         -Dglx=disabled
         -Dgbm=disabled
         -Dglvnd=disabled
-        -Dgallium-drivers=softpipe
+        -Dgallium-drivers=softpipe,virgl
         -Dvulkan-drivers=
         -Dllvm=disabled
         -Dshared-llvm=disabled
