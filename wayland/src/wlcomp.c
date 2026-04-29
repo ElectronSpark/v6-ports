@@ -73,6 +73,7 @@ struct fb_gpu_bo_present {
     uint32_t x, y, w, h, src_pitch;
     uint64_t pixels;
     uint32_t handle, flags;
+    uint64_t fence;
 };
 
 struct fb_gpu_bo_destroy {
