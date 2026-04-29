@@ -5440,32 +5440,9 @@ static void composite_and_flip(void)
     /* Draw popup menu if open */
     draw_menu(g_fb_buf, fb_w, fb_h);
 
-    /* Draw software cursor */
-    int drew_client_cursor = 0;
-    if (g_cursor_surface && g_cursor_surface->committed_buf &&
-        buffer_data(g_cursor_surface->committed_buf)) {
-        /* Use client-provided cursor surface */
-        struct wlcomp_buffer *cbuf = g_cursor_surface->committed_buf;
-        uint32_t *csrc = (uint32_t *)buffer_data(cbuf);
-        int32_t cw = cbuf->width;
-        int32_t ch = cbuf->height;
-        int32_t cstride = cbuf->stride / 4;
-        int32_t ox = g_cursor_x - g_cursor_hotspot_x;
-        int32_t oy = g_cursor_y - g_cursor_hotspot_y;
-        for (int32_t row = 0; row < ch; row++) {
-            int32_t dy = oy + row;
-            if (dy < 0 || dy >= (int32_t)g_fb_h) continue;
-            for (int32_t col = 0; col < cw; col++) {
-                int32_t dx = ox + col;
-                if (dx < 0 || dx >= (int32_t)g_fb_w) continue;
-                uint32_t pixel = csrc[row * cstride + col];
-                if ((pixel >> 24) != 0)
-                    drew_client_cursor = 1;
-                blend_pixel(&g_fb_buf[dy * g_fb_w + dx], cbuf, pixel);
-            }
-        }
-    }
-    (void)drew_client_cursor;
+    /* Draw one compositor-owned cursor.  Client cursor buffers vary in size
+     * and alpha convention; drawing both paths leaves stale cursor fragments
+     * unless every possible client cursor bound is damaged. */
     draw_default_cursor();
 
     present_damage_rects(fb_w);
