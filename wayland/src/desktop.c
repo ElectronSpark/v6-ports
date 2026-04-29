@@ -19,6 +19,7 @@
 #include <netinet/in.h>
 #include <fcntl.h>
 #include <errno.h>
+#include <time.h>
 
 #define WAYLAND_SOCKET_PATH  "/tmp/wayland-0.lock" /* lockfile (real VFS file) */
 #define SOCKET_WAIT_TRIES    200      /* 200 × 20 ms = 4 s */
@@ -31,11 +32,21 @@ static pid_t httpd_pid;
 
 static int webkit_accel_enabled_by_cmdline(void);
 static int webkit_gpu_smoke_enabled_by_cmdline(void);
+static int webkit_webgl_smoke_enabled_by_cmdline(void);
 static int webkit_api_smoke_enabled_by_cmdline(void);
 static int webkit_http_smoke_enabled_by_cmdline(void);
 static int webkit_reopen_count_from_cmdline(void);
 static int webkit_timeout_ms_from_cmdline(int fallback);
 static int glsmoke_accel_enabled_by_cmdline(void);
+
+static long long monotonic_ms(void)
+{
+    struct timespec ts;
+
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0)
+        return 0;
+    return (long long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
 
 static void sighandler(int sig)
 {
@@ -140,7 +151,7 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
                          strcmp(name, "mesaeglinfo") == 0;
         int is_webkit = is_minibrowser || is_webkitgpusmoke;
 
-        if (is_netsurf || is_webkit) {
+        if (is_netsurf || is_minibrowser) {
             int logfd = open("/tmp/app_log.txt",
                              O_WRONLY | O_CREAT | O_TRUNC, 0644);
             if (logfd >= 0) {
@@ -277,6 +288,9 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             "MESA_LOADER_DRIVER_OVERRIDE=virpipe",
             "GALLIUM_DRIVER=virpipe",
             "ANGLE_DEFAULT_PLATFORM=gl",
+            "EPOXY_XV6_ALLOW_MISSING=1",
+            "WEBKIT_XV6_SKIP_RULE_FEATURES=1",
+            "WEBKIT_XV6_SKIP_INITIAL_EMPTY_RENDER=1",
             "JSC_useJIT=0",
             "JSC_useBaselineJIT=0",
             "JSC_useDFGJIT=0",
@@ -458,6 +472,16 @@ static int webkit_gpu_smoke_enabled_by_cmdline(void)
     return token_is_enabled(buf, "webkit_gpu_smoke");
 }
 
+static int webkit_webgl_smoke_enabled_by_cmdline(void)
+{
+    char buf[512];
+
+    if (read_cmdline(buf, sizeof(buf)) < 0)
+        return 0;
+
+    return token_is_enabled(buf, "webkit_webgl_smoke");
+}
+
 static int webkit_api_smoke_enabled_by_cmdline(void)
 {
     char buf[512];
@@ -516,6 +540,10 @@ static void webkit_url_from_cmdline(char *out, size_t out_size)
     if (out_size == 0)
         return;
 
+    if (webkit_webgl_smoke_enabled_by_cmdline()) {
+        snprintf(out, out_size, "file:///share/webkit/gpu-webgl-smoke.html");
+        return;
+    }
     if (webkit_gpu_smoke_enabled_by_cmdline()) {
         snprintf(out, out_size, "file:///share/webkit/gpu-smoke.html");
         return;
@@ -672,7 +700,7 @@ int main(void)
         int webkit_api_smoke = webkit_api_smoke_enabled_by_cmdline();
         int webkit_timeout_ms = webkit_timeout_ms_from_cmdline(
             webkit_api_smoke ? 15000 : 0);
-        int elapsed_ms = 0;
+        long long launch_ms = 0;
         const char *webkit_path = webkit_api_smoke ?
             "/bin/webkitgpusmoke" : "/libexec/webkit2gtk-4.1/MiniBrowser";
         const char *webkit_name = webkit_api_smoke ?
@@ -711,6 +739,7 @@ int main(void)
                 "url=%s\n",
                 webkit_name, client_pid, accel, webkit_reopen_left,
                 webkit_timeout_ms, webkit_url);
+        launch_ms = monotonic_ms();
 
         while (g_running) {
             int status;
@@ -744,7 +773,7 @@ int main(void)
                                 "reopen_left=%d url=%s\n",
                                 webkit_name, client_pid, webkit_reopen_left,
                                 webkit_url);
-                        elapsed_ms = 0;
+                        launch_ms = monotonic_ms();
                     } else if (webkit_api_smoke) {
                         fprintf(stderr,
                                 "[desktop] WebKit API reopen smoke complete\n");
@@ -753,16 +782,14 @@ int main(void)
                 }
             }
             usleep(100000);
-            elapsed_ms += 100;
             if (webkit_timeout_ms > 0 && client_pid > 0 &&
-                elapsed_ms >= webkit_timeout_ms) {
+                monotonic_ms() - launch_ms >= webkit_timeout_ms) {
                 fprintf(stderr,
                         "[desktop] WebKit timeout reached, closing pid=%d\n",
                         client_pid);
                 kill_and_reap(&client_pid);
                 if (webkit_reopen_left > 1) {
                     webkit_reopen_left--;
-                    elapsed_ms = 0;
                     client_pid = launch_client(webkit_path, webkit_name,
                                                webkit_url, webkit_timeout,
                                                NULL);
@@ -775,6 +802,7 @@ int main(void)
                             "url=%s\n",
                             webkit_name, client_pid, webkit_reopen_left,
                             webkit_url);
+                    launch_ms = monotonic_ms();
                 } else {
                     fprintf(stderr,
                             "[desktop] WebKit timeout smoke complete\n");

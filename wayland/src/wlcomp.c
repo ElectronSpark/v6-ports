@@ -437,6 +437,7 @@ static struct wl_list g_surfaces;  /* list of wlcomp_surface */
 static struct wlcomp_surface *g_focused;  /* pointer-focused Wayland surface */
 static struct wlcomp_surface *g_kbd_focused; /* keyboard-focused (click-to-focus) */
 static int g_kbd_enter_pending; /* deferred keyboard enter for g_kbd_focused */
+static int g_iwin_focus = -1;   /* index of focused internal window */
 
 static void surface_set_keyboard_focus(struct wlcomp_surface *surf);
 
@@ -1086,13 +1087,15 @@ static void surface_commit(struct wl_client *client, struct wl_resource *resourc
         surf->mapped = 1;
         first_map = 1;
 
-        /* Auto-focus keyboard on first mapped surface (deferred — the
-         * keyboard enter event is sent in process_mouse where
-         * g_keyboard_resources is in scope) */
-        if (!g_kbd_focused) {
-            g_kbd_focused = surf;
-            g_kbd_enter_pending = 1;
-        }
+        /*
+         * A newly mapped Wayland toplevel is a foreground activation.  Clear
+         * internal-window focus as well, otherwise an older terminal/calculator
+         * can remain logically on top and steal clicks through the WebKit
+         * surface until the next explicit focus transition.
+         */
+        g_iwin_focus = -1;
+        surface_raise_to_top(surf);
+        surface_set_keyboard_focus(surf);
     }
 
     if (first_map || buffer_size_changed)
@@ -2527,6 +2530,7 @@ static void launch_desktop_app_arg(const char *path, const char *name,
             "MESA_LOADER_DRIVER_OVERRIDE=virpipe",
             "GALLIUM_DRIVER=virpipe",
             "ANGLE_DEFAULT_PLATFORM=gl",
+            "EPOXY_XV6_ALLOW_MISSING=1",
             "JSC_useJIT=0",
             "JSC_useBaselineJIT=0",
             "JSC_useDFGJIT=0",
@@ -2978,7 +2982,6 @@ typedef struct {
 } iwin_t;
 
 static iwin_t g_iwin[MAX_IWIN];
-static int g_iwin_focus = -1;   /* index of focused internal window */
 static int g_iwin_cascade;      /* cascade counter for positioning */
 
 static int surface_is_foreground(const struct wlcomp_surface *surf)
@@ -5798,7 +5801,12 @@ static uint32_t g_last_mods_sent;
 static void process_keyboard(void)
 {
     struct kbd_event ev;
-    while (read(g_kbd_fd, &ev, sizeof(ev)) == sizeof(ev)) {
+    int events_processed = 0;
+    const int max_keyboard_events_per_frame = 64;
+
+    while (events_processed < max_keyboard_events_per_frame &&
+           read(g_kbd_fd, &ev, sizeof(ev)) == sizeof(ev)) {
+        events_processed++;
         /* Key debounce: suppress press that follows release of same key
          * within KEY_DEBOUNCE_MS (catches PS/2 contact bounce) */
         if (ev.pressed && ev.scancode == g_key_debounce_sc) {
@@ -6053,11 +6061,24 @@ int main(int argc, char **argv)
     fprintf(stderr, "wlcomp: entering main loop\n");
 
     while (g_running) {
-        /* Dispatch pending Wayland events */
+        struct epoll_event events[8];
+        int nready;
+
         wl_display_flush_clients(g_display);
         wl_event_loop_dispatch(loop, 0);
 
-        /* Process input */
+        nready = epoll_wait(epfd, events, 8, 16);
+        for (int i = 0; i < nready; i++) {
+            if (events[i].data.fd == wl_fd)
+                wl_event_loop_dispatch(loop, 0);
+        }
+
+        /*
+         * Input devices are opened O_NONBLOCK and their cdev reads return
+         * -EAGAIN when empty. Poll them once per frame instead of relying on
+         * epoll readiness; this keeps pointer motion alive even if a wakeup is
+         * coalesced or missed during heavy WebKit/GL repaint.
+         */
         if (g_mouse_fd >= 0)
             process_mouse();
         if (g_kbd_fd >= 0)
@@ -6074,10 +6095,6 @@ int main(int argc, char **argv)
 
         /* Flush events to clients */
         wl_display_flush_clients(g_display);
-
-        /* Wait for events (16ms timeout ~ 60fps) */
-        struct epoll_event events[8];
-        epoll_wait(epfd, events, 8, 16);
     }
 
     fprintf(stderr, "wlcomp: shutting down\n");
