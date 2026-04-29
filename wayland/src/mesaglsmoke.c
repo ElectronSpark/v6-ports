@@ -97,8 +97,10 @@ struct app_state {
     int running;
     int frame;
     int max_frames;
+    int resize_every;
     int width;
     int height;
+    int loop;
 };
 
 static const struct wl_interface *xv6_gpu_buffer_create_types[] = {
@@ -241,6 +243,28 @@ static int init_present_buffer(struct app_state *app)
     return buf->wl_buffer ? 0 : -1;
 }
 
+static void destroy_present_buffer(struct app_state *app)
+{
+    struct present_buffer *buf = &app->buffer;
+
+    if (buf->wl_buffer)
+        wl_buffer_destroy(buf->wl_buffer);
+    if (buf->pixels)
+        munmap(buf->pixels, buf->size);
+    if (buf->bo_handle && buf->fb_fd >= 0) {
+        struct fb_gpu_bo_destroy destroy = { .handle = buf->bo_handle };
+        ioctl(buf->fb_fd, FB_GPU_BO_DESTROY, &destroy);
+    }
+    if (buf->fb_fd >= 0)
+        close(buf->fb_fd);
+    if (buf->fd >= 0)
+        close(buf->fd);
+
+    memset(buf, 0, sizeof(*buf));
+    buf->fd = -1;
+    buf->fb_fd = -1;
+}
+
 static GLuint compile_shader(GLenum type, const char *src)
 {
     GLuint shader = glCreateShader(type);
@@ -346,6 +370,57 @@ static int init_mesa(struct app_state *app)
     return 0;
 }
 
+static int recreate_mesa_surface(struct app_state *app)
+{
+    EGLint pbuffer_attrs[] = {
+        EGL_WIDTH, app->width,
+        EGL_HEIGHT, app->height,
+        EGL_NONE
+    };
+    EGLSurface surface;
+
+    if (app->egl_display == EGL_NO_DISPLAY ||
+        app->egl_context == EGL_NO_CONTEXT)
+        return -1;
+
+    eglMakeCurrent(app->egl_display, EGL_NO_SURFACE, EGL_NO_SURFACE,
+                   EGL_NO_CONTEXT);
+    if (app->egl_surface != EGL_NO_SURFACE) {
+        eglDestroySurface(app->egl_display, app->egl_surface);
+        app->egl_surface = EGL_NO_SURFACE;
+    }
+
+    surface = eglCreatePbufferSurface(app->egl_display, app->egl_config,
+                                      pbuffer_attrs);
+    if (surface == EGL_NO_SURFACE ||
+        !eglMakeCurrent(app->egl_display, surface, surface,
+                        app->egl_context)) {
+        fprintf(stderr, "mesaglsmoke[%d]: pbuffer resize failed (0x%x)\n",
+                app->loop, eglGetError());
+        return -1;
+    }
+    app->egl_surface = surface;
+    return 0;
+}
+
+static int resize_surface_and_buffer(struct app_state *app)
+{
+    if (app->width == WINDOW_W) {
+        app->width = 360;
+        app->height = 260;
+    } else {
+        app->width = WINDOW_W;
+        app->height = WINDOW_H;
+    }
+
+    destroy_present_buffer(app);
+    if (init_present_buffer(app) < 0)
+        return -1;
+    if (recreate_mesa_surface(app) < 0)
+        return -1;
+    return 0;
+}
+
 static void render_frame(struct app_state *app)
 {
     float angle = app->frame * 0.055f;
@@ -413,6 +488,13 @@ static void frame_done(void *data, struct wl_callback *cb, uint32_t time)
     if (app->max_frames > 0 && app->frame >= app->max_frames) {
         app->running = 0;
         return;
+    }
+    if (app->resize_every > 0 && app->frame > 0 &&
+        app->frame % app->resize_every == 0) {
+        if (resize_surface_and_buffer(app) < 0) {
+            app->running = 0;
+            return;
+        }
     }
     draw_and_commit(app);
 }
@@ -557,8 +639,6 @@ static int init_wayland(struct app_state *app)
 
 static void cleanup(struct app_state *app)
 {
-    struct present_buffer *buf = &app->buffer;
-
     if (app->display)
         wl_display_roundtrip(app->display);
     if (app->frame_cb)
@@ -574,18 +654,7 @@ static void cleanup(struct app_state *app)
             eglDestroyContext(app->egl_display, app->egl_context);
         eglTerminate(app->egl_display);
     }
-    if (buf->wl_buffer)
-        wl_buffer_destroy(buf->wl_buffer);
-    if (buf->pixels)
-        munmap(buf->pixels, buf->size);
-    if (buf->bo_handle && buf->fb_fd >= 0) {
-        struct fb_gpu_bo_destroy destroy = { .handle = buf->bo_handle };
-        ioctl(buf->fb_fd, FB_GPU_BO_DESTROY, &destroy);
-    }
-    if (buf->fb_fd >= 0)
-        close(buf->fb_fd);
-    if (buf->fd >= 0)
-        close(buf->fd);
+    destroy_present_buffer(app);
     if (app->toplevel)
         xdg_toplevel_destroy(app->toplevel);
     if (app->xdg_surface)
@@ -618,7 +687,7 @@ static int parse_positive_arg(const char *arg, const char *prefix,
     return value > 0 ? value : fallback;
 }
 
-static int run_client(int frames)
+static int run_client(int loop, int frames, int resize_every)
 {
     struct app_state app;
     int rc = 0;
@@ -631,8 +700,10 @@ static int run_client(int frames)
     app.buffer.fb_fd = -1;
     app.running = 1;
     app.max_frames = frames;
+    app.resize_every = resize_every;
     app.width = WINDOW_W;
     app.height = WINDOW_H;
+    app.loop = loop;
 
     if (init_wayland(&app) < 0) {
         cleanup(&app);
@@ -644,20 +715,30 @@ static int run_client(int frames)
     if (app.running)
         rc = 1;
     cleanup(&app);
-    fprintf(stderr, "mesaglsmoke: complete frames=%d status=%d\n",
-            app.frame, rc);
+    fprintf(stderr, "mesaglsmoke[%d]: complete frames=%d status=%d\n",
+            loop, app.frame, rc);
     return rc;
 }
 
 int main(int argc, char **argv)
 {
     int frames = 120;
+    int loops = 1;
+    int resize_every = 0;
+    int rc = 0;
 
     for (int i = 1; i < argc; i++) {
         if (strncmp(argv[i], "--frames=", 9) == 0) {
             frames = parse_positive_arg(argv[i], "--frames=", frames);
+        } else if (strncmp(argv[i], "--loops=", 8) == 0) {
+            loops = parse_positive_arg(argv[i], "--loops=", loops);
+        } else if (strncmp(argv[i], "--resize-every=", 15) == 0) {
+            resize_every = parse_positive_arg(argv[i], "--resize-every=",
+                                              resize_every);
         } else if (strcmp(argv[i], "--help") == 0) {
-            fprintf(stderr, "usage: %s [--frames=N]\n", argv[0]);
+            fprintf(stderr,
+                    "usage: %s [--frames=N] [--loops=N] [--resize-every=N]\n",
+                    argv[0]);
             return 0;
         } else {
             fprintf(stderr, "mesaglsmoke: unknown option '%s'\n", argv[i]);
@@ -665,5 +746,10 @@ int main(int argc, char **argv)
         }
     }
 
-    return run_client(frames);
+    for (int loop = 1; loop <= loops; loop++) {
+        rc = run_client(loop, frames, resize_every);
+        if (rc != 0)
+            break;
+    }
+    return rc;
 }
