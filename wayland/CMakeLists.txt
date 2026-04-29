@@ -10,7 +10,7 @@ endif()
 
 set(WAYLAND_SRC_DIR "${CMAKE_CURRENT_SOURCE_DIR}/src")
 
-foreach(_src wlcomp.c desktop.c glsmoke.c xv6_egl_gles.c font8x16.h)
+foreach(_src wlcomp.c desktop.c glsmoke.c mesaeglinfo.c xv6_egl_gles.c font8x16.h)
     if(NOT EXISTS "${WAYLAND_SRC_DIR}/${_src}")
         message(FATAL_ERROR "ports/wayland: missing ${WAYLAND_SRC_DIR}/${_src}")
     endif()
@@ -28,12 +28,14 @@ set(_xdg_client_code   ${_wl_build}/xdg-shell-client-protocol.c)
 set(_wl_bin       ${_wl_build}/wlcomp)
 set(_desktop_bin  ${_wl_build}/desktop)
 set(_glsmoke_bin  ${_wl_build}/glsmoke)
+set(_mesaeglinfo_bin ${_wl_build}/mesaeglinfo)
 set(_xv6egl_obj   ${_wl_build}/xv6_egl_gles.o)
 set(_xv6egl_lib   ${_wl_build}/libEGL.a)
 set(_xv6gles_lib  ${_wl_build}/libGLESv2.a)
 set(_wl_installed ${XV6_SYSROOT}/bin/wlcomp)
 set(_desktop_installed ${XV6_SYSROOT}/bin/desktop)
 set(_glsmoke_installed ${XV6_SYSROOT}/bin/glsmoke)
+set(_mesaeglinfo_installed ${XV6_SYSROOT}/bin/mesaeglinfo)
 set(_egl_installed ${XV6_SYSROOT}/lib/libEGL.a)
 set(_gles_installed ${XV6_SYSROOT}/lib/libGLESv2.a)
 file(MAKE_DIRECTORY ${_wl_build} ${_wl_proto_dir} ${XV6_SYSROOT}/bin)
@@ -144,28 +146,48 @@ add_custom_command(
     VERBATIM)
 
 add_custom_command(
+    OUTPUT  ${_mesaeglinfo_bin}
+    COMMAND ${CMAKE_C_COMPILER} -O2 -g -Wall
+                -isystem ${XV6_SYSROOT}/include
+                -L ${XV6_SYSROOT}/lib
+                -Wl,-rpath-link,${XV6_SYSROOT}/lib
+                -o ${_mesaeglinfo_bin}
+                ${WAYLAND_SRC_DIR}/mesaeglinfo.c
+                -lEGL -lGLESv2 -lpthread -ldl -lrt -lm
+    DEPENDS ${WAYLAND_SRC_DIR}/mesaeglinfo.c
+    COMMENT "Compiling Mesa surfaceless EGL smoke probe"
+    VERBATIM)
+
+add_custom_command(
     OUTPUT  ${_wl_installed} ${_desktop_installed} ${_glsmoke_installed}
+            ${_mesaeglinfo_installed}
             ${_egl_installed} ${_gles_installed}
     COMMAND ${CMAKE_COMMAND} -E copy ${_wl_bin} ${_wl_installed}
     COMMAND ${CMAKE_COMMAND} -E copy ${_desktop_bin} ${_desktop_installed}
     COMMAND ${CMAKE_COMMAND} -E copy ${_glsmoke_bin} ${_glsmoke_installed}
+    COMMAND ${CMAKE_COMMAND} -E copy ${_mesaeglinfo_bin} ${_mesaeglinfo_installed}
     COMMAND ${CMAKE_COMMAND} -E copy ${_xv6egl_lib} ${_egl_installed}
     COMMAND ${CMAKE_COMMAND} -E copy ${_xv6gles_lib} ${_gles_installed}
-    DEPENDS ${_wl_bin} ${_desktop_bin} ${_glsmoke_bin}
+    DEPENDS ${_wl_bin} ${_desktop_bin} ${_glsmoke_bin} ${_mesaeglinfo_bin}
             ${_xv6egl_lib} ${_xv6gles_lib}
     COMMENT "Installing GUI session into ${XV6_SYSROOT}/bin"
     VERBATIM)
 
 add_custom_target(port-wayland ALL DEPENDS
     ${_wl_installed} ${_desktop_installed} ${_glsmoke_installed}
+    ${_mesaeglinfo_installed}
     ${_egl_installed} ${_gles_installed})
 if(TARGET port-wayland-libs)
     add_dependencies(port-wayland port-wayland-libs)
+endif()
+if(TARGET port-mesa)
+    add_dependencies(port-wayland port-mesa)
 endif()
 
 add_custom_target(port-wayland-clean
     COMMAND ${CMAKE_COMMAND} -E rm -rf ${_wl_build}
     COMMAND ${CMAKE_COMMAND} -E remove -f
             ${_wl_installed} ${_desktop_installed} ${_glsmoke_installed}
+            ${_mesaeglinfo_installed}
             ${_egl_installed} ${_gles_installed}
     COMMENT "Removing wayland artifacts from ${XV6_SYSROOT}")

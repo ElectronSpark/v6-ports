@@ -60,6 +60,10 @@ function(xv6_port)
                     OUTPUT_FILES
                     CMAKE_ARGS
                     CONFIGURE_ARGS
+                    C_ARGS
+                    C_LINK_ARGS
+                    CPP_ARGS
+                    CPP_LINK_ARGS
                     MAKE_ARGS
                     INSTALL_ARGS)
     cmake_parse_arguments(P "${opts}" "${one_value}" "${multi_value}" ${ARGN})
@@ -167,15 +171,22 @@ function(xv6_port)
             set(_cxx "${CMAKE_C_COMPILER}")
         endif()
 
-        # Split XV6_PORT_CFLAGS into a meson list literal: ['-a','-b']
+        # Split XV6_PORT_CFLAGS plus optional per-port flags into Meson list
+        # literals: ['-a','-b'].
         separate_arguments(_cflag_list UNIX_COMMAND "${XV6_PORT_CFLAGS}")
-        set(_cflag_meson "")
-        foreach(f IN LISTS _cflag_list)
-            if(_cflag_meson STREQUAL "")
-                set(_cflag_meson "'${f}'")
-            else()
-                set(_cflag_meson "${_cflag_meson}, '${f}'")
-            endif()
+        set(_c_args_list ${_cflag_list} ${P_C_ARGS})
+        set(_c_link_args_list ${_cflag_list} ${P_C_LINK_ARGS})
+        set(_cpp_args_list ${_cflag_list} ${P_CPP_ARGS})
+        set(_cpp_link_args_list ${_cflag_list} ${P_CPP_LINK_ARGS})
+        foreach(_kind c_args c_link_args cpp_args cpp_link_args)
+            set(_${_kind}_meson "")
+            foreach(f IN LISTS _${_kind}_list)
+                if(_${_kind}_meson STREQUAL "")
+                    set(_${_kind}_meson "'${f}'")
+                else()
+                    set(_${_kind}_meson "${_${_kind}_meson}, '${f}'")
+                endif()
+            endforeach()
         endforeach()
 
         set(_crossfile "${CMAKE_BINARY_DIR}/${_name}-cross.ini")
@@ -207,10 +218,10 @@ function(xv6_port)
 "needs_exe_wrapper = true\n"
 "\n"
 "[built-in options]\n"
-"c_args      = [${_cflag_meson}]\n"
-"c_link_args = [${_cflag_meson}]\n"
-"cpp_args    = [${_cflag_meson}]\n"
-"cpp_link_args = [${_cflag_meson}]\n"
+"c_args      = [${_c_args_meson}]\n"
+"c_link_args = [${_c_link_args_meson}]\n"
+"cpp_args    = [${_cpp_args_meson}]\n"
+"cpp_link_args = [${_cpp_link_args_meson}]\n"
 "prefix      = '/'\n"
 "libdir      = 'lib'\n"
 "includedir  = 'include'\n"

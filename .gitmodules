@@ -143,3 +143,9 @@
 [submodule "openssh/src"]
 	path = openssh/src
 	url = https://github.com/openssh/openssh-portable.git
+[submodule "mesa/src"]
+	path = mesa/src
+	url = git@github.com:ElectronSpark/v6-mesa.git
+[submodule "libdrm/src"]
+	path = libdrm/src
+	url = git@github.com:ElectronSpark/v6-drm.git
