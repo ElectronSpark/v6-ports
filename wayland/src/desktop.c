@@ -61,7 +61,7 @@ static pid_t launch_wlcomp(void)
 }
 
 static pid_t launch_client(const char *path, const char *name, const char *arg1,
-                           const char *arg2)
+                           const char *arg2, const char *arg3)
 {
     pid_t pid = fork();
     if (pid == 0) {
@@ -94,12 +94,19 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             }
         }
 
-        char *argv_default[] = { (char *)name, (char *)arg1, (char *)arg2,
-                                 NULL };
+        char *argv_default[] = {
+            (char *)name,
+            (char *)arg1,
+            (char *)arg2,
+            (char *)arg3,
+            NULL,
+        };
         if (arg1 == NULL)
             argv_default[1] = NULL;
         if (arg2 == NULL)
             argv_default[2] = NULL;
+        if (arg3 == NULL)
+            argv_default[3] = NULL;
         char *argv_minibrowser[] = {
             (char *)name,
             "--enable-webgl=false",
@@ -271,18 +278,26 @@ static int glsmoke_enabled_by_cmdline(void)
 }
 
 static void glsmoke_args_from_cmdline(char *frames_arg, size_t frames_size,
-                                      char *loops_arg, size_t loops_size)
+                                      char *loops_arg, size_t loops_size,
+                                      char *resize_arg, size_t resize_size)
 {
     char buf[512];
     int frames = 120;
     int loops = 1;
+    int resize_every = 0;
 
     if (read_cmdline(buf, sizeof(buf)) == 0) {
         frames = cmdline_int_value(buf, "glsmoke_frames", frames);
         loops = cmdline_int_value(buf, "glsmoke_loops", loops);
+        resize_every = cmdline_int_value(buf, "glsmoke_resize_every",
+                                         resize_every);
     }
     snprintf(frames_arg, frames_size, "--frames=%d", frames);
     snprintf(loops_arg, loops_size, "--loops=%d", loops);
+    if (resize_every > 0)
+        snprintf(resize_arg, resize_size, "--resize-every=%d", resize_every);
+    else if (resize_size > 0)
+        resize_arg[0] = '\0';
 }
 
 int main(void)
@@ -312,22 +327,24 @@ int main(void)
     if (glsmoke_enabled_by_cmdline()) {
         char frames_arg[32];
         char loops_arg[32];
+        char resize_arg[32];
 
         glsmoke_args_from_cmdline(frames_arg, sizeof(frames_arg), loops_arg,
-                                  sizeof(loops_arg));
+                                  sizeof(loops_arg), resize_arg,
+                                  sizeof(resize_arg));
         client_pid = launch_client("/bin/glsmoke", "glsmoke", frames_arg,
-                                   loops_arg);
+                                   loops_arg, resize_arg[0] ? resize_arg : NULL);
         if (client_pid < 0) {
             perror("[desktop] fork glsmoke");
             cleanup();
             return 1;
         }
-        fprintf(stderr, "[desktop] glsmoke pid=%d %s %s\n", client_pid,
-                frames_arg, loops_arg);
+        fprintf(stderr, "[desktop] glsmoke pid=%d %s %s %s\n", client_pid,
+                frames_arg, loops_arg, resize_arg);
     } else if (webkit_enabled_by_cmdline()) {
         client_pid = launch_client("/libexec/webkit2gtk-4.1/MiniBrowser",
                                    "MiniBrowser",
-                                   "https://www.google.com/", NULL);
+                                   "https://www.google.com/", NULL, NULL);
         if (client_pid < 0) {
             perror("[desktop] fork MiniBrowser");
             cleanup();
@@ -338,7 +355,7 @@ int main(void)
         client_pid = 0;
         fprintf(stderr, "[desktop] netsurf disabled by cmdline\n");
     } else {
-        client_pid = launch_client("/bin/netsurf", "netsurf", NULL, NULL);
+        client_pid = launch_client("/bin/netsurf", "netsurf", NULL, NULL, NULL);
         if (client_pid < 0) {
             perror("[desktop] fork netsurf");
             cleanup();

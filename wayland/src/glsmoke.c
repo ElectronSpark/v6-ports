@@ -63,6 +63,9 @@ struct app_state {
     int running;
     int frame;
     int max_frames;
+    int resize_every;
+    int width;
+    int height;
     int loop;
 };
 
@@ -92,7 +95,7 @@ static void render_frame(struct app_state *app)
         { c.x, c.y, 0.20f, 0.42f, 1.0f, 1.0f },
     };
 
-    glViewport(0, 0, GL_WINDOW_W, GL_WINDOW_H);
+    glViewport(0, 0, app->width, app->height);
     glClearColor(0.04f, 0.07f, 0.08f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT);
     glUseProgram(app->program);
@@ -107,6 +110,33 @@ static void render_frame(struct app_state *app)
 
 static void draw_and_commit(struct app_state *app);
 
+static int recreate_egl_surface(struct app_state *app)
+{
+    EGLSurface new_surface;
+
+    if (!app->egl_display || !app->egl_window || !app->egl_context)
+        return -1;
+    if (app->egl_surface != EGL_NO_SURFACE) {
+        eglMakeCurrent(app->egl_display, EGL_NO_SURFACE, EGL_NO_SURFACE,
+                       EGL_NO_CONTEXT);
+        eglDestroySurface(app->egl_display, app->egl_surface);
+        app->egl_surface = EGL_NO_SURFACE;
+    }
+    wl_egl_window_resize(app->egl_window, app->width, app->height, 0, 0);
+    new_surface = eglCreateWindowSurface(app->egl_display, app->egl_config,
+                                         (EGLNativeWindowType)app->egl_window,
+                                         NULL);
+    if (new_surface == EGL_NO_SURFACE ||
+        !eglMakeCurrent(app->egl_display, new_surface, new_surface,
+                        app->egl_context)) {
+        fprintf(stderr, "glsmoke[%d]: resize surface recreate failed (0x%x)\n",
+                app->loop, eglGetError());
+        return -1;
+    }
+    app->egl_surface = new_surface;
+    return 0;
+}
+
 static void frame_done(void *data, struct wl_callback *cb, uint32_t time)
 {
     struct app_state *app = data;
@@ -119,6 +149,20 @@ static void frame_done(void *data, struct wl_callback *cb, uint32_t time)
     if (app->max_frames > 0 && app->frame >= app->max_frames) {
         app->running = 0;
         return;
+    }
+    if (app->resize_every > 0 && app->frame > 0 &&
+        app->frame % app->resize_every == 0) {
+        if (app->width == GL_WINDOW_W) {
+            app->width = 360;
+            app->height = 260;
+        } else {
+            app->width = GL_WINDOW_W;
+            app->height = GL_WINDOW_H;
+        }
+        if (recreate_egl_surface(app) < 0) {
+            app->running = 0;
+            return;
+        }
     }
     draw_and_commit(app);
 }
@@ -183,8 +227,8 @@ static int init_gl(struct app_state *app)
         return -1;
     }
 
-    app->egl_window = wl_egl_window_create(app->surface, GL_WINDOW_W,
-                                           GL_WINDOW_H);
+    app->egl_window = wl_egl_window_create(app->surface, app->width,
+                                           app->height);
     if (!app->egl_window) {
         fprintf(stderr, "glsmoke: wl_egl_window_create failed\n");
         return -1;
@@ -391,13 +435,14 @@ static int parse_positive_arg(const char *arg, const char *prefix,
 static void print_usage(const char *argv0)
 {
     fprintf(stderr,
-            "usage: %s [--frames=N] [--loops=N]\n"
+            "usage: %s [--frames=N] [--loops=N] [--resize-every=N]\n"
             "  --frames=N  stop each EGL lifecycle after N frame callbacks\n"
-            "  --loops=N   repeat Wayland/EGL create-draw-destroy N times\n",
+            "  --loops=N   repeat Wayland/EGL create-draw-destroy N times\n"
+            "  --resize-every=N  recreate the EGL surface every N frames\n",
             argv0);
 }
 
-static int run_loop(int loop, int frames)
+static int run_loop(int loop, int frames, int resize_every)
 {
     struct app_state app;
     int rc = 0;
@@ -408,6 +453,9 @@ static int run_loop(int loop, int frames)
     app.egl_surface = EGL_NO_SURFACE;
     app.running = 1;
     app.max_frames = frames;
+    app.resize_every = resize_every;
+    app.width = GL_WINDOW_W;
+    app.height = GL_WINDOW_H;
     app.loop = loop;
 
     if (init_wayland(&app) < 0) {
@@ -430,12 +478,16 @@ int main(int argc, char **argv)
 {
     int frames = 0;
     int loops = 1;
+    int resize_every = 0;
 
     for (int i = 1; i < argc; i++) {
         if (strncmp(argv[i], "--frames=", 9) == 0) {
             frames = parse_positive_arg(argv[i], "--frames=", frames);
         } else if (strncmp(argv[i], "--loops=", 8) == 0) {
             loops = parse_positive_arg(argv[i], "--loops=", loops);
+        } else if (strncmp(argv[i], "--resize-every=", 15) == 0) {
+            resize_every = parse_positive_arg(argv[i], "--resize-every=",
+                                              resize_every);
         } else if (strcmp(argv[i], "--help") == 0) {
             print_usage(argv[0]);
             return 0;
@@ -446,7 +498,7 @@ int main(int argc, char **argv)
     }
 
     for (int loop = 0; loop < loops; loop++) {
-        int rc = run_loop(loop, frames);
+        int rc = run_loop(loop, frames, resize_every);
 
         if (rc != 0)
             return rc;
