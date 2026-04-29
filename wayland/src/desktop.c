@@ -209,6 +209,25 @@ static int token_is_disabled(const char *cmdline, const char *key)
     return 0;
 }
 
+static int token_is_enabled(const char *cmdline, const char *key)
+{
+    size_t key_len = strlen(key);
+    const char *p = cmdline;
+
+    while (*p) {
+        while (*p == ' ' || *p == '\t' || *p == '\n')
+            p++;
+        if (strncmp(p, key, key_len) == 0 && p[key_len] == '=' &&
+            p[key_len + 1] == '1' &&
+            (p[key_len + 2] == '\0' || p[key_len + 2] == ' ' ||
+             p[key_len + 2] == '\t' || p[key_len + 2] == '\n'))
+            return 1;
+        while (*p && *p != ' ' && *p != '\t' && *p != '\n')
+            p++;
+    }
+    return 0;
+}
+
 static int read_cmdline(char *buf, size_t buf_size)
 {
     int fd = open("/proc/cmdline", O_RDONLY);
@@ -277,6 +296,16 @@ static int glsmoke_enabled_by_cmdline(void)
            strstr(buf, "glsmoke=1") != NULL;
 }
 
+static int glsmoke_compat_by_cmdline(void)
+{
+    char buf[512];
+
+    if (read_cmdline(buf, sizeof(buf)) < 0)
+        return 0;
+
+    return token_is_enabled(buf, "glsmoke_compat");
+}
+
 static void glsmoke_args_from_cmdline(char *frames_arg, size_t frames_size,
                                       char *loops_arg, size_t loops_size,
                                       char *resize_arg, size_t resize_size)
@@ -328,19 +357,22 @@ int main(void)
         char frames_arg[32];
         char loops_arg[32];
         char resize_arg[32];
+        int compat = glsmoke_compat_by_cmdline();
+        const char *client_path = compat ? "/bin/glsmoke" : "/bin/mesaglsmoke";
+        const char *client_name = compat ? "glsmoke" : "mesaglsmoke";
 
         glsmoke_args_from_cmdline(frames_arg, sizeof(frames_arg), loops_arg,
                                   sizeof(loops_arg), resize_arg,
                                   sizeof(resize_arg));
-        client_pid = launch_client("/bin/glsmoke", "glsmoke", frames_arg,
+        client_pid = launch_client(client_path, client_name, frames_arg,
                                    loops_arg, resize_arg[0] ? resize_arg : NULL);
         if (client_pid < 0) {
-            perror("[desktop] fork glsmoke");
+            perror("[desktop] fork GL smoke");
             cleanup();
             return 1;
         }
-        fprintf(stderr, "[desktop] glsmoke pid=%d %s %s %s\n", client_pid,
-                frames_arg, loops_arg, resize_arg);
+        fprintf(stderr, "[desktop] %s pid=%d %s %s %s\n", client_name,
+                client_pid, frames_arg, loops_arg, resize_arg);
     } else if (webkit_enabled_by_cmdline()) {
         client_pid = launch_client("/libexec/webkit2gtk-4.1/MiniBrowser",
                                    "MiniBrowser",
