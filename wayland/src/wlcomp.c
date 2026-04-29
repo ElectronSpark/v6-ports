@@ -46,6 +46,7 @@
 #define FB_GPU_BO_CREATE     0x4614
 #define FB_GPU_BO_PRESENT    0x4615
 #define FB_GPU_BO_DESTROY    0x4616
+#define FB_GPU_BO_IMPORT     0x4617
 #define FB_GPU_BO_F_EXPORTABLE 0x1
 #define MAX_DAMAGE_RECTS     32
 
@@ -76,6 +77,11 @@ struct fb_gpu_bo_present {
 
 struct fb_gpu_bo_destroy {
     uint32_t handle, flags;
+};
+
+struct fb_gpu_bo_import {
+    uint32_t handle, flags, width, height, pitch, reserved;
+    uint64_t size, addr;
 };
 
 /* ── Mouse event (matches kernel struct mouse_event) ──────────────── */
@@ -372,6 +378,7 @@ static struct wl_global *g_shm_global;
 static struct wl_global *g_seat_global;
 static struct wl_global *g_output_global;
 static struct wl_global *g_xdg_wm_global;
+static struct wl_global *g_xv6_gpu_global;
 
 /* ══════════════════════════════════════════════════════════════════════
  *  Surface / window tracking
@@ -385,6 +392,10 @@ struct wlcomp_shm_pool;
 struct wlcomp_buffer {
     struct wl_resource *resource;  /* wl_buffer resource */
     struct wlcomp_shm_pool *pool;
+    int                  is_gpu_bo;
+    uint64_t             gpu_addr;
+    uint64_t             gpu_size;
+    uint32_t             gpu_handle;
     int32_t             offset;
     int32_t             width;
     int32_t             height;
@@ -641,6 +652,9 @@ static void buffer_free(struct wlcomp_buffer *buf)
     if (!buf)
         return;
 
+    if (buf->is_gpu_bo && buf->gpu_addr && buf->gpu_size)
+        munmap((void *)buf->gpu_addr, (size_t)buf->gpu_size);
+
     if (buf->pool) {
         if (buf->pool->refcount > 0)
             buf->pool->refcount--;
@@ -671,6 +685,8 @@ static void surface_release_committed_buffer(struct wlcomp_surface *surf)
 
 static void *buffer_data(struct wlcomp_buffer *buf)
 {
+    if (buf && buf->is_gpu_bo)
+        return (void *)buf->gpu_addr;
     if (!buf || !buf->pool || !buf->pool->data)
         return NULL;
 
@@ -830,6 +846,124 @@ static void shm_bind(struct wl_client *client, void *data,
     /* Advertise supported formats */
     wl_shm_send_format(res, WL_SHM_FORMAT_ARGB8888);
     wl_shm_send_format(res, WL_SHM_FORMAT_XRGB8888);
+}
+
+/* ── xv6_gpu_buffer_manager ──────────────────────────────────────── */
+
+static const struct wl_interface *xv6_gpu_buffer_create_types[] = {
+    &wl_buffer_interface,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+};
+
+static const struct wl_message xv6_gpu_buffer_manager_requests[] = {
+    { "create_buffer", "nuiiiu", xv6_gpu_buffer_create_types },
+};
+
+static const struct wl_interface xv6_gpu_buffer_manager_interface = {
+    "xv6_gpu_buffer_manager",
+    1,
+    1,
+    xv6_gpu_buffer_manager_requests,
+    0,
+    NULL,
+};
+
+struct xv6_gpu_buffer_manager_impl {
+    void (*create_buffer)(struct wl_client *client,
+                          struct wl_resource *resource,
+                          uint32_t id,
+                          uint32_t handle,
+                          int32_t width,
+                          int32_t height,
+                          int32_t stride,
+                          uint32_t format);
+};
+
+static void xv6_gpu_create_buffer(struct wl_client *client,
+                                  struct wl_resource *resource,
+                                  uint32_t id,
+                                  uint32_t handle,
+                                  int32_t width,
+                                  int32_t height,
+                                  int32_t stride,
+                                  uint32_t format)
+{
+    struct fb_gpu_bo_import import;
+    struct wlcomp_buffer *buf;
+    struct wl_resource *buf_res;
+
+    if (handle == 0 || width <= 0 || height <= 0 || stride <= 0 ||
+        (format != WL_SHM_FORMAT_ARGB8888 &&
+         format != WL_SHM_FORMAT_XRGB8888)) {
+        wl_resource_post_error(resource, 0, "invalid xv6 GPU buffer");
+        return;
+    }
+
+    memset(&import, 0, sizeof(import));
+    import.handle = handle;
+    if (ioctl(g_fb_fd, FB_GPU_BO_IMPORT, &import) < 0) {
+        wl_resource_post_error(resource, 0, "FB_GPU_BO_IMPORT failed");
+        return;
+    }
+    if ((int32_t)import.width != width ||
+        (int32_t)import.height != height ||
+        (int32_t)import.pitch != stride ||
+        import.addr == 0 || import.size == 0) {
+        munmap((void *)import.addr, (size_t)import.size);
+        wl_resource_post_error(resource, 0, "xv6 GPU buffer metadata mismatch");
+        return;
+    }
+
+    buf = calloc(1, sizeof(*buf));
+    if (!buf) {
+        munmap((void *)import.addr, (size_t)import.size);
+        wl_resource_post_no_memory(resource);
+        return;
+    }
+    buf->is_gpu_bo = 1;
+    buf->gpu_addr = import.addr;
+    buf->gpu_size = import.size;
+    buf->gpu_handle = handle;
+    buf->width = width;
+    buf->height = height;
+    buf->stride = stride;
+    buf->format = format;
+
+    buf_res = wl_resource_create(client, &wl_buffer_interface, 1, id);
+    if (!buf_res) {
+        buffer_free(buf);
+        wl_resource_post_no_memory(resource);
+        return;
+    }
+    buf->resource = buf_res;
+    wl_resource_set_implementation(buf_res, &buffer_impl, buf,
+                                   buffer_destroy_handler);
+}
+
+static const struct xv6_gpu_buffer_manager_impl xv6_gpu_buffer_manager_impl = {
+    .create_buffer = xv6_gpu_create_buffer,
+};
+
+static void xv6_gpu_bind(struct wl_client *client, void *data,
+                         uint32_t version, uint32_t id)
+{
+    struct wl_resource *res;
+
+    (void)data;
+    if (version > 1)
+        version = 1;
+    res = wl_resource_create(client, &xv6_gpu_buffer_manager_interface,
+                             version, id);
+    if (!res) {
+        wl_client_post_no_memory(client);
+        return;
+    }
+    wl_resource_set_implementation(res, &xv6_gpu_buffer_manager_impl, NULL,
+                                   NULL);
 }
 
 /* ══════════════════════════════════════════════════════════════════════
@@ -5778,6 +5912,9 @@ int main(int argc, char **argv)
                                         2, NULL, xdg_wm_bind);
     g_ddm_global = wl_global_create(g_display, &wl_data_device_manager_interface,
                                     3, NULL, ddm_bind);
+    g_xv6_gpu_global = wl_global_create(g_display,
+                                        &xv6_gpu_buffer_manager_interface,
+                                        1, NULL, xv6_gpu_bind);
 
     /* Add socket */
     if (wl_display_add_socket(g_display, "wayland-0") < 0) {

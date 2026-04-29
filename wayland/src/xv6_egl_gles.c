@@ -15,6 +15,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -32,6 +33,7 @@ struct xv6egl_display {
     struct wl_display *display;
     struct wl_registry *registry;
     struct wl_shm *shm;
+    struct wl_proxy *gpu_manager;
     EGLint last_error;
     int initialized;
 };
@@ -47,6 +49,9 @@ struct xv6egl_surface {
     uint32_t *pixels;
     size_t pixels_size;
     int fd;
+    int fb_fd;
+    uint32_t bo_handle;
+    int bo_backed;
     int width;
     int height;
 };
@@ -72,6 +77,51 @@ static struct attr_state g_attrs[8];
 static struct clear_state g_clear = { 0, 0, 0, 255 };
 static GLuint g_next_id = 1;
 
+#define FB_GPU_BO_CREATE     0x4614
+#define FB_GPU_BO_DESTROY    0x4616
+#define FB_GPU_BO_F_EXPORTABLE 0x1
+
+struct fb_gpu_bo_create {
+    uint32_t width, height, flags, pitch;
+    uint64_t size, addr;
+    uint32_t handle, reserved;
+};
+
+struct fb_gpu_bo_destroy {
+    uint32_t handle, flags;
+};
+
+static const struct wl_interface *xv6_gpu_buffer_create_types[] = {
+    &wl_buffer_interface,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+};
+
+static const struct wl_message xv6_gpu_buffer_manager_requests[] = {
+    { "create_buffer", "nuiiiu", xv6_gpu_buffer_create_types },
+};
+
+static const struct wl_interface xv6_gpu_buffer_manager_interface = {
+    "xv6_gpu_buffer_manager",
+    1,
+    1,
+    xv6_gpu_buffer_manager_requests,
+    0,
+    NULL,
+};
+
+static struct wl_buffer *xv6_gpu_buffer_manager_create_buffer(
+    struct wl_proxy *manager, uint32_t handle, int32_t width, int32_t height,
+    int32_t stride, uint32_t format)
+{
+    return (struct wl_buffer *)wl_proxy_marshal_flags(
+        manager, 0, &wl_buffer_interface, wl_proxy_get_version(manager), 0,
+        NULL, handle, width, height, stride, format);
+}
+
 static void set_error(struct xv6egl_display *display, EGLint error)
 {
     if (display)
@@ -87,6 +137,11 @@ static void registry_global(void *data, struct wl_registry *registry,
     if (strcmp(interface, wl_shm_interface.name) == 0 && !display->shm) {
         display->shm = wl_registry_bind(registry, name, &wl_shm_interface,
                                         version > 1 ? 1 : version);
+    } else if (strcmp(interface, xv6_gpu_buffer_manager_interface.name) == 0 &&
+               !display->gpu_manager) {
+        display->gpu_manager = wl_registry_bind(
+            registry, name, &xv6_gpu_buffer_manager_interface,
+            version > 1 ? 1 : version);
     }
 }
 
@@ -270,7 +325,7 @@ EGLBoolean eglInitialize(EGLDisplay dpy, EGLint *major, EGLint *minor)
         wl_registry_add_listener(display->registry, &registry_listener, display);
         wl_display_roundtrip(display->display);
         wl_display_roundtrip(display->display);
-        if (!display->shm) {
+        if (!display->gpu_manager && !display->shm) {
             set_error(display, EGL_NOT_INITIALIZED);
             return EGL_FALSE;
         }
@@ -290,6 +345,8 @@ EGLBoolean eglTerminate(EGLDisplay dpy)
 
     if (!display)
         return EGL_FALSE;
+    if (display->gpu_manager)
+        wl_proxy_destroy(display->gpu_manager);
     if (display->shm)
         wl_shm_destroy(display->shm);
     if (display->registry)
@@ -337,7 +394,6 @@ EGLSurface eglCreateWindowSurface(EGLDisplay dpy, EGLConfig config,
     struct xv6egl_display *display = (struct xv6egl_display *)dpy;
     struct wl_egl_window *window = (struct wl_egl_window *)win;
     struct xv6egl_surface *surface;
-    struct wl_shm_pool *pool;
     int stride;
 
     (void)config;
@@ -350,12 +406,59 @@ EGLSurface eglCreateWindowSurface(EGLDisplay dpy, EGLConfig config,
     if (!surface)
         return EGL_NO_SURFACE;
     surface->fd = -1;
+    surface->fb_fd = -1;
     surface->display = display;
     surface->window = window;
     surface->width = window->width;
     surface->height = window->height;
     stride = surface->width * 4;
     surface->pixels_size = (size_t)stride * (size_t)surface->height;
+
+    if (display->gpu_manager) {
+        struct fb_gpu_bo_create bo;
+
+        memset(&bo, 0, sizeof(bo));
+        bo.width = (uint32_t)surface->width;
+        bo.height = (uint32_t)surface->height;
+        bo.flags = FB_GPU_BO_F_EXPORTABLE;
+        surface->fb_fd = open("/dev/fb0", O_RDWR);
+        if (surface->fb_fd >= 0 &&
+            ioctl(surface->fb_fd, FB_GPU_BO_CREATE, &bo) == 0 &&
+            bo.addr != 0 && bo.size != 0 && bo.pitch >= (uint32_t)stride &&
+            bo.handle != 0) {
+            surface->pixels = (uint32_t *)bo.addr;
+            surface->pixels_size = (size_t)bo.size;
+            surface->bo_handle = bo.handle;
+            surface->bo_backed = 1;
+            surface->buffer = xv6_gpu_buffer_manager_create_buffer(
+                display->gpu_manager, bo.handle, surface->width,
+                surface->height, (int32_t)bo.pitch, WL_SHM_FORMAT_XRGB8888);
+            if (surface->buffer)
+                return (EGLSurface)surface;
+        }
+        if (surface->bo_handle) {
+            struct fb_gpu_bo_destroy destroy = {
+                .handle = surface->bo_handle,
+            };
+            ioctl(surface->fb_fd, FB_GPU_BO_DESTROY, &destroy);
+            surface->bo_handle = 0;
+        }
+        if (surface->pixels && surface->bo_backed)
+            munmap(surface->pixels, surface->pixels_size);
+        surface->pixels = NULL;
+        surface->bo_backed = 0;
+        if (surface->fb_fd >= 0) {
+            close(surface->fb_fd);
+            surface->fb_fd = -1;
+        }
+        surface->pixels_size = (size_t)stride * (size_t)surface->height;
+    }
+
+    if (!display->shm)
+        goto fail;
+
+    struct wl_shm_pool *pool;
+
     surface->fd = create_shm_file(surface->pixels_size);
     if (surface->fd < 0)
         goto fail;
@@ -397,6 +500,14 @@ EGLBoolean eglDestroySurface(EGLDisplay dpy, EGLSurface surface)
         wl_buffer_destroy(egl_surface->buffer);
     if (egl_surface->pixels)
         munmap(egl_surface->pixels, egl_surface->pixels_size);
+    if (egl_surface->bo_handle && egl_surface->fb_fd >= 0) {
+        struct fb_gpu_bo_destroy destroy = {
+            .handle = egl_surface->bo_handle,
+        };
+        ioctl(egl_surface->fb_fd, FB_GPU_BO_DESTROY, &destroy);
+    }
+    if (egl_surface->fb_fd >= 0)
+        close(egl_surface->fb_fd);
     if (egl_surface->fd >= 0)
         close(egl_surface->fd);
     free(egl_surface);
