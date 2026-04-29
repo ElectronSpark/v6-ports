@@ -5520,8 +5520,14 @@ static void process_mouse(void)
     }
     cursor_moved = (g_cursor_x != old_cursor_x) || (g_cursor_y != old_cursor_y);
     if (cursor_moved) {
-        damage_cursor_at(old_cursor_x, old_cursor_y);
-        damage_cursor_at(g_cursor_x, g_cursor_y);
+        /*
+         * Absolute pointer events can jump across many positions in one batch,
+         * while GL clients may be animating underneath the cursor.  The old
+         * two-rectangle damage left stale cursor fragments when intermediate
+         * cursor positions had already been presented.  Full repaint on pointer
+         * motion is cheap enough at this scale and keeps the desktop correct.
+         */
+        damage_full();
         damage_menu();
     }
     if (pressed_edges || released_edges)
