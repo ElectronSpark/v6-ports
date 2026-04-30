@@ -10,7 +10,11 @@ xv6_port(
     NAME            libdrm
     SOURCE_DIR      ${CMAKE_CURRENT_SOURCE_DIR}/src
     BUILD_SYSTEM    meson
+    MESON_DEFAULT_LIBRARY both
     OUTPUT_FILES    lib/libdrm.a
+                    lib/libdrm.so
+                    lib/libdrm.so.2
+                    lib/libdrm.so.2.133.0
                     lib/pkgconfig/libdrm.pc
                     include/xf86drm.h
                     include/libdrm/drm.h

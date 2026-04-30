@@ -55,7 +55,7 @@ endfunction()
 # ----------------------------------------------------------------------------
 function(xv6_port)
     set(opts)
-    set(one_value NAME SOURCE_DIR BUILD_SYSTEM JOBS)
+    set(one_value NAME SOURCE_DIR BUILD_SYSTEM JOBS MESON_DEFAULT_LIBRARY)
     set(multi_value DEPENDS
                     OUTPUT_FILES
                     CMAKE_ARGS
@@ -89,6 +89,11 @@ function(xv6_port)
     set(_src    ${P_SOURCE_DIR})
     set(_build  ${CMAKE_BINARY_DIR}/${_name}-build)
     set(_patch_stamp ${CMAKE_BINARY_DIR}/${_name}-patches.stamp)
+    if(P_MESON_DEFAULT_LIBRARY)
+        set(_meson_default_library "${P_MESON_DEFAULT_LIBRARY}")
+    else()
+        set(_meson_default_library "static")
+    endif()
 
     # Translate OUTPUT_FILES (relative to sysroot) to absolute paths.
     set(_out_abs "")
@@ -237,7 +242,7 @@ function(xv6_port)
 "prefix      = '/'\n"
 "libdir      = 'lib'\n"
 "includedir  = 'include'\n"
-"default_library = 'static'\n"
+"default_library = '${_meson_default_library}'\n"
 )
 
         # Meson refuses to re-setup if the build dir already exists.
@@ -253,7 +258,7 @@ function(xv6_port)
                 meson setup ${_build} ${_src}
                     --cross-file=${_crossfile}
                     --buildtype=release
-                    --default-library=static
+                    --default-library=${_meson_default_library}
                     -Dprefix=/
                     -Dlibdir=lib
                     -Dincludedir=include
