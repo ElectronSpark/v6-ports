@@ -93,21 +93,20 @@ bool AcceleratedBackingStore::checkRequirements()
 
 std::unique_ptr<AcceleratedBackingStore> AcceleratedBackingStore::create(WebPageProxy& webPage)
 {
-    UNUSED_PARAM(webPage);
+    const char* xv6ForceCompositing = getenv("WEBKIT_XV6_FORCE_COMPOSITING_MODE");
+    bool xv6ForceAcceleratedBacking =
+        xv6ForceCompositing && strcmp(xv6ForceCompositing, "0");
 
-    // xv6 currently has EGL/virgl enough for standalone GL clients, but it does
-    // not yet implement WebKitGTK's dmabuf/Wayland accelerated backing-store
-    // protocol. Returning nullptr keeps WebKit on the existing software backing
-    // store instead of aborting while selecting a GTK accelerated backend.
-    return nullptr;
+    if (!xv6ForceAcceleratedBacking)
+        return nullptr;
 
     if (!HardwareAccelerationManager::singleton().canUseHardwareAcceleration())
         return nullptr;
 
     const char* xv6AllowMissingGL = getenv("EPOXY_XV6_ALLOW_MISSING");
-    if (xv6AllowMissingGL && strcmp(xv6AllowMissingGL, "0")) {
+    if (!xv6ForceAcceleratedBacking && xv6AllowMissingGL &&
+        strcmp(xv6AllowMissingGL, "0"))
         return nullptr;
-    }
 
 #if PLATFORM(GTK) && USE(EGL)
     if (AcceleratedBackingStoreDMABuf::checkRequirements())
@@ -121,7 +120,6 @@ std::unique_ptr<AcceleratedBackingStore> AcceleratedBackingStore::create(WebPage
     if (PlatformDisplay::sharedDisplay().type() == PlatformDisplay::Type::X11)
         return AcceleratedBackingStoreX11::create(webPage);
 #endif
-    RELEASE_ASSERT_NOT_REACHED();
     return nullptr;
 }
 

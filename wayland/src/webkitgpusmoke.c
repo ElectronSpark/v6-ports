@@ -1,6 +1,7 @@
 #include <gtk/gtk.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 typedef struct _WebKitSettings WebKitSettings;
 typedef struct _WebKitWebView WebKitWebView;
@@ -105,14 +106,18 @@ static gboolean start_load_cb(gpointer data)
     return G_SOURCE_REMOVE;
 }
 
+static int env_enabled(const char *name)
+{
+    const char *value = getenv(name);
+    return value && value[0] && strcmp(value, "0") != 0;
+}
+
 int main(int argc, char **argv)
 {
     const char *uri = argc > 1 ? argv[1] : "file:///share/webkit/gpu-smoke.html";
-    int timeout_ms = 15000;
+    int timeout_ms = 0;
     if (argc > 2) {
         timeout_ms = atoi(argv[2]);
-        if (timeout_ms <= 0)
-            timeout_ms = 15000;
     }
 
     phase("start");
@@ -135,7 +140,10 @@ int main(int argc, char **argv)
     webkit_settings_set_enable_developer_extras(settings, TRUE);
     webkit_settings_set_enable_webgl(settings, TRUE);
     webkit_settings_set_hardware_acceleration_policy(
-        settings, WEBKIT_HARDWARE_ACCELERATION_POLICY_ALWAYS);
+        settings,
+        env_enabled("WEBKIT_XV6_FORCE_COMPOSITING_MODE") ?
+            WEBKIT_HARDWARE_ACCELERATION_POLICY_ALWAYS :
+            WEBKIT_HARDWARE_ACCELERATION_POLICY_ON_DEMAND);
     phase("settings applied");
     g_signal_connect(view, "notify::title", G_CALLBACK(title_changed_cb), NULL);
     g_signal_connect(view, "load-changed", G_CALLBACK(load_changed_cb), NULL);
@@ -147,7 +155,8 @@ int main(int argc, char **argv)
     load->uri = strdup(uri);
     g_timeout_add(1500, start_load_cb, load);
 
-    g_timeout_add(timeout_ms, quit_cb, NULL);
+    if (timeout_ms > 0)
+        g_timeout_add(timeout_ms, quit_cb, NULL);
     gtk_main();
     fprintf(stderr, "webkitgpusmoke: complete uri=%s timeout_ms=%d\n", uri, timeout_ms);
     return 0;

@@ -19,6 +19,7 @@
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <sys/syscall.h>
+#include <poll.h>
 #include <time.h>
 #include <dirent.h>
 #include <stdarg.h>
@@ -26,6 +27,8 @@
 #include <wayland/wayland-server-core.h>
 #include <wayland/wayland-server-protocol.h>
 #include <wayland/xdg-shell-server-protocol.h>
+#include <wayland/linux-dmabuf-v1-server-protocol.h>
+#include <libdrm/drm_fourcc.h>
 
 /* xv6-specific syscall numbers (not in musl headers) */
 #define XV6_SYS_poweroff  166
@@ -47,6 +50,12 @@
 #define FB_GPU_BO_PRESENT    0x4615
 #define FB_GPU_BO_DESTROY    0x4616
 #define FB_GPU_BO_IMPORT     0x4617
+#define FB_GPU_BO_FENCE      0x4618
+#define FB_GPU_BO_IMPORT_FD  0x4623
+
+#ifndef DRM_FORMAT_MOD_LINEAR
+#define DRM_FORMAT_MOD_LINEAR 0
+#endif
 #define FB_GPU_BO_F_EXPORTABLE 0x1
 #define MAX_DAMAGE_RECTS     32
 
@@ -82,6 +91,19 @@ struct fb_gpu_bo_destroy {
 
 struct fb_gpu_bo_import {
     uint32_t handle, flags, width, height, pitch, reserved;
+    uint64_t size, addr;
+};
+
+struct fb_gpu_bo_fence {
+    uint32_t handle, flags;
+    uint64_t wait_for;
+    uint64_t signaled;
+    uint64_t last_present;
+};
+
+struct fb_gpu_bo_import_fd {
+    int32_t fd;
+    uint32_t flags, width, height, pitch, handle;
     uint64_t size, addr;
 };
 
@@ -131,11 +153,42 @@ static uint32_t *g_fb_buf;  /* compositing buffer */
 static uint64_t g_fb_bo_size;
 static uint32_t g_fb_bo_handle;
 static int      g_fb_bo_backed;
+static uint64_t g_fb_bo_last_present_fence;
+static uint64_t g_fb_bo_last_signaled_fence;
 struct damage_rect {
     int32_t x1, y1, x2, y2;
 };
 static struct damage_rect g_damage[MAX_DAMAGE_RECTS];
 static int      g_damage_count;
+
+enum full_damage_reason {
+    FULL_DAMAGE_OTHER,
+    FULL_DAMAGE_INIT,
+    FULL_DAMAGE_REPAIR,
+    FULL_DAMAGE_ACQUIRE,
+    FULL_DAMAGE_DESKTOP,
+    FULL_DAMAGE_MENU,
+    FULL_DAMAGE_RESIZE,
+    FULL_DAMAGE_CLIENT,
+    FULL_DAMAGE_IWIN,
+    FULL_DAMAGE_COUNT,
+};
+
+struct wlcomp_damage_stats {
+    uint64_t frames;
+    uint64_t present_rects;
+    uint64_t present_pixels;
+    uint64_t present_full_frames;
+    uint64_t present_union_collapses;
+    uint64_t acquire_blocked_frames;
+    uint64_t full_damage[FULL_DAMAGE_COUNT];
+};
+
+static struct wlcomp_damage_stats g_damage_stats;
+
+#define MAX_RELEASE_QUEUE 64
+static struct wlcomp_buffer *g_release_queue[MAX_RELEASE_QUEUE];
+static int g_release_queue_count;
 
 /* Input state */
 static int      g_mouse_fd = -1;
@@ -227,10 +280,13 @@ static void damage_rect(int32_t x, int32_t y, int32_t w, int32_t h)
     }
 }
 
-static void damage_full(void)
+static void damage_full_reason(enum full_damage_reason reason)
 {
     if (g_fb_w == 0 || g_fb_h == 0)
         return;
+    if (reason < 0 || reason >= FULL_DAMAGE_COUNT)
+        reason = FULL_DAMAGE_OTHER;
+    g_damage_stats.full_damage[reason]++;
     g_damage[0].x1 = 0;
     g_damage[0].y1 = 0;
     g_damage[0].x2 = (int32_t)g_fb_w;
@@ -254,6 +310,72 @@ static int damage_repair_interval_ms(void)
             interval_ms = 0;
     }
     return interval_ms;
+}
+
+static int damage_stats_interval_ms(void)
+{
+    static int initialized;
+    static int interval_ms;
+    const char *env;
+
+    if (initialized)
+        return interval_ms;
+    initialized = 1;
+    env = getenv("XV6_WLCOMP_STATS_MS");
+    if (env && *env) {
+        interval_ms = atoi(env);
+        if (interval_ms < 0)
+            interval_ms = 0;
+    }
+    return interval_ms;
+}
+
+static void damage_stats_maybe_log(uint32_t now)
+{
+    static uint32_t next_log_ms;
+    static struct wlcomp_damage_stats last;
+    struct wlcomp_damage_stats cur;
+    int interval_ms = damage_stats_interval_ms();
+
+    if (interval_ms <= 0)
+        return;
+    if (next_log_ms == 0)
+        next_log_ms = now + (uint32_t)interval_ms;
+    if (now < next_log_ms)
+        return;
+    cur = g_damage_stats;
+    fprintf(stderr,
+            "wlcomp: damage stats frames=%lu rects=%lu pixels=%lu full=%lu "
+            "union=%lu acquire_blocked=%lu full_causes other=%lu init=%lu "
+            "repair=%lu acquire=%lu desktop=%lu menu=%lu resize=%lu "
+            "client=%lu iwin=%lu mode=%s\n",
+            cur.frames - last.frames,
+            cur.present_rects - last.present_rects,
+            cur.present_pixels - last.present_pixels,
+            cur.present_full_frames - last.present_full_frames,
+            cur.present_union_collapses - last.present_union_collapses,
+            cur.acquire_blocked_frames - last.acquire_blocked_frames,
+            cur.full_damage[FULL_DAMAGE_OTHER] -
+                last.full_damage[FULL_DAMAGE_OTHER],
+            cur.full_damage[FULL_DAMAGE_INIT] -
+                last.full_damage[FULL_DAMAGE_INIT],
+            cur.full_damage[FULL_DAMAGE_REPAIR] -
+                last.full_damage[FULL_DAMAGE_REPAIR],
+            cur.full_damage[FULL_DAMAGE_ACQUIRE] -
+                last.full_damage[FULL_DAMAGE_ACQUIRE],
+            cur.full_damage[FULL_DAMAGE_DESKTOP] -
+                last.full_damage[FULL_DAMAGE_DESKTOP],
+            cur.full_damage[FULL_DAMAGE_MENU] -
+                last.full_damage[FULL_DAMAGE_MENU],
+            cur.full_damage[FULL_DAMAGE_RESIZE] -
+                last.full_damage[FULL_DAMAGE_RESIZE],
+            cur.full_damage[FULL_DAMAGE_CLIENT] -
+                last.full_damage[FULL_DAMAGE_CLIENT],
+            cur.full_damage[FULL_DAMAGE_IWIN] -
+                last.full_damage[FULL_DAMAGE_IWIN],
+            g_fb_bo_backed ? "bo-present" : "user-blit");
+    last = cur;
+    next_log_ms = now + (uint32_t)interval_ms;
 }
 
 static void release_framebuffer_backing(void)
@@ -314,21 +436,33 @@ static int alloc_framebuffer_backing(void)
 static void present_damage_rects(int fb_w)
 {
     int stride = g_fb_pitch ? (int)(g_fb_pitch / 4) : fb_w;
+    int rect_count = g_damage_count;
+    uint64_t present_pixels = 0;
+    int full_frame = 0;
 
     for (int i = 0; i < g_damage_count; i++) {
         struct damage_rect *r = &g_damage[i];
+        uint32_t w = (uint32_t)(r->x2 - r->x1);
+        uint32_t h = (uint32_t)(r->y2 - r->y1);
+
+        present_pixels += (uint64_t)w * h;
+        if (r->x1 == 0 && r->y1 == 0 &&
+            r->x2 == (int32_t)g_fb_w && r->y2 == (int32_t)g_fb_h)
+            full_frame = 1;
         if (g_fb_bo_backed) {
             struct fb_gpu_bo_present cmd;
 
             cmd.x = (uint32_t)r->x1;
             cmd.y = (uint32_t)r->y1;
-            cmd.w = (uint32_t)(r->x2 - r->x1);
-            cmd.h = (uint32_t)(r->y2 - r->y1);
+            cmd.w = w;
+            cmd.h = h;
             cmd.src_pitch = g_fb_pitch;
             cmd.pixels = (uint64_t)r->y1 * g_fb_pitch + (uint64_t)r->x1 * 4;
             cmd.handle = g_fb_bo_handle;
             cmd.flags = 0;
-            ioctl(g_fb_fd, FB_GPU_BO_PRESENT, &cmd);
+            if (ioctl(g_fb_fd, FB_GPU_BO_PRESENT, &cmd) == 0 &&
+                cmd.fence > g_fb_bo_last_present_fence)
+                g_fb_bo_last_present_fence = cmd.fence;
         } else {
             struct fb_gpu_blit cmd;
             uint64_t pixels =
@@ -336,13 +470,18 @@ static void present_damage_rects(int fb_w)
 
             cmd.x = (uint32_t)r->x1;
             cmd.y = (uint32_t)r->y1;
-            cmd.w = (uint32_t)(r->x2 - r->x1);
-            cmd.h = (uint32_t)(r->y2 - r->y1);
+            cmd.w = w;
+            cmd.h = h;
             cmd.src_pitch = g_fb_pitch;
             cmd.pixels = pixels;
             ioctl(g_fb_fd, FB_GPU_BLIT, &cmd);
         }
     }
+    g_damage_stats.frames++;
+    g_damage_stats.present_rects += (uint64_t)rect_count;
+    g_damage_stats.present_pixels += present_pixels;
+    if (full_frame)
+        g_damage_stats.present_full_frames++;
     g_damage_count = 0;
 }
 
@@ -363,6 +502,7 @@ static void tune_damage_for_present(void)
     if (union_area <= rect_area_sum * 2) {
         g_damage[0] = u;
         g_damage_count = 1;
+        g_damage_stats.present_union_collapses++;
     }
 }
 
@@ -385,6 +525,7 @@ static struct wl_global *g_seat_global;
 static struct wl_global *g_output_global;
 static struct wl_global *g_xdg_wm_global;
 static struct wl_global *g_xv6_gpu_global;
+static struct wl_global *g_dmabuf_global;
 
 /* ══════════════════════════════════════════════════════════════════════
  *  Surface / window tracking
@@ -402,6 +543,9 @@ struct wlcomp_buffer {
     uint64_t             gpu_addr;
     uint64_t             gpu_size;
     uint32_t             gpu_handle;
+    int                  owns_gpu_handle;
+    int                  acquire_fence_fd;
+    int                  release_pending;
     int32_t             offset;
     int32_t             width;
     int32_t             height;
@@ -454,6 +598,20 @@ static int32_t g_grab_start_x, g_grab_start_y;    /* surface pos at grab start *
 
 #define WAYLAND_CLOSE_SZ 18
 static int32_t g_grab_start_w, g_grab_start_h;    /* surface size at grab start */
+
+#define WAYLAND_DEMO_TITLE_H 24
+#define WAYLAND_DEMO_BORDER  2
+
+static int surface_is_demo_window(const struct wlcomp_surface *surf)
+{
+    return surf && strcmp(surf->app_id, "mesaglsmoke") == 0;
+}
+
+static int surface_is_webkit_window(const struct wlcomp_surface *surf)
+{
+    return surf && (strcmp(surf->app_id, "MiniBrowser") == 0 ||
+                    strcmp(surf->app_id, "webkitgpusmoke") == 0);
+}
 
 static void damage_all_frame_callbacks(uint32_t now)
 {
@@ -545,14 +703,21 @@ static void damage_surface(const struct wlcomp_surface *s)
 {
     int32_t gx, gy, gw, gh;
     struct wlcomp_buffer *buf;
+    int frame_top = 0;
+    int frame_border = 0;
 
     if (!s || !s->mapped || s->minimized || !s->committed_buf)
         return;
 
     buf = s->committed_buf;
     surface_window_geometry(s, &gx, &gy, &gw, &gh);
+    if (surface_is_demo_window(s)) {
+        frame_top = WAYLAND_DEMO_TITLE_H;
+        frame_border = WAYLAND_DEMO_BORDER;
+    }
     (void)buf;
-    damage_rect(s->x, s->y, gw, gh);
+    damage_rect(s->x - frame_border, s->y - frame_top - frame_border,
+                gw + frame_border * 2, gh + frame_top + frame_border * 2);
 }
 
 static void cursor_bounds_at(int32_t cx, int32_t cy,
@@ -604,12 +769,22 @@ static struct wlcomp_surface *surface_at(int32_t px, int32_t py,
         surface_window_geometry(s, &gx, &gy, &gw, &gh);
         draw_x = s->x - gx;
         draw_y = s->y - gy;
-        if (px >= s->x && px < s->x + gw &&
-            py >= s->y && py < s->y + gh) {
-            if (sx) *sx = px - draw_x;
-            if (sy) *sy = py - draw_y;
-            return s;
+        if (surface_is_demo_window(s)) {
+            int frame_x = s->x - WAYLAND_DEMO_BORDER;
+            int frame_y = s->y - WAYLAND_DEMO_TITLE_H - WAYLAND_DEMO_BORDER;
+            int frame_w = gw + WAYLAND_DEMO_BORDER * 2;
+            int frame_h = gh + WAYLAND_DEMO_TITLE_H + WAYLAND_DEMO_BORDER * 2;
+            if (px < frame_x || px >= frame_x + frame_w ||
+                py < frame_y || py >= frame_y + frame_h)
+                continue;
+        } else {
+            if (px < s->x || px >= s->x + gw ||
+                py < s->y || py >= s->y + gh)
+                continue;
         }
+        if (sx) *sx = px - draw_x;
+        if (sy) *sy = py - draw_y;
+        return s;
     }
     return NULL;
 }
@@ -629,6 +804,9 @@ struct wlcomp_shm_pool {
 static int buffer_is_referenced(struct wlcomp_buffer *buf)
 {
     struct wlcomp_surface *surf;
+
+    if (buf->release_pending)
+        return 1;
 
     wl_list_for_each(surf, &g_surfaces, link) {
         if (surf->committed_buf == buf || surf->pending_buf == buf)
@@ -655,8 +833,16 @@ static void buffer_free(struct wlcomp_buffer *buf)
     if (!buf)
         return;
 
+    if (buf->acquire_fence_fd >= 0)
+        close(buf->acquire_fence_fd);
+
     if (buf->is_gpu_bo && buf->gpu_addr && buf->gpu_size)
         munmap((void *)buf->gpu_addr, (size_t)buf->gpu_size);
+    if (buf->is_gpu_bo && buf->owns_gpu_handle && buf->gpu_handle != 0) {
+        struct fb_gpu_bo_destroy destroy = { buf->gpu_handle, 0 };
+
+        (void)ioctl(g_fb_fd, FB_GPU_BO_DESTROY, &destroy);
+    }
 
     if (buf->pool) {
         if (buf->pool->refcount > 0)
@@ -675,19 +861,106 @@ static void buffer_maybe_free(struct wlcomp_buffer *buf)
     buffer_free(buf);
 }
 
+static int framebuffer_present_fence_ready(void)
+{
+    struct fb_gpu_bo_fence fence;
+
+    if (!g_fb_bo_backed || g_fb_bo_handle == 0 ||
+        g_fb_bo_last_present_fence == 0)
+        return 1;
+
+    memset(&fence, 0, sizeof(fence));
+    fence.handle = g_fb_bo_handle;
+    fence.wait_for = g_fb_bo_last_present_fence;
+    if (ioctl(g_fb_fd, FB_GPU_BO_FENCE, &fence) < 0)
+        return 1;
+
+    g_fb_bo_last_signaled_fence = fence.signaled;
+    return fence.signaled >= g_fb_bo_last_present_fence;
+}
+
+static void queue_buffer_release(struct wlcomp_buffer *buf)
+{
+    if (!buf || buf->release_pending)
+        return;
+
+    buf->release_pending = 1;
+    if (g_release_queue_count < MAX_RELEASE_QUEUE) {
+        g_release_queue[g_release_queue_count++] = buf;
+        return;
+    }
+
+    if (buf->resource)
+        wl_buffer_send_release(buf->resource);
+    buf->release_pending = 0;
+    buffer_maybe_free(buf);
+}
+
+static void flush_buffer_releases_after_present(void)
+{
+    int out = 0;
+
+    if (!framebuffer_present_fence_ready())
+        return;
+
+    for (int i = 0; i < g_release_queue_count; i++) {
+        struct wlcomp_buffer *buf = g_release_queue[i];
+
+        if (!buf)
+            continue;
+        if (buf->resource)
+            wl_buffer_send_release(buf->resource);
+        buf->release_pending = 0;
+        buffer_maybe_free(buf);
+    }
+    g_release_queue_count = out;
+}
+
 static void surface_release_committed_buffer(struct wlcomp_surface *surf)
 {
     if (!surf || !surf->committed_buf || surf->buffer_released)
         return;
 
-    if (surf->committed_buf->resource) {
-        wl_buffer_send_release(surf->committed_buf->resource);
-        surf->buffer_released = 1;
+    if (surf->committed_buf->acquire_fence_fd >= 0)
+        return;
+
+    queue_buffer_release(surf->committed_buf);
+    surf->buffer_released = 1;
+}
+
+static int buffer_acquire_ready(struct wlcomp_buffer *buf)
+{
+    struct pollfd pfd;
+    int ret;
+
+    if (!buf || buf->acquire_fence_fd < 0)
+        return 1;
+
+    pfd.fd = buf->acquire_fence_fd;
+    pfd.events = POLLIN;
+    pfd.revents = 0;
+    ret = poll(&pfd, 1, 0);
+    if (ret > 0) {
+        if (pfd.revents & (POLLIN | POLLRDNORM | POLLERR | POLLHUP)) {
+            close(buf->acquire_fence_fd);
+            buf->acquire_fence_fd = -1;
+            return 1;
+        }
+        return 0;
     }
+    if (ret < 0 && errno != EINTR && errno != EAGAIN) {
+        close(buf->acquire_fence_fd);
+        buf->acquire_fence_fd = -1;
+        return 1;
+    }
+
+    return 0;
 }
 
 static void *buffer_data(struct wlcomp_buffer *buf)
 {
+    if (buf && !buffer_acquire_ready(buf))
+        return NULL;
     if (buf && buf->is_gpu_bo)
         return (void *)buf->gpu_addr;
     if (!buf || !buf->pool || !buf->pool->data)
@@ -732,6 +1005,7 @@ static void pool_create_buffer(struct wl_client *client,
     }
 
     buf->pool   = pool;
+    buf->acquire_fence_fd = -1;
     buf->offset = offset;
     buf->width  = width;
     buf->height = height;
@@ -851,6 +1125,320 @@ static void shm_bind(struct wl_client *client, void *data,
     wl_shm_send_format(res, WL_SHM_FORMAT_XRGB8888);
 }
 
+/* ── zwp_linux_dmabuf_v1 ─────────────────────────────────────────── */
+
+struct dmabuf_params {
+    int fd;
+    int has_plane;
+    int used;
+    uint32_t offset;
+    uint32_t stride;
+    uint64_t modifier;
+};
+
+static uint32_t dmabuf_format_to_wl(uint32_t format)
+{
+    if (format == DRM_FORMAT_ARGB8888)
+        return WL_SHM_FORMAT_ARGB8888;
+    if (format == DRM_FORMAT_XRGB8888)
+        return WL_SHM_FORMAT_XRGB8888;
+    return 0;
+}
+
+static void dmabuf_params_free(struct dmabuf_params *params)
+{
+    if (!params)
+        return;
+    if (params->fd >= 0)
+        close(params->fd);
+    free(params);
+}
+
+static void dmabuf_buffer_import_common(struct wl_client *client,
+                                        struct wl_resource *params_res,
+                                        uint32_t buffer_id,
+                                        int32_t width,
+                                        int32_t height,
+                                        uint32_t format,
+                                        uint32_t flags,
+                                        int immediate)
+{
+    struct dmabuf_params *params = wl_resource_get_user_data(params_res);
+    struct fb_gpu_bo_import_fd import;
+    struct wlcomp_buffer *buf;
+    struct wl_resource *buf_res;
+    uint32_t wl_format;
+    uint64_t min_size;
+
+    if (!params || params->used) {
+        wl_resource_post_error(params_res,
+                               ZWP_LINUX_BUFFER_PARAMS_V1_ERROR_ALREADY_USED,
+                               "linux-dmabuf params already used");
+        return;
+    }
+    params->used = 1;
+
+    if (!params->has_plane) {
+        wl_resource_post_error(params_res,
+                               ZWP_LINUX_BUFFER_PARAMS_V1_ERROR_INCOMPLETE,
+                               "missing dmabuf plane 0");
+        return;
+    }
+    if (width <= 0 || height <= 0) {
+        wl_resource_post_error(params_res,
+                               ZWP_LINUX_BUFFER_PARAMS_V1_ERROR_INVALID_DIMENSIONS,
+                               "invalid dmabuf dimensions");
+        return;
+    }
+    wl_format = dmabuf_format_to_wl(format);
+    if (wl_format == 0 || params->modifier != DRM_FORMAT_MOD_LINEAR ||
+        flags != 0) {
+        wl_resource_post_error(params_res,
+                               ZWP_LINUX_BUFFER_PARAMS_V1_ERROR_INVALID_FORMAT,
+                               "unsupported dmabuf format/modifier/flags");
+        return;
+    }
+    if (params->offset != 0 || params->stride < (uint32_t)width * 4) {
+        wl_resource_post_error(params_res,
+                               ZWP_LINUX_BUFFER_PARAMS_V1_ERROR_OUT_OF_BOUNDS,
+                               "unsupported dmabuf offset/stride");
+        return;
+    }
+
+    memset(&import, 0, sizeof(import));
+    import.fd = params->fd;
+    if (ioctl(g_fb_fd, FB_GPU_BO_IMPORT_FD, &import) < 0 ||
+        import.addr == 0 || import.size == 0 || import.handle == 0) {
+        if (immediate) {
+            wl_resource_post_error(params_res,
+                                   ZWP_LINUX_BUFFER_PARAMS_V1_ERROR_INVALID_WL_BUFFER,
+                                   "FB_GPU_BO_IMPORT_FD failed");
+        } else {
+            zwp_linux_buffer_params_v1_send_failed(params_res);
+        }
+        return;
+    }
+
+    min_size = (uint64_t)params->stride * (uint64_t)height;
+    if ((int32_t)import.width != width || (int32_t)import.height != height ||
+        import.pitch != params->stride || import.size < min_size) {
+        struct fb_gpu_bo_destroy destroy = { import.handle, 0 };
+
+        munmap((void *)import.addr, (size_t)import.size);
+        (void)ioctl(g_fb_fd, FB_GPU_BO_DESTROY, &destroy);
+        wl_resource_post_error(params_res,
+                               ZWP_LINUX_BUFFER_PARAMS_V1_ERROR_OUT_OF_BOUNDS,
+                               "dmabuf metadata mismatch");
+        return;
+    }
+
+    buf = calloc(1, sizeof(*buf));
+    if (!buf) {
+        struct fb_gpu_bo_destroy destroy = { import.handle, 0 };
+
+        munmap((void *)import.addr, (size_t)import.size);
+        (void)ioctl(g_fb_fd, FB_GPU_BO_DESTROY, &destroy);
+        wl_resource_post_no_memory(params_res);
+        return;
+    }
+    buf->is_gpu_bo = 1;
+    buf->gpu_addr = import.addr;
+    buf->gpu_size = import.size;
+    buf->gpu_handle = import.handle;
+    buf->owns_gpu_handle = 1;
+    buf->acquire_fence_fd = -1;
+    buf->width = width;
+    buf->height = height;
+    buf->stride = params->stride;
+    buf->format = wl_format;
+
+    buf_res = wl_resource_create(client, &wl_buffer_interface, 1, buffer_id);
+    if (!buf_res) {
+        buffer_free(buf);
+        wl_resource_post_no_memory(params_res);
+        return;
+    }
+    buf->resource = buf_res;
+    wl_resource_set_implementation(buf_res, &buffer_impl, buf,
+                                   buffer_destroy_handler);
+    if (!immediate)
+        zwp_linux_buffer_params_v1_send_created(params_res, buf_res);
+}
+
+static void dmabuf_params_destroy(struct wl_client *client,
+                                  struct wl_resource *resource)
+{
+    (void)client;
+    wl_resource_destroy(resource);
+}
+
+static void dmabuf_params_add(struct wl_client *client,
+                              struct wl_resource *resource,
+                              int32_t fd,
+                              uint32_t plane_idx,
+                              uint32_t offset,
+                              uint32_t stride,
+                              uint32_t modifier_hi,
+                              uint32_t modifier_lo)
+{
+    struct dmabuf_params *params = wl_resource_get_user_data(resource);
+
+    (void)client;
+    if (!params || params->used) {
+        if (fd >= 0)
+            close(fd);
+        wl_resource_post_error(resource,
+                               ZWP_LINUX_BUFFER_PARAMS_V1_ERROR_ALREADY_USED,
+                               "linux-dmabuf params already used");
+        return;
+    }
+    if (plane_idx != 0) {
+        if (fd >= 0)
+            close(fd);
+        wl_resource_post_error(resource,
+                               ZWP_LINUX_BUFFER_PARAMS_V1_ERROR_PLANE_IDX,
+                               "only single-plane dmabuf supported");
+        return;
+    }
+    if (params->has_plane) {
+        if (fd >= 0)
+            close(fd);
+        wl_resource_post_error(resource,
+                               ZWP_LINUX_BUFFER_PARAMS_V1_ERROR_PLANE_SET,
+                               "dmabuf plane already set");
+        return;
+    }
+
+    params->fd = fd;
+    params->has_plane = 1;
+    params->offset = offset;
+    params->stride = stride;
+    params->modifier = ((uint64_t)modifier_hi << 32) | modifier_lo;
+}
+
+static void dmabuf_params_create(struct wl_client *client,
+                                 struct wl_resource *resource,
+                                 int32_t width,
+                                 int32_t height,
+                                 uint32_t format,
+                                 uint32_t flags)
+{
+    dmabuf_buffer_import_common(client, resource, 0, width, height, format,
+                                flags, 0);
+}
+
+static void dmabuf_params_create_immed(struct wl_client *client,
+                                       struct wl_resource *resource,
+                                       uint32_t buffer_id,
+                                       int32_t width,
+                                       int32_t height,
+                                       uint32_t format,
+                                       uint32_t flags)
+{
+    dmabuf_buffer_import_common(client, resource, buffer_id, width, height,
+                                format, flags, 1);
+}
+
+static const struct zwp_linux_buffer_params_v1_interface dmabuf_params_impl = {
+    .destroy = dmabuf_params_destroy,
+    .add = dmabuf_params_add,
+    .create = dmabuf_params_create,
+    .create_immed = dmabuf_params_create_immed,
+};
+
+static void dmabuf_params_destroy_handler(struct wl_resource *resource)
+{
+    struct dmabuf_params *params = wl_resource_get_user_data(resource);
+
+    dmabuf_params_free(params);
+}
+
+static void dmabuf_destroy(struct wl_client *client,
+                           struct wl_resource *resource)
+{
+    (void)client;
+    wl_resource_destroy(resource);
+}
+
+static void dmabuf_create_params(struct wl_client *client,
+                                 struct wl_resource *resource,
+                                 uint32_t params_id)
+{
+    struct dmabuf_params *params;
+    struct wl_resource *params_res;
+
+    params = calloc(1, sizeof(*params));
+    if (!params) {
+        wl_resource_post_no_memory(resource);
+        return;
+    }
+    params->fd = -1;
+
+    params_res = wl_resource_create(client,
+                                    &zwp_linux_buffer_params_v1_interface,
+                                    wl_resource_get_version(resource),
+                                    params_id);
+    if (!params_res) {
+        free(params);
+        wl_resource_post_no_memory(resource);
+        return;
+    }
+    wl_resource_set_implementation(params_res, &dmabuf_params_impl, params,
+                                   dmabuf_params_destroy_handler);
+}
+
+static void dmabuf_get_default_feedback(struct wl_client *client,
+                                        struct wl_resource *resource,
+                                        uint32_t id)
+{
+    (void)client;
+    (void)id;
+    wl_resource_post_error(resource, 0, "dmabuf feedback unsupported");
+}
+
+static void dmabuf_get_surface_feedback(struct wl_client *client,
+                                        struct wl_resource *resource,
+                                        uint32_t id,
+                                        struct wl_resource *surface)
+{
+    (void)client;
+    (void)id;
+    (void)surface;
+    wl_resource_post_error(resource, 0, "dmabuf feedback unsupported");
+}
+
+static const struct zwp_linux_dmabuf_v1_interface dmabuf_impl = {
+    .destroy = dmabuf_destroy,
+    .create_params = dmabuf_create_params,
+    .get_default_feedback = dmabuf_get_default_feedback,
+    .get_surface_feedback = dmabuf_get_surface_feedback,
+};
+
+static void dmabuf_bind(struct wl_client *client, void *data,
+                        uint32_t version, uint32_t id)
+{
+    struct wl_resource *res;
+
+    (void)data;
+    if (version > 3)
+        version = 3;
+    res = wl_resource_create(client, &zwp_linux_dmabuf_v1_interface,
+                             version, id);
+    if (!res) {
+        wl_client_post_no_memory(client);
+        return;
+    }
+    wl_resource_set_implementation(res, &dmabuf_impl, NULL, NULL);
+    zwp_linux_dmabuf_v1_send_format(res, DRM_FORMAT_ARGB8888);
+    zwp_linux_dmabuf_v1_send_format(res, DRM_FORMAT_XRGB8888);
+    if (version >= 3) {
+        zwp_linux_dmabuf_v1_send_modifier(res, DRM_FORMAT_ARGB8888, 0,
+                                          DRM_FORMAT_MOD_LINEAR);
+        zwp_linux_dmabuf_v1_send_modifier(res, DRM_FORMAT_XRGB8888, 0,
+                                          DRM_FORMAT_MOD_LINEAR);
+    }
+}
+
 /* ── xv6_gpu_buffer_manager ──────────────────────────────────────── */
 
 static const struct wl_interface *xv6_gpu_buffer_create_types[] = {
@@ -860,16 +1448,18 @@ static const struct wl_interface *xv6_gpu_buffer_create_types[] = {
     NULL,
     NULL,
     NULL,
+    NULL,
 };
 
 static const struct wl_message xv6_gpu_buffer_manager_requests[] = {
     { "create_buffer", "nuiiiu", xv6_gpu_buffer_create_types },
+    { "create_buffer_with_fence", "nuiiiuh", xv6_gpu_buffer_create_types },
 };
 
 static const struct wl_interface xv6_gpu_buffer_manager_interface = {
     "xv6_gpu_buffer_manager",
-    1,
-    1,
+    2,
+    2,
     xv6_gpu_buffer_manager_requests,
     0,
     NULL,
@@ -884,16 +1474,26 @@ struct xv6_gpu_buffer_manager_impl {
                           int32_t height,
                           int32_t stride,
                           uint32_t format);
+    void (*create_buffer_with_fence)(struct wl_client *client,
+                                     struct wl_resource *resource,
+                                     uint32_t id,
+                                     uint32_t handle,
+                                     int32_t width,
+                                     int32_t height,
+                                     int32_t stride,
+                                     uint32_t format,
+                                     int32_t acquire_fence_fd);
 };
 
-static void xv6_gpu_create_buffer(struct wl_client *client,
-                                  struct wl_resource *resource,
-                                  uint32_t id,
-                                  uint32_t handle,
-                                  int32_t width,
-                                  int32_t height,
-                                  int32_t stride,
-                                  uint32_t format)
+static void xv6_gpu_create_buffer_common(struct wl_client *client,
+                                         struct wl_resource *resource,
+                                         uint32_t id,
+                                         uint32_t handle,
+                                         int32_t width,
+                                         int32_t height,
+                                         int32_t stride,
+                                         uint32_t format,
+                                         int32_t acquire_fence_fd)
 {
     struct fb_gpu_bo_import import;
     struct wlcomp_buffer *buf;
@@ -902,6 +1502,8 @@ static void xv6_gpu_create_buffer(struct wl_client *client,
     if (handle == 0 || width <= 0 || height <= 0 || stride <= 0 ||
         (format != WL_SHM_FORMAT_ARGB8888 &&
          format != WL_SHM_FORMAT_XRGB8888)) {
+        if (acquire_fence_fd >= 0)
+            close(acquire_fence_fd);
         wl_resource_post_error(resource, 0, "invalid xv6 GPU buffer");
         return;
     }
@@ -909,6 +1511,8 @@ static void xv6_gpu_create_buffer(struct wl_client *client,
     memset(&import, 0, sizeof(import));
     import.handle = handle;
     if (ioctl(g_fb_fd, FB_GPU_BO_IMPORT, &import) < 0) {
+        if (acquire_fence_fd >= 0)
+            close(acquire_fence_fd);
         wl_resource_post_error(resource, 0, "FB_GPU_BO_IMPORT failed");
         return;
     }
@@ -917,6 +1521,8 @@ static void xv6_gpu_create_buffer(struct wl_client *client,
         (int32_t)import.pitch != stride ||
         import.addr == 0 || import.size == 0) {
         munmap((void *)import.addr, (size_t)import.size);
+        if (acquire_fence_fd >= 0)
+            close(acquire_fence_fd);
         wl_resource_post_error(resource, 0, "xv6 GPU buffer metadata mismatch");
         return;
     }
@@ -924,6 +1530,8 @@ static void xv6_gpu_create_buffer(struct wl_client *client,
     buf = calloc(1, sizeof(*buf));
     if (!buf) {
         munmap((void *)import.addr, (size_t)import.size);
+        if (acquire_fence_fd >= 0)
+            close(acquire_fence_fd);
         wl_resource_post_no_memory(resource);
         return;
     }
@@ -931,6 +1539,7 @@ static void xv6_gpu_create_buffer(struct wl_client *client,
     buf->gpu_addr = import.addr;
     buf->gpu_size = import.size;
     buf->gpu_handle = handle;
+    buf->acquire_fence_fd = acquire_fence_fd;
     buf->width = width;
     buf->height = height;
     buf->stride = stride;
@@ -947,8 +1556,36 @@ static void xv6_gpu_create_buffer(struct wl_client *client,
                                    buffer_destroy_handler);
 }
 
+static void xv6_gpu_create_buffer(struct wl_client *client,
+                                  struct wl_resource *resource,
+                                  uint32_t id,
+                                  uint32_t handle,
+                                  int32_t width,
+                                  int32_t height,
+                                  int32_t stride,
+                                  uint32_t format)
+{
+    xv6_gpu_create_buffer_common(client, resource, id, handle, width, height,
+                                 stride, format, -1);
+}
+
+static void xv6_gpu_create_buffer_with_fence(struct wl_client *client,
+                                             struct wl_resource *resource,
+                                             uint32_t id,
+                                             uint32_t handle,
+                                             int32_t width,
+                                             int32_t height,
+                                             int32_t stride,
+                                             uint32_t format,
+                                             int32_t acquire_fence_fd)
+{
+    xv6_gpu_create_buffer_common(client, resource, id, handle, width, height,
+                                 stride, format, acquire_fence_fd);
+}
+
 static const struct xv6_gpu_buffer_manager_impl xv6_gpu_buffer_manager_impl = {
     .create_buffer = xv6_gpu_create_buffer,
+    .create_buffer_with_fence = xv6_gpu_create_buffer_with_fence,
 };
 
 static void xv6_gpu_bind(struct wl_client *client, void *data,
@@ -957,8 +1594,8 @@ static void xv6_gpu_bind(struct wl_client *client, void *data,
     struct wl_resource *res;
 
     (void)data;
-    if (version > 1)
-        version = 1;
+    if (version > 2)
+        version = 2;
     res = wl_resource_create(client, &xv6_gpu_buffer_manager_interface,
                              version, id);
     if (!res) {
@@ -1067,7 +1704,7 @@ static void surface_commit(struct wl_client *client, struct wl_resource *resourc
 
         if (old_committed && old_committed != surf->committed_buf) {
             if (old_committed->resource && !old_buffer_released)
-                wl_buffer_send_release(old_committed->resource);
+                queue_buffer_release(old_committed);
             buffer_maybe_free(old_committed);
         }
 
@@ -1099,7 +1736,7 @@ static void surface_commit(struct wl_client *client, struct wl_resource *resourc
     }
 
     if (first_map || buffer_size_changed)
-        damage_full();
+        damage_full_reason(FULL_DAMAGE_CLIENT);
     else
         damage_surface(surf);
 }
@@ -1449,7 +2086,7 @@ static void toplevel_set_minimized(struct wl_client *c, struct wl_resource *r)
             g_focused = NULL;
         if (g_kbd_focused == surf)
             g_kbd_focused = NULL;
-        damage_full();
+        damage_full_reason(FULL_DAMAGE_CLIENT);
     }
 }
 
@@ -1596,7 +2233,7 @@ static void xdg_surface_set_window_geometry(struct wl_client *c,
     surf->window_w = w;
     surf->window_h = h;
     if (geometry_changed)
-        damage_full();
+        damage_full_reason(FULL_DAMAGE_RESIZE);
     else
         damage_surface(surf);
 }
@@ -2399,24 +3036,37 @@ static void launch_desktop_app_arg(const char *path, const char *name,
         setpgid(0, 0);
 
         /* Child: redirect stderr to a log file for debugging */
-        int logfd = open("/tmp/app_log.txt",
-                         O_WRONLY | O_CREAT | O_TRUNC, 0644);
-        if (logfd >= 0) {
-            dup2(logfd, 1);  /* stdout */
-            dup2(logfd, 2);  /* stderr */
-            close(logfd);
-        }
-
         /* Child: set up Wayland environment and exec */
 
         int is_netsurf = strcmp(name, "netsurf") == 0;
         int is_minibrowser = strcmp(name, "MiniBrowser") == 0;
+        int is_webkitgpusmoke = strcmp(name, "webkitgpusmoke") == 0;
+        int is_webkit = is_minibrowser || is_webkitgpusmoke;
+        int is_mesa_gl = strcmp(name, "mesawlegl") == 0 ||
+                         strcmp(name, "mesaglsmoke") == 0 ||
+                         strcmp(name, "mesaeglinfo") == 0;
+
+        if (!is_webkitgpusmoke) {
+            int logfd = open("/tmp/app_log.txt",
+                             O_WRONLY | O_CREAT | O_TRUNC, 0644);
+            if (logfd >= 0) {
+                dup2(logfd, 1);  /* stdout */
+                dup2(logfd, 2);  /* stderr */
+                close(logfd);
+            }
+        }
+
+        if (is_netsurf || is_webkit) {
+            mkdir("/tmp/.cache", 0755);
+            mkdir("/tmp/.cache/fontconfig", 0755);
+            mkdir("/tmp/.local", 0755);
+            mkdir("/tmp/.local/share", 0755);
+            mkdir("/tmp/webkitgtk-4.1", 0755);
+        }
 
         /* For netsurf, create Choices file with ca_bundle + homepage */
         if (is_netsurf) {
             mkdir("/.netsurf", 0755);
-            mkdir("/tmp/.cache", 0755);
-            mkdir("/tmp/.cache/fontconfig", 0755);
             int fd = open("/.netsurf/Choices",
                           O_WRONLY | O_CREAT | O_TRUNC, 0644);
             if (fd >= 0) {
@@ -2462,6 +3112,7 @@ static void launch_desktop_app_arg(const char *path, const char *name,
             "PATH=/bin:/usr/bin",
             "XDG_RUNTIME_DIR=/tmp",
             "XDG_CACHE_HOME=/tmp/.cache",
+            "XDG_DATA_HOME=/tmp/.local/share",
             "XDG_DATA_DIRS=/share:/usr/share",
             "WAYLAND_DISPLAY=wayland-0",
             "GDK_BACKEND=wayland",
@@ -2485,10 +3136,13 @@ static void launch_desktop_app_arg(const char *path, const char *name,
             "SSL_CERT_FILE=/share/netsurf/ca-bundle",
             "GIO_MODULE_DIR=/lib/gio/modules",
             "GIO_USE_TLS=openssl",
+            "XV6_GUI_SESSION=1",
             "WEBKIT_EXEC_PATH=/libexec/webkit2gtk-4.1",
             "WEBKIT_INJECTED_BUNDLE_PATH=/lib/webkit2gtk-4.1/injected-bundle",
             "WEBKIT_DISABLE_NETWORK_CACHE=1",
             "WEBKIT_DISABLE_COMPOSITING_MODE=1",
+            "WEBKIT_XV6_SKIP_RULE_FEATURES=1",
+            "WEBKIT_XV6_SKIP_INITIAL_EMPTY_RENDER=1",
             "SOUP_FORCE_HTTP1=1",
             "JSC_useJIT=0",
             "JSC_useBaselineJIT=0",
@@ -2512,6 +3166,7 @@ static void launch_desktop_app_arg(const char *path, const char *name,
             "PATH=/bin:/usr/bin",
             "XDG_RUNTIME_DIR=/tmp",
             "XDG_CACHE_HOME=/tmp/.cache",
+            "XDG_DATA_HOME=/tmp/.local/share",
             "XDG_DATA_DIRS=/share:/usr/share",
             "WAYLAND_DISPLAY=wayland-0",
             "GDK_BACKEND=wayland",
@@ -2521,17 +3176,20 @@ static void launch_desktop_app_arg(const char *path, const char *name,
             "SSL_CERT_FILE=/share/netsurf/ca-bundle",
             "GIO_MODULE_DIR=/lib/gio/modules",
             "GIO_USE_TLS=openssl",
+            "XV6_GUI_SESSION=1",
             "WEBKIT_EXEC_PATH=/libexec/webkit2gtk-4.1",
             "WEBKIT_INJECTED_BUNDLE_PATH=/lib/webkit2gtk-4.1/injected-bundle",
             "WEBKIT_DISABLE_NETWORK_CACHE=1",
+            "WEBKIT_DISABLE_COMPOSITING_MODE=1",
+            "WEBKIT_XV6_DISABLE_COMPOSITING_UPDATE=1",
             "SOUP_FORCE_HTTP1=1",
-            "WEBKIT_FORCE_COMPOSITING_MODE=1",
-            "WEBKIT_XV6_FORCE_COMPOSITING_MODE=1",
             "LIBGL_ALWAYS_SOFTWARE=0",
             "MESA_LOADER_DRIVER_OVERRIDE=virpipe",
             "GALLIUM_DRIVER=virpipe",
             "ANGLE_DEFAULT_PLATFORM=gl",
             "EPOXY_XV6_ALLOW_MISSING=1",
+            "WEBKIT_XV6_SKIP_RULE_FEATURES=1",
+            "WEBKIT_XV6_SKIP_INITIAL_EMPTY_RENDER=1",
             "JSC_useJIT=0",
             "JSC_useBaselineJIT=0",
             "JSC_useDFGJIT=0",
@@ -2549,12 +3207,32 @@ static void launch_desktop_app_arg(const char *path, const char *name,
             "JSC_numberOfGCMarkers=1",
             NULL
         };
+        char *envp_mesa_accel[] = {
+            "HOME=/",
+            "PATH=/bin:/usr/bin",
+            "XDG_RUNTIME_DIR=/tmp",
+            "XDG_CACHE_HOME=/tmp/.cache",
+            "XDG_DATA_DIRS=/share:/usr/share",
+            "WAYLAND_DISPLAY=wayland-0",
+            "GDK_BACKEND=wayland",
+            "XCURSOR_PATH=/share/icons",
+            "XCURSOR_THEME=Adwaita",
+            "LIBGL_ALWAYS_SOFTWARE=0",
+            "MESA_LOADER_DRIVER_OVERRIDE=virpipe",
+            "GALLIUM_DRIVER=virpipe",
+            NULL
+        };
         char **envp = envp_default;
-        if (is_minibrowser) {
+        if (is_webkit) {
             int accel = cmdline_flag_enabled("webkit_accel");
 
-            argv = accel ? argv_minibrowser_accel : argv_minibrowser;
+            if (is_minibrowser)
+                argv = accel ? argv_minibrowser_accel : argv_minibrowser;
+            if (is_webkitgpusmoke)
+                accel = 0;
             envp = accel ? envp_minibrowser_accel : envp_minibrowser;
+        } else if (is_mesa_gl && cmdline_flag_enabled("glsmoke_accel")) {
+            envp = envp_mesa_accel;
         }
         execve(path, argv, envp);
         _exit(127);
@@ -2696,10 +3374,16 @@ static void load_default_shortcuts(void)
     shortcut_add_default("Editor",   SHORTCUT_EDITOR,   NULL, NULL, 0xFFA65C3D, 'V');
     shortcut_add_default("Browser",  SHORTCUT_EXEC, "/bin/netsurf", "netsurf",
                          0xFF3D6E9E, 'W');
-    shortcut_add_default_arg("WebKit", SHORTCUT_EXEC,
-                             "/libexec/webkit2gtk-4.1/MiniBrowser",
-                             "MiniBrowser", "https://www.google.com/",
-                             0xFF9B59B6, 'K');
+    if (access("/libexec/webkit2gtk-4.1/MiniBrowser", X_OK) == 0)
+        shortcut_add_default_arg("WebKit", SHORTCUT_EXEC,
+                                 "/libexec/webkit2gtk-4.1/MiniBrowser",
+                                 "MiniBrowser", "https://www.google.com/",
+                                 0xFF9B59B6, 'K');
+    else
+        shortcut_add_default_arg("WebKit", SHORTCUT_EXEC,
+                                 "/bin/webkitgpusmoke", "webkitgpusmoke",
+                                 "file:///share/webkit/gpu-smoke.html",
+                                 0xFF9B59B6, 'K');
 }
 
 static int parse_desktop_shortcut(const char *path, desktop_icon_t *out)
@@ -3023,9 +3707,29 @@ static uint32_t surface_taskbar_color(const struct wlcomp_surface *surf,
 
 static int surface_close_hit(const struct wlcomp_surface *surf, int mx, int my)
 {
-    (void)surf;
-    (void)mx;
-    (void)my;
+    int32_t gx, gy, gw, gh;
+
+    if (surface_is_demo_window(surf)) {
+        int frame_x, frame_y, close_x, close_y;
+
+        surface_window_geometry(surf, &gx, &gy, &gw, &gh);
+        frame_x = surf->x - WAYLAND_DEMO_BORDER;
+        frame_y = surf->y - WAYLAND_DEMO_TITLE_H - WAYLAND_DEMO_BORDER;
+        close_x = frame_x + gw + WAYLAND_DEMO_BORDER * 2 - WAYLAND_CLOSE_SZ - 5;
+        close_y = frame_y + WAYLAND_DEMO_BORDER + 3;
+        return mx >= close_x && mx < close_x + WAYLAND_CLOSE_SZ &&
+               my >= close_y && my < close_y + WAYLAND_CLOSE_SZ;
+    }
+    if (surface_is_webkit_window(surf)) {
+        int close_w = 64;
+        int close_h = 42;
+
+        surface_window_geometry(surf, &gx, &gy, &gw, &gh);
+        return mx >= surf->x + gx + gw - close_w &&
+               mx < surf->x + gx + gw &&
+               my >= surf->y + gy &&
+               my < surf->y + gy + close_h;
+    }
     return 0;
 }
 
@@ -3131,7 +3835,7 @@ static int taskbar_task_hit(int mx, int my, int fb_w, int fb_h)
         if (!g_iwin[i].active) continue;
         if (mx >= tx && mx < tx + TB_TASK_W) {
             if (g_iwin_focus != i)
-                damage_full();
+                damage_full_reason(FULL_DAMAGE_IWIN);
             g_iwin_focus = i;
             damage_taskbar();
             return 1;
@@ -3402,14 +4106,14 @@ static void handle_desktop_click(int mx, int my, int fb_w, int fb_h,
         } else {
             g_menu_open = 0;  /* close on outside click or separator */
         }
-        damage_full();
+        damage_full_reason(FULL_DAMAGE_MENU);
         return;
     }
 
     /* Check menu button on taskbar */
     if (menu_hit_test(mx, my, fb_h)) {
         g_menu_open = !g_menu_open;
-        damage_full();
+        damage_full_reason(FULL_DAMAGE_MENU);
         return;
     }
 
@@ -3428,14 +4132,14 @@ static void handle_desktop_click(int mx, int my, int fb_w, int fb_h,
             /* First click — select */
             g_selected_icon = hit;
         }
-        damage_full();
+        damage_full_reason(FULL_DAMAGE_DESKTOP);
         return;
     }
 
     /* Click on empty desktop: deselect icon and close menu */
     g_selected_icon = -1;
     g_menu_open = 0;
-    damage_full();
+    damage_full_reason(FULL_DAMAGE_DESKTOP);
 }
 
 /* ── Internal window management ────────────────────────────────────── */
@@ -3487,7 +4191,7 @@ static void iwin_close(int idx)
     }
     w->active = 0;
     if (g_iwin_focus == idx) g_iwin_focus = -1;
-    damage_full();
+    damage_full_reason(FULL_DAMAGE_IWIN);
 }
 
 static void iwin_focus(int idx)
@@ -4790,6 +5494,12 @@ static void draw_3d_content(uint32_t *fb, int fb_w, int fb_h, iwin_t *w)
 
 static void open_3ddemo(void)
 {
+    if (access("/bin/mesaglsmoke", X_OK) == 0) {
+        launch_desktop_app_arg("/bin/mesaglsmoke", "mesaglsmoke",
+                               "--demo");
+        return;
+    }
+
     if (access("/bin/mesawlegl", X_OK) == 0) {
         launch_desktop_app_arg("/bin/mesawlegl", "mesawlegl",
                                "--demo");
@@ -5196,7 +5906,7 @@ static int handle_iwin_click(int mx, int my)
                         return 1;
                     }
                     g_icons_laid_out = 0;  /* relayout icons */
-                    damage_full();
+                    damage_full_reason(FULL_DAMAGE_RESIZE);
                     fprintf(stderr, "wlcomp: resolution changed to %ux%u\n", g_fb_w, g_fb_h);
                     /* Refresh settings text */
                     fill_settings(w);
@@ -5358,6 +6068,8 @@ static void composite_and_flip(void)
     uint32_t now = get_time_ms();
     int repair_ms = damage_repair_interval_ms();
 
+    damage_stats_maybe_log(now);
+
     /* Lay out icons if not done */
     layout_icons(fb_w, fb_h);
 
@@ -5367,7 +6079,7 @@ static void composite_and_flip(void)
     }
 
     if (repair_ms > 0 && now >= next_repair_damage_ms) {
-        damage_full();
+        damage_full_reason(FULL_DAMAGE_REPAIR);
         next_repair_damage_ms = now + (uint32_t)repair_ms;
     }
 
@@ -5391,13 +6103,19 @@ static void composite_and_flip(void)
 
     /* Draw client (Wayland) surfaces */
     struct wlcomp_surface *surf;
+    int acquire_blocked = 0;
     wl_list_for_each(surf, &g_surfaces, link) {
         if (!surf->mapped || surf->minimized || !surf->committed_buf ||
             surf->is_cursor)
             continue;
 
         struct wlcomp_buffer *buf = surf->committed_buf;
-        uint32_t *src = (uint32_t *)buffer_data(buf);
+        uint32_t *src;
+        if (!buffer_acquire_ready(buf)) {
+            acquire_blocked = 1;
+            continue;
+        }
+        src = (uint32_t *)buffer_data(buf);
         if (!src) continue;
 
         int32_t bw = buf->width;
@@ -5420,6 +6138,44 @@ static void composite_and_flip(void)
             if (col1 > bw) col1 = bw;
             if (row0 > row1) row0 = row1;
             if (col0 > col1) col0 = col1;
+        }
+
+        if (surface_is_demo_window(surf)) {
+            int title_h = WAYLAND_DEMO_TITLE_H;
+            int border = WAYLAND_DEMO_BORDER;
+            int frame_x = surf->x - border;
+            int frame_y = surf->y - title_h - border;
+            int frame_w = gw + border * 2;
+            int frame_h = gh + title_h + border * 2;
+            int focused = surface_is_foreground(surf);
+            int close_x = frame_x + frame_w - WAYLAND_CLOSE_SZ - 5;
+            int close_y = frame_y + border + 3;
+            uint32_t title_color = focused ? 0xFF2C4F7C : 0xFF2A2E35;
+            uint32_t border_color = focused ? 0xFF5F7EA8 : 0xFF3C5078;
+            const char *title = surf->title[0] ? surf->title : "3D Demo";
+
+            draw_rect(g_fb_buf, fb_w, fb_h, frame_x + 3, frame_y + 3,
+                      frame_w, frame_h, 0xFF101418);
+            draw_rect(g_fb_buf, fb_w, fb_h, frame_x, frame_y,
+                      frame_w, frame_h, 0xFF15191F);
+            draw_rect(g_fb_buf, fb_w, fb_h, frame_x + border,
+                      frame_y + border, gw, title_h, title_color);
+            draw_string(g_fb_buf, fb_w, fb_h, frame_x + 10,
+                        frame_y + border + 4, title, 0xFFD2DAE2, 1);
+            draw_rect(g_fb_buf, fb_w, fb_h, close_x, close_y,
+                      WAYLAND_CLOSE_SZ, WAYLAND_CLOSE_SZ, 0xFFA63D3D);
+            draw_char(g_fb_buf, fb_w, fb_h, close_x + 5, close_y + 1,
+                      'x', 0xFFFFFFFF, 1);
+            draw_rect(g_fb_buf, fb_w, fb_h, frame_x, frame_y,
+                      frame_w, border, border_color);
+            draw_rect(g_fb_buf, fb_w, fb_h, frame_x,
+                      frame_y + frame_h - border, frame_w, border,
+                      border_color);
+            draw_rect(g_fb_buf, fb_w, fb_h, frame_x, frame_y,
+                      border, frame_h, border_color);
+            draw_rect(g_fb_buf, fb_w, fb_h,
+                      frame_x + frame_w - border, frame_y,
+                      border, frame_h, border_color);
         }
 
         for (int32_t row = row0; row < row1; row++) {
@@ -5450,19 +6206,34 @@ static void composite_and_flip(void)
     draw_default_cursor();
 
     present_damage_rects(fb_w);
+    if (acquire_blocked) {
+        g_damage_stats.acquire_blocked_frames++;
+        damage_full_reason(FULL_DAMAGE_ACQUIRE);
+    }
 
-    /* Once the frame is copied into fb0, release committed buffers so GTK can
-     * recycle its Wayland SHM storage instead of allocating a fresh memfd for
-     * every paint.  The buffer_released flag keeps replacement commits from
-     * sending duplicate releases for the same wl_buffer. */
+    flush_buffer_releases_after_present();
+
+    /* Once the frame is copied into fb0 and the present fence has signaled,
+     * release committed buffers so clients can recycle their storage.  The
+     * buffer_released flag keeps replacement commits from sending duplicate
+     * releases for the same wl_buffer. */
+    int present_ready = framebuffer_present_fence_ready();
     wl_list_for_each(surf, &g_surfaces, link) {
-        surface_release_committed_buffer(surf);
-        if (surf->frame_cb) {
+        int ready = !surf->committed_buf ||
+                    (present_ready &&
+                     buffer_acquire_ready(surf->committed_buf));
+
+        if (ready)
+            surface_release_committed_buffer(surf);
+        if (ready && surf->frame_cb) {
             wl_callback_send_done(surf->frame_cb, now);
             wl_resource_destroy(surf->frame_cb);
             surf->frame_cb = NULL;
         }
     }
+    flush_buffer_releases_after_present();
+    if (!present_ready)
+        damage_full_reason(FULL_DAMAGE_ACQUIRE);
 }
 
 /* ══════════════════════════════════════════════════════════════════════
@@ -5524,18 +6295,12 @@ static void process_mouse(void)
     }
     cursor_moved = (g_cursor_x != old_cursor_x) || (g_cursor_y != old_cursor_y);
     if (cursor_moved) {
-        /*
-         * Absolute pointer events can jump across many positions in one batch,
-         * while GL clients may be animating underneath the cursor.  The old
-         * two-rectangle damage left stale cursor fragments when intermediate
-         * cursor positions had already been presented.  Full repaint on pointer
-         * motion is cheap enough at this scale and keeps the desktop correct.
-         */
-        damage_full();
+        damage_cursor_at(old_cursor_x, old_cursor_y);
+        damage_cursor_at(g_cursor_x, g_cursor_y);
         damage_menu();
     }
     if (pressed_edges || released_edges)
-        damage_full();
+        damage_cursor_at(g_cursor_x, g_cursor_y);
 
     if (wheel_delta != 0 && handle_iwin_wheel(g_cursor_x, g_cursor_y, wheel_delta)) {
         g_prev_buttons = g_buttons;
@@ -5908,7 +6673,7 @@ static int init_framebuffer(void)
         close(g_fb_fd);
         return -1;
     }
-    damage_full();
+    damage_full_reason(FULL_DAMAGE_INIT);
 
     fprintf(stderr, "wlcomp: fb0 %ux%u pitch=%u\n", g_fb_w, g_fb_h, g_fb_pitch);
     return 0;
@@ -6019,7 +6784,10 @@ int main(int argc, char **argv)
                                     3, NULL, ddm_bind);
     g_xv6_gpu_global = wl_global_create(g_display,
                                         &xv6_gpu_buffer_manager_interface,
-                                        1, NULL, xv6_gpu_bind);
+                                        2, NULL, xv6_gpu_bind);
+    g_dmabuf_global = wl_global_create(g_display,
+                                       &zwp_linux_dmabuf_v1_interface,
+                                       3, NULL, dmabuf_bind);
 
     /* Add socket */
     if (wl_display_add_socket(g_display, "wayland-0") < 0) {

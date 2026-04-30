@@ -98,16 +98,18 @@ static const struct wl_interface *xv6_gpu_buffer_create_types[] = {
     NULL,
     NULL,
     NULL,
+    NULL,
 };
 
 static const struct wl_message xv6_gpu_buffer_manager_requests[] = {
     { "create_buffer", "nuiiiu", xv6_gpu_buffer_create_types },
+    { "create_buffer_with_fence", "nuiiiuh", xv6_gpu_buffer_create_types },
 };
 
 static const struct wl_interface xv6_gpu_buffer_manager_interface = {
     "xv6_gpu_buffer_manager",
-    1,
-    1,
+    2,
+    2,
     xv6_gpu_buffer_manager_requests,
     0,
     NULL,
@@ -120,6 +122,22 @@ static struct wl_buffer *xv6_gpu_buffer_manager_create_buffer(
     return (struct wl_buffer *)wl_proxy_marshal_flags(
         manager, 0, &wl_buffer_interface, wl_proxy_get_version(manager), 0,
         NULL, handle, width, height, stride, format);
+}
+
+static struct wl_buffer *xv6_gpu_buffer_manager_create_buffer_with_fence(
+    struct wl_proxy *manager, uint32_t handle, int32_t width, int32_t height,
+    int32_t stride, uint32_t format, int acquire_fence_fd)
+{
+    if (wl_proxy_get_version(manager) < 2 || acquire_fence_fd < 0) {
+        if (acquire_fence_fd >= 0)
+            close(acquire_fence_fd);
+        return xv6_gpu_buffer_manager_create_buffer(
+            manager, handle, width, height, stride, format);
+    }
+
+    return (struct wl_buffer *)wl_proxy_marshal_flags(
+        manager, 1, &wl_buffer_interface, wl_proxy_get_version(manager), 0,
+        NULL, handle, width, height, stride, format, acquire_fence_fd);
 }
 
 static void set_error(struct xv6egl_display *display, EGLint error)
@@ -141,7 +159,7 @@ static void registry_global(void *data, struct wl_registry *registry,
                !display->gpu_manager) {
         display->gpu_manager = wl_registry_bind(
             registry, name, &xv6_gpu_buffer_manager_interface,
-            version > 1 ? 1 : version);
+            version > 2 ? 2 : version);
     }
 }
 
@@ -430,9 +448,10 @@ EGLSurface eglCreateWindowSurface(EGLDisplay dpy, EGLConfig config,
             surface->pixels_size = (size_t)bo.size;
             surface->bo_handle = bo.handle;
             surface->bo_backed = 1;
-            surface->buffer = xv6_gpu_buffer_manager_create_buffer(
+            surface->buffer = xv6_gpu_buffer_manager_create_buffer_with_fence(
                 display->gpu_manager, bo.handle, surface->width,
-                surface->height, (int32_t)bo.pitch, WL_SHM_FORMAT_XRGB8888);
+                surface->height, (int32_t)bo.pitch, WL_SHM_FORMAT_XRGB8888,
+                -1);
             if (surface->buffer)
                 return (EGLSurface)surface;
         }

@@ -10,7 +10,7 @@ endif()
 
 set(WAYLAND_SRC_DIR "${CMAKE_CURRENT_SOURCE_DIR}/src")
 
-foreach(_src wlcomp.c desktop.c glsmoke.c mesaglsmoke.c mesawlegl.c mesaeglinfo.c webkitgpusmoke.c xv6_egl_gles.c font8x16.h)
+foreach(_src wlcomp.c desktop.c glsmoke.c mesaglsmoke.c mesawlegl.c mesaeglinfo.c dmabufsmoke.c webkitgpusmoke.c xv6_egl_gles.c font8x16.h)
     if(NOT EXISTS "${WAYLAND_SRC_DIR}/${_src}")
         message(FATAL_ERROR "ports/wayland: missing ${WAYLAND_SRC_DIR}/${_src}")
     endif()
@@ -25,12 +25,18 @@ set(_xdg_header   ${_wl_proto_dir}/xdg-shell-server-protocol.h)
 set(_xdg_code     ${_wl_build}/xdg-shell-protocol.c)
 set(_xdg_client_header ${_wl_proto_dir}/xdg-shell-client-protocol.h)
 set(_xdg_client_code   ${_wl_build}/xdg-shell-client-protocol.c)
+set(_dmabuf_xml   ${CMAKE_CURRENT_SOURCE_DIR}/../wayland-protocols/src/stable/linux-dmabuf/linux-dmabuf-v1.xml)
+set(_dmabuf_header ${_wl_proto_dir}/linux-dmabuf-v1-server-protocol.h)
+set(_dmabuf_code  ${_wl_build}/linux-dmabuf-v1-protocol.c)
+set(_dmabuf_client_header ${_wl_proto_dir}/linux-dmabuf-v1-client-protocol.h)
+set(_dmabuf_client_code ${_wl_build}/linux-dmabuf-v1-client-protocol.c)
 set(_wl_bin       ${_wl_build}/wlcomp)
 set(_desktop_bin  ${_wl_build}/desktop)
 set(_glsmoke_bin  ${_wl_build}/glsmoke)
 set(_mesaglsmoke_bin ${_wl_build}/mesaglsmoke)
 set(_mesawlegl_bin ${_wl_build}/mesawlegl)
 set(_mesaeglinfo_bin ${_wl_build}/mesaeglinfo)
+set(_dmabufsmoke_bin ${_wl_build}/dmabufsmoke)
 set(_webkitgpusmoke_bin ${_wl_build}/webkitgpusmoke)
 set(_xv6egl_obj   ${_wl_build}/xv6_egl_gles.o)
 set(_xv6egl_lib   ${_wl_build}/libEGL.a)
@@ -41,6 +47,7 @@ set(_glsmoke_installed ${XV6_SYSROOT}/bin/glsmoke)
 set(_mesaglsmoke_installed ${XV6_SYSROOT}/bin/mesaglsmoke)
 set(_mesawlegl_installed ${XV6_SYSROOT}/bin/mesawlegl)
 set(_mesaeglinfo_installed ${XV6_SYSROOT}/bin/mesaeglinfo)
+set(_dmabufsmoke_installed ${XV6_SYSROOT}/bin/dmabufsmoke)
 set(_webkitgpusmoke_installed ${XV6_SYSROOT}/bin/webkitgpusmoke)
 set(_egl_installed ${XV6_SYSROOT}/lib/libEGL.a)
 set(_gles_installed ${XV6_SYSROOT}/lib/libGLESv2.a)
@@ -86,6 +93,28 @@ add_custom_command(
     VERBATIM)
 
 add_custom_command(
+    OUTPUT  ${_dmabuf_header} ${_dmabuf_code}
+    COMMAND ${CMAKE_COMMAND} -E make_directory ${_wl_proto_dir}
+    COMMAND ${XV6_SYSROOT}/host-tools/bin/wayland-scanner server-header
+                ${_dmabuf_xml} ${_dmabuf_header}
+    COMMAND ${XV6_SYSROOT}/host-tools/bin/wayland-scanner private-code
+                ${_dmabuf_xml} ${_dmabuf_code}
+    DEPENDS ${_dmabuf_xml}
+    COMMENT "Generating linux-dmabuf Wayland protocol sources"
+    VERBATIM)
+
+add_custom_command(
+    OUTPUT  ${_dmabuf_client_header} ${_dmabuf_client_code}
+    COMMAND ${CMAKE_COMMAND} -E make_directory ${_wl_proto_dir}
+    COMMAND ${XV6_SYSROOT}/host-tools/bin/wayland-scanner client-header
+                ${_dmabuf_xml} ${_dmabuf_client_header}
+    COMMAND ${XV6_SYSROOT}/host-tools/bin/wayland-scanner private-code
+                ${_dmabuf_xml} ${_dmabuf_client_code}
+    DEPENDS ${_dmabuf_xml}
+    COMMENT "Generating linux-dmabuf Wayland client protocol sources"
+    VERBATIM)
+
+add_custom_command(
     OUTPUT  ${_wl_bin}
     COMMAND ${CMAKE_C_COMPILER} -O2 -g -Wall -Wno-unused-result -static
                 -isystem ${XV6_SYSROOT}/include
@@ -94,10 +123,11 @@ add_custom_command(
                 -I ${XV6_SYSROOT}/include/wayland
                 -L ${XV6_SYSROOT}/lib
                 -Wl,-rpath-link,${XV6_SYSROOT}/lib
-                -o ${_wl_bin} ${_wl_src} ${_xdg_code}
+                -o ${_wl_bin} ${_wl_src} ${_xdg_code} ${_dmabuf_code}
                 ${XV6_SYSROOT}/lib/libwayland-server.a
                 -lffi -lpthread -lrt -lm
     DEPENDS ${_wl_src} ${_wl_font} ${_xdg_header} ${_xdg_code}
+            ${_dmabuf_header} ${_dmabuf_code}
     COMMENT "Compiling wlcomp from source"
     VERBATIM)
 
@@ -199,6 +229,25 @@ add_custom_command(
     VERBATIM)
 
 add_custom_command(
+    OUTPUT  ${_dmabufsmoke_bin}
+    COMMAND ${CMAKE_C_COMPILER} -O2 -g -Wall
+                -isystem ${XV6_SYSROOT}/include
+                -I ${_wl_proto_dir}
+                -I ${XV6_SYSROOT}/include/wayland
+                -L ${XV6_SYSROOT}/lib
+                -Wl,-rpath-link,${XV6_SYSROOT}/lib
+                -o ${_dmabufsmoke_bin}
+                ${WAYLAND_SRC_DIR}/dmabufsmoke.c ${_xdg_client_code}
+                ${_dmabuf_client_code}
+                -lgbm -lwayland-client
+                -lffi -lpthread -ldl -lrt -lm
+    DEPENDS ${WAYLAND_SRC_DIR}/dmabufsmoke.c ${_xdg_client_header}
+            ${_xdg_client_code} ${_dmabuf_client_header}
+            ${_dmabuf_client_code}
+    COMMENT "Compiling linux-dmabuf smoke client"
+    VERBATIM)
+
+add_custom_command(
     OUTPUT  ${_webkitgpusmoke_bin}
     COMMAND ${CMAKE_C_COMPILER} -O2 -g -Wall
                 -isystem ${XV6_SYSROOT}/include
@@ -225,7 +274,8 @@ add_custom_command(
 add_custom_command(
     OUTPUT  ${_wl_installed} ${_desktop_installed} ${_glsmoke_installed}
             ${_mesaglsmoke_installed} ${_mesawlegl_installed}
-            ${_mesaeglinfo_installed} ${_webkitgpusmoke_installed}
+            ${_mesaeglinfo_installed} ${_dmabufsmoke_installed}
+            ${_webkitgpusmoke_installed}
             ${_egl_installed} ${_gles_installed}
     COMMAND ${CMAKE_COMMAND} -E copy ${_wl_bin} ${_wl_installed}
     COMMAND ${CMAKE_COMMAND} -E copy ${_desktop_bin} ${_desktop_installed}
@@ -233,11 +283,13 @@ add_custom_command(
     COMMAND ${CMAKE_COMMAND} -E copy ${_mesaglsmoke_bin} ${_mesaglsmoke_installed}
     COMMAND ${CMAKE_COMMAND} -E copy ${_mesawlegl_bin} ${_mesawlegl_installed}
     COMMAND ${CMAKE_COMMAND} -E copy ${_mesaeglinfo_bin} ${_mesaeglinfo_installed}
+    COMMAND ${CMAKE_COMMAND} -E copy ${_dmabufsmoke_bin} ${_dmabufsmoke_installed}
     COMMAND ${CMAKE_COMMAND} -E copy ${_webkitgpusmoke_bin} ${_webkitgpusmoke_installed}
     COMMAND ${CMAKE_COMMAND} -E copy ${_xv6egl_lib} ${_egl_installed}
     COMMAND ${CMAKE_COMMAND} -E copy ${_xv6gles_lib} ${_gles_installed}
     DEPENDS ${_wl_bin} ${_desktop_bin} ${_glsmoke_bin} ${_mesaglsmoke_bin}
-            ${_mesawlegl_bin} ${_mesaeglinfo_bin} ${_webkitgpusmoke_bin} ${_xv6egl_lib}
+            ${_mesawlegl_bin} ${_mesaeglinfo_bin} ${_dmabufsmoke_bin}
+            ${_webkitgpusmoke_bin} ${_xv6egl_lib}
             ${_xv6gles_lib}
     COMMENT "Installing GUI session into ${XV6_SYSROOT}/bin"
     VERBATIM)
@@ -245,7 +297,8 @@ add_custom_command(
 add_custom_target(port-wayland ALL DEPENDS
     ${_wl_installed} ${_desktop_installed} ${_glsmoke_installed}
     ${_mesaglsmoke_installed} ${_mesawlegl_installed}
-    ${_mesaeglinfo_installed} ${_webkitgpusmoke_installed}
+    ${_mesaeglinfo_installed} ${_dmabufsmoke_installed}
+    ${_webkitgpusmoke_installed}
     ${_egl_installed} ${_gles_installed})
 if(TARGET port-wayland-libs)
     add_dependencies(port-wayland port-wayland-libs)
@@ -259,6 +312,7 @@ add_custom_target(port-wayland-clean
     COMMAND ${CMAKE_COMMAND} -E remove -f
             ${_wl_installed} ${_desktop_installed} ${_glsmoke_installed}
             ${_mesaglsmoke_installed} ${_mesawlegl_installed}
-            ${_mesaeglinfo_installed} ${_webkitgpusmoke_installed}
+            ${_mesaeglinfo_installed} ${_dmabufsmoke_installed}
+            ${_webkitgpusmoke_installed}
             ${_egl_installed} ${_gles_installed}
     COMMENT "Removing wayland artifacts from ${XV6_SYSROOT}")

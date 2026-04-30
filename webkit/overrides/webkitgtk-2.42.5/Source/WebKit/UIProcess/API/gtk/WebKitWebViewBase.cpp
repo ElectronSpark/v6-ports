@@ -806,8 +806,7 @@ static gboolean webkitWebViewBaseDraw(GtkWidget* widget, cairo_t* cr)
         if (showingNavigationSnapshot)
             cairo_push_group(cr);
 
-        if (drawingArea->isInAcceleratedCompositingMode()) {
-            ASSERT(webViewBase->priv->acceleratedBackingStore);
+        if (drawingArea->isInAcceleratedCompositingMode() && webViewBase->priv->acceleratedBackingStore) {
             webViewBase->priv->acceleratedBackingStore->paint(cr, clipRect);
         } else {
             WebCore::Region unpaintedRegion; // This is simply unused.
@@ -2827,33 +2826,29 @@ void webkitWebViewBaseResetClickCounter(WebKitWebViewBase* webkitWebViewBase)
 
 void webkitWebViewBaseEnterAcceleratedCompositingMode(WebKitWebViewBase* webkitWebViewBase, const LayerTreeContext& layerTreeContext)
 {
-    if (!webkitWebViewBase->priv->acceleratedBackingStore && getenv("EPOXY_XV6_ALLOW_MISSING"))
+    if (!webkitWebViewBase->priv->acceleratedBackingStore)
         return;
-    ASSERT(webkitWebViewBase->priv->acceleratedBackingStore);
     webkitWebViewBase->priv->acceleratedBackingStore->update(layerTreeContext);
 }
 
 void webkitWebViewBaseUpdateAcceleratedCompositingMode(WebKitWebViewBase* webkitWebViewBase, const LayerTreeContext& layerTreeContext)
 {
-    if (!webkitWebViewBase->priv->acceleratedBackingStore && getenv("EPOXY_XV6_ALLOW_MISSING"))
+    if (!webkitWebViewBase->priv->acceleratedBackingStore)
         return;
-    ASSERT(webkitWebViewBase->priv->acceleratedBackingStore);
     webkitWebViewBase->priv->acceleratedBackingStore->update(layerTreeContext);
 }
 
 void webkitWebViewBaseExitAcceleratedCompositingMode(WebKitWebViewBase* webkitWebViewBase)
 {
-    if (!webkitWebViewBase->priv->acceleratedBackingStore && getenv("EPOXY_XV6_ALLOW_MISSING"))
+    if (!webkitWebViewBase->priv->acceleratedBackingStore)
         return;
-    ASSERT(webkitWebViewBase->priv->acceleratedBackingStore);
     webkitWebViewBase->priv->acceleratedBackingStore->update(LayerTreeContext());
 }
 
 bool webkitWebViewBaseMakeGLContextCurrent(WebKitWebViewBase* webkitWebViewBase)
 {
-    if (!webkitWebViewBase->priv->acceleratedBackingStore && getenv("EPOXY_XV6_ALLOW_MISSING"))
+    if (!webkitWebViewBase->priv->acceleratedBackingStore)
         return false;
-    ASSERT(webkitWebViewBase->priv->acceleratedBackingStore);
     return webkitWebViewBase->priv->acceleratedBackingStore->makeContextCurrent();
 }
 
