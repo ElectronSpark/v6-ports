@@ -37,6 +37,7 @@ static int webkit_gpu_smoke_enabled_by_cmdline(void);
 static int webkit_webgl_smoke_enabled_by_cmdline(void);
 static int webkit_api_smoke_enabled_by_cmdline(void);
 static int webkit_http_smoke_enabled_by_cmdline(void);
+static int webkit_js_disabled_by_cmdline(void);
 static int webkit_reopen_count_from_cmdline(void);
 static int webkit_timeout_ms_from_cmdline(int fallback);
 static int glsmoke_accel_enabled_by_cmdline(void);
@@ -210,6 +211,19 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             argv_default[3] = NULL;
         char *argv_minibrowser[] = {
             (char *)name,
+            "--enable-javascript=false",
+            "--enable-webgl=false",
+            "--enable-webaudio=false",
+            "--enable-mediasource=false",
+            "--enable-media-stream=false",
+            "--enable-page-cache=false",
+            "--enable-dns-prefetching=false",
+            "--enable-offline-web-application-cache=false",
+            (char *)(arg1 ? arg1 : "https://www.google.com/"),
+            NULL,
+        };
+        char *argv_minibrowser_js[] = {
+            (char *)name,
             "--enable-webgl=false",
             "--enable-webaudio=false",
             "--enable-mediasource=false",
@@ -221,6 +235,19 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             NULL,
         };
         char *argv_minibrowser_accel[] = {
+            (char *)name,
+            "--enable-javascript=false",
+            "--enable-webgl=false",
+            "--enable-webaudio=false",
+            "--enable-mediasource=false",
+            "--enable-media-stream=false",
+            "--enable-page-cache=false",
+            "--enable-dns-prefetching=false",
+            "--enable-offline-web-application-cache=false",
+            (char *)(arg1 ? arg1 : "https://www.google.com/"),
+            NULL,
+        };
+        char *argv_minibrowser_accel_js[] = {
             (char *)name,
             "--enable-webgl=false",
             "--enable-webaudio=false",
@@ -350,6 +377,8 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
         };
         int minibrowser_accel =
             is_minibrowser && webkit_accel_enabled_by_cmdline();
+        int minibrowser_js =
+            is_minibrowser && !webkit_js_disabled_by_cmdline();
         int webkit_accel =
             (is_minibrowser && minibrowser_accel) || is_webkitgpusmoke;
         if (is_webkitgpusmoke)
@@ -357,7 +386,12 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
         execve(path,
                is_minibrowser ?
                     (minibrowser_accel ?
-                         argv_minibrowser_accel : argv_minibrowser) :
+                         (minibrowser_js ?
+                              argv_minibrowser_accel_js :
+                              argv_minibrowser_accel) :
+                         (minibrowser_js ?
+                              argv_minibrowser_js :
+                              argv_minibrowser)) :
                     argv_default,
                is_webkit ?
                     (webkit_accel ? envp_minibrowser_accel : envp_minibrowser) :
@@ -530,6 +564,16 @@ static int webkit_http_smoke_enabled_by_cmdline(void)
         return 0;
 
     return token_is_enabled(buf, "webkit_http_smoke");
+}
+
+static int webkit_js_disabled_by_cmdline(void)
+{
+    char buf[512];
+
+    if (read_cmdline(buf, sizeof(buf)) < 0)
+        return 0;
+
+    return token_is_disabled(buf, "webkit_js");
 }
 
 static int webkit_reopen_count_from_cmdline(void)

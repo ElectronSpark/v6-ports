@@ -2967,8 +2967,12 @@ static int g_selected_icon = -1;       /* currently selected desktop icon */
 #define WEBKIT_DEFAULT_URL "https://www.google.com/search?q=xv6&gbv=1"
 static pid_t g_children[MAX_CHILDREN];
 static pid_t g_pending_reap[MAX_CHILDREN];
+static uint32_t g_child_launch_ms[MAX_CHILDREN];
+static char g_child_name[MAX_CHILDREN][32];
 
 static const char *path_basename(const char *path);
+static uint32_t get_time_ms(void);
+static int cmdline_int_value(const char *key, int fallback);
 
 static void terminate_client_pid(pid_t pid)
 {
@@ -3110,6 +3114,19 @@ static void launch_desktop_app_arg(const char *path, const char *name,
         char *argv_noarg[] = { (char *)name, NULL };
         char *argv_minibrowser[] = {
             (char *)name,
+            "--enable-javascript=false",
+            "--enable-webgl=false",
+            "--enable-webaudio=false",
+            "--enable-mediasource=false",
+            "--enable-media-stream=false",
+            "--enable-page-cache=false",
+            "--enable-dns-prefetching=false",
+            "--enable-offline-web-application-cache=false",
+            (char *)(arg ? arg : "https://www.google.com/"),
+            NULL,
+        };
+        char *argv_minibrowser_js[] = {
+            (char *)name,
             "--enable-webgl=false",
             "--enable-webaudio=false",
             "--enable-mediasource=false",
@@ -3121,6 +3138,19 @@ static void launch_desktop_app_arg(const char *path, const char *name,
             NULL,
         };
         char *argv_minibrowser_accel[] = {
+            (char *)name,
+            "--enable-javascript=false",
+            "--enable-webgl=false",
+            "--enable-webaudio=false",
+            "--enable-mediasource=false",
+            "--enable-media-stream=false",
+            "--enable-page-cache=false",
+            "--enable-dns-prefetching=false",
+            "--enable-offline-web-application-cache=false",
+            (char *)(arg ? arg : "https://www.google.com/"),
+            NULL,
+        };
+        char *argv_minibrowser_accel_js[] = {
             (char *)name,
             "--enable-webgl=false",
             "--enable-webaudio=false",
@@ -3252,9 +3282,15 @@ static void launch_desktop_app_arg(const char *path, const char *name,
         char **envp = envp_default;
         if (is_webkit) {
             int accel = cmdline_flag_enabled("webkit_accel");
+            int js = cmdline_int_value("webkit_js", 1) != 0;
 
-            if (is_minibrowser)
-                argv = accel ? argv_minibrowser_accel : argv_minibrowser;
+            if (is_minibrowser) {
+                if (accel)
+                    argv = js ? argv_minibrowser_accel_js :
+                                argv_minibrowser_accel;
+                else
+                    argv = js ? argv_minibrowser_js : argv_minibrowser;
+            }
             if (is_webkitgpusmoke)
                 accel = 0;
             envp = accel ? envp_minibrowser_accel : envp_minibrowser;
@@ -3267,6 +3303,9 @@ static void launch_desktop_app_arg(const char *path, const char *name,
 
     setpgid(pid, pid);
     g_children[slot] = pid;
+    g_child_launch_ms[slot] = get_time_ms();
+    snprintf(g_child_name[slot], sizeof(g_child_name[slot]), "%s",
+             name ? name : "");
     fprintf(stderr, "wlcomp: launched %s (pid %d)\n", name, pid);
 }
 
@@ -3277,6 +3316,9 @@ static void launch_desktop_app(const char *path, const char *name)
 
 static void reap_children(void)
 {
+    uint32_t now = get_time_ms();
+    int webkit_timeout_ms = cmdline_int_value("webkit_timeout_ms", 0);
+
     for (int i = 0; i < MAX_CHILDREN; i++) {
         if (g_children[i] > 0) {
             int status;
@@ -3294,6 +3336,20 @@ static void reap_children(void)
                             g_children[i], status);
                 }
                 g_children[i] = 0;
+                g_child_launch_ms[i] = 0;
+                g_child_name[i][0] = '\0';
+            } else if (r == 0 && webkit_timeout_ms > 0 &&
+                       strcmp(g_child_name[i], "MiniBrowser") == 0 &&
+                       now - g_child_launch_ms[i] >=
+                           (uint32_t)webkit_timeout_ms) {
+                fprintf(stderr,
+                        "wlcomp: MiniBrowser timeout reached, closing pid %d\n",
+                        g_children[i]);
+                terminate_client_pid(g_children[i]);
+                remember_pending_reap(g_children[i]);
+                g_children[i] = 0;
+                g_child_launch_ms[i] = 0;
+                g_child_name[i][0] = '\0';
             }
         }
     }
@@ -6756,6 +6812,41 @@ static int cmdline_flag_enabled(const char *key)
             p++;
     }
     return 0;
+}
+
+static int cmdline_int_value(const char *key, int fallback)
+{
+    char buf[512];
+    int fd = open("/proc/cmdline", O_RDONLY);
+    int n;
+    size_t key_len = strlen(key);
+    const char *p;
+
+    if (fd < 0)
+        return fallback;
+    n = read(fd, buf, sizeof(buf) - 1);
+    close(fd);
+    if (n <= 0)
+        return fallback;
+    buf[n] = '\0';
+
+    p = buf;
+    while (*p) {
+        while (*p == ' ' || *p == '\t' || *p == '\n')
+            p++;
+        if (strncmp(p, key, key_len) == 0 && p[key_len] == '=') {
+            int value = atoi(p + key_len + 1);
+
+            if (value < 0)
+                value = 0;
+            if (value > 120000)
+                value = 120000;
+            return value;
+        }
+        while (*p && *p != ' ' && *p != '\t' && *p != '\n')
+            p++;
+    }
+    return fallback;
 }
 
 /* ══════════════════════════════════════════════════════════════════════
