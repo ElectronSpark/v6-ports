@@ -2966,6 +2966,8 @@ static int g_selected_icon = -1;       /* currently selected desktop icon */
 static pid_t g_children[MAX_CHILDREN];
 static pid_t g_pending_reap[MAX_CHILDREN];
 
+static const char *path_basename(const char *path);
+
 static void terminate_client_pid(pid_t pid)
 {
     if (pid <= 0)
@@ -3004,6 +3006,31 @@ static void signal_process_group(pid_t pid, int sig)
     kill(pid, sig);
 }
 
+static int shortcut_exec_allowed(const char *path, const char *name)
+{
+    if (!path || !path[0])
+        return 0;
+    if (access(path, X_OK) != 0)
+        return 0;
+    return 1;
+}
+
+static void destroy_client_surfaces_for_pid(pid_t pid)
+{
+    struct wlcomp_surface *surf, *tmp;
+
+    if (pid <= 0)
+        return;
+
+    wl_list_for_each_safe(surf, tmp, &g_surfaces, link) {
+        if (surf->client_pid == pid && surf->resource) {
+            struct wl_client *client = wl_resource_get_client(surf->resource);
+            if (client)
+                wl_client_destroy(client);
+        }
+    }
+}
+
 static void destroy_surface_client(struct wlcomp_surface *surf)
 {
     struct wl_client *client;
@@ -3021,6 +3048,7 @@ static void launch_desktop_app_arg(const char *path, const char *name,
                                    const char *arg)
 {
     if (!path) return;
+    if (!shortcut_exec_allowed(path, name)) return;
 
     /* Find free slot */
     int slot = -1;
@@ -3141,6 +3169,8 @@ static void launch_desktop_app_arg(const char *path, const char *name,
             "WEBKIT_INJECTED_BUNDLE_PATH=/lib/webkit2gtk-4.1/injected-bundle",
             "WEBKIT_DISABLE_NETWORK_CACHE=1",
             "WEBKIT_DISABLE_COMPOSITING_MODE=1",
+            "WEBKIT_XV6_DISABLE_COMPOSITING_UPDATE=1",
+            "EPOXY_XV6_ALLOW_MISSING=1",
             "WEBKIT_XV6_SKIP_RULE_FEATURES=1",
             "WEBKIT_XV6_SKIP_INITIAL_EMPTY_RENDER=1",
             "SOUP_FORCE_HTTP1=1",
@@ -3255,6 +3285,9 @@ static void reap_children(void)
             int status;
             pid_t r = waitpid(g_children[i], &status, WNOHANG);
             if (r > 0) {
+                signal_process_group(r, SIGTERM);
+                signal_process_group(r, SIGKILL);
+                destroy_client_surfaces_for_pid(r);
                 if (WIFEXITED(status)) {
                     if (WEXITSTATUS(status) != 0)
                         fprintf(stderr, "wlcomp: child pid %d exited (status=%d)\n",
@@ -3340,7 +3373,7 @@ static void shortcut_add_default(const char *label, int action,
 {
     if (g_icon_count >= DESKTOP_ICON_MAX)
         return;
-    if (action == SHORTCUT_EXEC && path && access(path, X_OK) != 0)
+    if (action == SHORTCUT_EXEC && !shortcut_exec_allowed(path, name))
         return;
     shortcut_set(&g_icons[g_icon_count++], label, action, path, name, NULL,
                  color, symbol);
@@ -3353,7 +3386,7 @@ static void shortcut_add_default_arg(const char *label, int action,
 {
     if (g_icon_count >= DESKTOP_ICON_MAX)
         return;
-    if (action == SHORTCUT_EXEC && path && access(path, X_OK) != 0)
+    if (action == SHORTCUT_EXEC && !shortcut_exec_allowed(path, name))
         return;
     shortcut_set(&g_icons[g_icon_count++], label, action, path, name, arg,
                  color, symbol);
@@ -3432,7 +3465,8 @@ static int parse_desktop_shortcut(const char *path, desktop_icon_t *out)
     int action = builtin[0] ? shortcut_action_from_name(builtin) : SHORTCUT_EXEC;
     if (action == SHORTCUT_EXEC && !exec[0])
         return -1;
-    if (action == SHORTCUT_EXEC && access(exec, X_OK) != 0)
+    if (action == SHORTCUT_EXEC &&
+        !shortcut_exec_allowed(exec, exec[0] ? path_basename(exec) : ""))
         return -1;
 
     shortcut_set(out, name, action, exec, exec[0] ? path_basename(exec) : "",
