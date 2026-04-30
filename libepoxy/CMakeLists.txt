@@ -18,4 +18,6 @@ xv6_port(
         -Degl=yes
         -Dx11=false
         -Dtests=false
+    PATCHES
+        ${CMAKE_CURRENT_LIST_DIR}/patches/0001-xv6-missing-gl-stubs.patch
 )

@@ -27,15 +27,19 @@ xv6_port(
         -Dcloudproviders=false
         -Dprofiler=false
         -Dtracker3=false
-        -Dprint_backends=file
+        -Dprint_backends=none
         -Dcolord=no
         -Dgtk_doc=false
         -Dman=false
         -Dintrospection=false
+        -Dbuiltin_immodules=all
         -Ddemos=false
         -Dexamples=false
         -Dtests=false
         -Dinstalled_tests=false
+    PATCHES
+        ${CMAKE_CURRENT_LIST_DIR}/patches/0001-display-manager-once-init.patch
+        ${CMAKE_CURRENT_LIST_DIR}/patches/0002-allow-no-print-backends.patch
 )
 
 set(GTK_CURSOR_THEME_DIR "/usr/share/icons/Adwaita"

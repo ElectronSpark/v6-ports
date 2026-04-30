@@ -65,6 +65,7 @@ function(xv6_port)
                     CPP_ARGS
                     CPP_LINK_ARGS
                     MAKE_ARGS
+                    PATCHES
                     INSTALL_ARGS)
     cmake_parse_arguments(P "${opts}" "${one_value}" "${multi_value}" ${ARGN})
 
@@ -87,6 +88,7 @@ function(xv6_port)
     set(_name   ${P_NAME})
     set(_src    ${P_SOURCE_DIR})
     set(_build  ${CMAKE_BINARY_DIR}/${_name}-build)
+    set(_patch_stamp ${CMAKE_BINARY_DIR}/${_name}-patches.stamp)
 
     # Translate OUTPUT_FILES (relative to sysroot) to absolute paths.
     set(_out_abs "")
@@ -102,6 +104,16 @@ function(xv6_port)
     foreach(d IN LISTS P_DEPENDS)
         list(APPEND _dep_targets port-${d})
     endforeach()
+
+    set(_patch_deps "")
+    set(_patch_cmd ${CMAKE_COMMAND} -E touch ${_patch_stamp})
+    if(P_PATCHES)
+        set(_patch_deps ${P_PATCHES})
+        set(_patch_cmd
+            ${CMAKE_COMMAND} -E chdir ${_src}
+                sh ${CMAKE_CURRENT_FUNCTION_LIST_DIR}/apply_patches.sh
+                ${_patch_stamp} ${P_PATCHES})
+    endif()
 
     # ------------------------------------------------------------------
     # Per-build-system command tuple.
@@ -325,10 +337,11 @@ function(xv6_port)
     # ------------------------------------------------------------------
     add_custom_command(
         OUTPUT  ${_out_abs}
+        COMMAND ${_patch_cmd}
         COMMAND ${_cmake_configure}
         COMMAND ${_build_cmd}
         COMMAND ${_install_cmd}
-        DEPENDS ${_dep_targets}
+        DEPENDS ${_dep_targets} ${_patch_deps}
         WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
         COMMENT "Building port ${_name}"
         VERBATIM)
