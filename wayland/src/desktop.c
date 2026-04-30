@@ -755,7 +755,33 @@ int main(void)
         fprintf(stderr, "[desktop] %s pid=%d %s %s %s\n", client_name,
                 client_pid, demo ? "--demo" : frames_arg, loops_arg,
                 demo ? "" : resize_arg);
-    } else if (webkit_enabled_by_cmdline()) {
+        if (webkit_enabled_by_cmdline()) {
+            while (g_running && client_pid > 0) {
+                int status;
+                pid_t exited = waitpid(-1, &status, WNOHANG);
+                if (exited == wlcomp_pid) {
+                    fprintf(stderr, "[desktop] wlcomp exited (status %d)\n",
+                            WEXITSTATUS(status));
+                    wlcomp_pid = 0;
+                    cleanup();
+                    return 1;
+                }
+                if (exited == client_pid) {
+                    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+                        fprintf(stderr,
+                                "[desktop] GL smoke exited (status %d)\n",
+                                WIFEXITED(status) ? WEXITSTATUS(status) :
+                                                    status);
+                    }
+                    client_pid = 0;
+                    break;
+                }
+                usleep(100000);
+            }
+        }
+    }
+
+    if (webkit_enabled_by_cmdline()) {
         int accel = webkit_accel_enabled_by_cmdline();
         int webkit_reopen_left = webkit_reopen_count_from_cmdline();
         int webkit_api_smoke = webkit_api_smoke_enabled_by_cmdline();
