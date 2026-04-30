@@ -80,7 +80,9 @@ void WebProcessPool::platformInitialize()
 void WebProcessPool::platformInitializeWebProcess(const WebProcessProxy& process, WebProcessCreationParameters& parameters)
 {
     const char* xv6AllowMissingGL = getenv("EPOXY_XV6_ALLOW_MISSING");
-    bool xv6UseSoftwareWebProcessBacking = xv6AllowMissingGL && strcmp(xv6AllowMissingGL, "0");
+    const char* xv6ForceCompositing = getenv("WEBKIT_XV6_FORCE_COMPOSITING_MODE");
+    bool xv6UseSoftwareWebProcessBacking = xv6AllowMissingGL && strcmp(xv6AllowMissingGL, "0")
+        && !(xv6ForceCompositing && strcmp(xv6ForceCompositing, "0"));
 
 #if PLATFORM(WPE)
     parameters.isServiceWorkerProcess = process.isRunningServiceWorkers();

@@ -498,10 +498,10 @@ bool Connection::sendOutputMessage(UnixMessage& outputMessage)
     while (true) {
         ssize_t bytesSent = sendmsg(m_socketDescriptor, &message, MSG_NOSIGNAL);
         if (bytesSent >= 0) {
-            if ((size_t)bytesSent != expectedBytes) {
-            } else if (messageInfo.attachmentCount()) {
-            } else
-            return true;
+            if ((size_t)bytesSent == expectedBytes)
+                return true;
+
+            errno = EAGAIN;
         }
 
         if (errno == EINTR)

@@ -24,6 +24,8 @@
 #define WAYLAND_SOCKET_PATH  "/tmp/wayland-0.lock" /* lockfile (real VFS file) */
 #define SOCKET_WAIT_TRIES    200      /* 200 × 20 ms = 4 s */
 #define SOCKET_WAIT_US       20000
+#define WEBKIT_NET_WAIT_US   35000000 /* DHCP fallback/network daemons need ~30s */
+#define WEBKIT_DEFAULT_URL   "https://www.google.com/search?q=xv6&gbv=1"
 
 static volatile sig_atomic_t g_running = 1;
 static pid_t wlcomp_pid;
@@ -64,6 +66,14 @@ static int wait_for_socket(void)
         usleep(SOCKET_WAIT_US);
     }
     return -1;
+}
+
+static int url_needs_network_wait(const char *url)
+{
+    return url && (strncmp(url, "http://", 7) == 0 ||
+                   strncmp(url, "https://", 8) == 0) &&
+           strncmp(url, "http://127.0.0.1", 16) != 0 &&
+           strncmp(url, "http://localhost", 16) != 0;
 }
 
 static pid_t launch_wlcomp(void)
@@ -212,8 +222,7 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
         };
         char *argv_minibrowser_accel[] = {
             (char *)name,
-            "--enable-webgl=true",
-            "--features=webgl",
+            "--enable-webgl=false",
             "--enable-webaudio=false",
             "--enable-mediasource=false",
             "--enable-media-stream=false",
@@ -307,7 +316,6 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             "ANGLE_DEFAULT_PLATFORM=gl",
             "EPOXY_XV6_ALLOW_MISSING=1",
             "WEBKIT_XV6_SKIP_RULE_FEATURES=1",
-            "WEBKIT_XV6_SKIP_INITIAL_EMPTY_RENDER=1",
             "JSC_useJIT=0",
             "JSC_useBaselineJIT=0",
             "JSC_useDFGJIT=0",
@@ -590,7 +598,7 @@ static void webkit_url_from_cmdline(char *out, size_t out_size)
     }
 
     if (read_cmdline(buf, sizeof(buf)) < 0) {
-        snprintf(out, out_size, "https://www.google.com/");
+        snprintf(out, out_size, WEBKIT_DEFAULT_URL);
         return;
     }
 
@@ -615,7 +623,7 @@ static void webkit_url_from_cmdline(char *out, size_t out_size)
             p++;
     }
 
-    snprintf(out, out_size, "https://www.google.com/");
+    snprintf(out, out_size, WEBKIT_DEFAULT_URL);
 }
 
 static int glsmoke_enabled_by_cmdline(void)
@@ -780,6 +788,12 @@ int main(void)
             webkit_timeout = webkit_timeout_arg;
         }
         webkit_url_from_cmdline(webkit_url, sizeof(webkit_url));
+        if (url_needs_network_wait(webkit_url)) {
+            fprintf(stderr,
+                    "[desktop] waiting for network before WebKit URL %s\n",
+                    webkit_url);
+            usleep(WEBKIT_NET_WAIT_US);
+        }
         client_pid = launch_client(webkit_path, webkit_name, webkit_url,
                                    webkit_timeout, NULL);
         if (client_pid < 0) {

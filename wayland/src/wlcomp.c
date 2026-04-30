@@ -2963,6 +2963,8 @@ static int g_selected_icon = -1;       /* currently selected desktop icon */
 /* ── Child process management ──────────────────────────────────────── */
 
 #define MAX_CHILDREN 16
+#define WEBKIT_NET_WAIT_US 35000000
+#define WEBKIT_DEFAULT_URL "https://www.google.com/search?q=xv6&gbv=1"
 static pid_t g_children[MAX_CHILDREN];
 static pid_t g_pending_reap[MAX_CHILDREN];
 
@@ -3015,20 +3017,12 @@ static int shortcut_exec_allowed(const char *path, const char *name)
     return 1;
 }
 
-static void destroy_client_surfaces_for_pid(pid_t pid)
+static int url_needs_network_wait(const char *url)
 {
-    struct wlcomp_surface *surf, *tmp;
-
-    if (pid <= 0)
-        return;
-
-    wl_list_for_each_safe(surf, tmp, &g_surfaces, link) {
-        if (surf->client_pid == pid && surf->resource) {
-            struct wl_client *client = wl_resource_get_client(surf->resource);
-            if (client)
-                wl_client_destroy(client);
-        }
-    }
+    return url && (strncmp(url, "http://", 7) == 0 ||
+                   strncmp(url, "https://", 8) == 0) &&
+           strncmp(url, "http://127.0.0.1", 16) != 0 &&
+           strncmp(url, "http://localhost", 16) != 0;
 }
 
 static void destroy_surface_client(struct wlcomp_surface *surf)
@@ -3107,6 +3101,11 @@ static void launch_desktop_app_arg(const char *path, const char *name,
             }
         }
 
+        if (is_minibrowser && url_needs_network_wait(arg)) {
+            fprintf(stderr, "wlcomp: waiting for network before %s\n", arg);
+            usleep(WEBKIT_NET_WAIT_US);
+        }
+
         char *argv_def[] = { (char *)name, (char *)arg, NULL };
         char *argv_noarg[] = { (char *)name, NULL };
         char *argv_minibrowser[] = {
@@ -3123,8 +3122,7 @@ static void launch_desktop_app_arg(const char *path, const char *name,
         };
         char *argv_minibrowser_accel[] = {
             (char *)name,
-            "--enable-webgl=true",
-            "--features=webgl",
+            "--enable-webgl=false",
             "--enable-webaudio=false",
             "--enable-mediasource=false",
             "--enable-media-stream=false",
@@ -3219,7 +3217,6 @@ static void launch_desktop_app_arg(const char *path, const char *name,
             "ANGLE_DEFAULT_PLATFORM=gl",
             "EPOXY_XV6_ALLOW_MISSING=1",
             "WEBKIT_XV6_SKIP_RULE_FEATURES=1",
-            "WEBKIT_XV6_SKIP_INITIAL_EMPTY_RENDER=1",
             "JSC_useJIT=0",
             "JSC_useBaselineJIT=0",
             "JSC_useDFGJIT=0",
@@ -3285,9 +3282,6 @@ static void reap_children(void)
             int status;
             pid_t r = waitpid(g_children[i], &status, WNOHANG);
             if (r > 0) {
-                signal_process_group(r, SIGTERM);
-                signal_process_group(r, SIGKILL);
-                destroy_client_surfaces_for_pid(r);
                 if (WIFEXITED(status)) {
                     if (WEXITSTATUS(status) != 0)
                         fprintf(stderr, "wlcomp: child pid %d exited (status=%d)\n",
@@ -3410,7 +3404,7 @@ static void load_default_shortcuts(void)
     if (access("/libexec/webkit2gtk-4.1/MiniBrowser", X_OK) == 0)
         shortcut_add_default_arg("WebKit", SHORTCUT_EXEC,
                                  "/libexec/webkit2gtk-4.1/MiniBrowser",
-                                 "MiniBrowser", "https://www.google.com/",
+                                 "MiniBrowser", WEBKIT_DEFAULT_URL,
                                  0xFF9B59B6, 'K');
     else
         shortcut_add_default_arg("WebKit", SHORTCUT_EXEC,
