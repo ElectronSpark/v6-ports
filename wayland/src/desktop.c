@@ -143,6 +143,8 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
 {
     pid_t pid = fork();
     if (pid == 0) {
+        setpgid(0, 0);
+
         int is_netsurf = strcmp(name, "netsurf") == 0;
         int is_minibrowser = strcmp(name, "MiniBrowser") == 0;
         int is_webkitgpusmoke = strcmp(name, "webkitgpusmoke") == 0;
@@ -284,6 +286,7 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             "WEBKIT_DISABLE_NETWORK_CACHE=1",
             "SOUP_FORCE_HTTP1=1",
             "WEBKIT_FORCE_COMPOSITING_MODE=1",
+            "WEBKIT_XV6_FORCE_COMPOSITING_MODE=1",
             "LIBGL_ALWAYS_SOFTWARE=0",
             "MESA_LOADER_DRIVER_OVERRIDE=virpipe",
             "GALLIUM_DRIVER=virpipe",
@@ -338,12 +341,15 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
                          envp_mesa_accel : envp_default));
         _exit(127);
     }
+    if (pid > 0)
+        setpgid(pid, pid);
     return pid;
 }
 
 static void kill_and_reap(pid_t *pidp)
 {
     if (*pidp > 0) {
+        kill(-*pidp, SIGTERM);
         kill(*pidp, SIGTERM);
         waitpid(*pidp, NULL, 0);
         *pidp = 0;
