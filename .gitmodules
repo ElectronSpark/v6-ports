@@ -59,26 +59,31 @@
 	url = https://github.com/harfbuzz/harfbuzz.git
 [submodule "fontconfig/src"]
 	path = fontconfig/src
-	url = https://gitlab.freedesktop.org/fontconfig/fontconfig.git
+	url = https://github.com/ElectronSpark/v6-fontconfig.git
+	branch = v6-port
 [submodule "cairo/src"]
 	path = cairo/src
 	url = https://gitlab.freedesktop.org/cairo/cairo.git
 [submodule "glib/src"]
 	path = glib/src
-	url = https://gitlab.gnome.org/GNOME/glib.git
+	url = https://github.com/ElectronSpark/v6-glib.git
+	branch = v6-port
 [submodule "atk/src"]
 	path = atk/src
-	url = https://gitlab.gnome.org/GNOME/atk.git
+	url = https://github.com/ElectronSpark/v6-atk.git
+	branch = master
 [submodule "gdk-pixbuf/src"]
 	path = gdk-pixbuf/src
-	url = https://gitlab.gnome.org/GNOME/gdk-pixbuf.git
+	url = https://github.com/ElectronSpark/v6-gdk-pixbuf.git
+	branch = v6-port
 [submodule "pango/src"]
 	path = pango/src
-	url = https://gitlab.gnome.org/GNOME/pango.git
+	url = https://github.com/ElectronSpark/v6-pango.git
+	branch = v6-port
 [submodule "gtk3/src"]
 	path = gtk3/src
-	url = https://gitlab.gnome.org/GNOME/gtk.git
-	branch = gtk-3-24
+	url = https://github.com/ElectronSpark/v6-gtk.git
+	branch = v6-port
 [submodule "wayland-src/src"]
 	path = wayland-src/src
 	url = https://github.com/ElectronSpark/v6-wayland.git
@@ -139,7 +144,8 @@
 	url = git://git.netsurf-browser.org/libsvgtiny.git
 [submodule "netsurf/src"]
 	path = netsurf/src
-	url = git://git.netsurf-browser.org/netsurf.git
+	url = https://github.com/ElectronSpark/v6-netsurf.git
+	branch = v6-port
 [submodule "openssh/src"]
 	path = openssh/src
 	url = https://github.com/openssh/openssh-portable.git
