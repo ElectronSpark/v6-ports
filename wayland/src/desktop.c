@@ -212,6 +212,7 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
         char *argv_minibrowser[] = {
             (char *)name,
             "--enable-javascript=false",
+            "--enable-sandbox=false",
             "--enable-webgl=false",
             "--enable-webaudio=false",
             "--enable-mediasource=false",
@@ -224,6 +225,7 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
         };
         char *argv_minibrowser_js[] = {
             (char *)name,
+            "--enable-sandbox=false",
             "--enable-webgl=false",
             "--enable-webaudio=false",
             "--enable-mediasource=false",
@@ -237,6 +239,7 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
         char *argv_minibrowser_accel[] = {
             (char *)name,
             "--enable-javascript=false",
+            "--enable-sandbox=false",
             "--enable-webgl=false",
             "--enable-webaudio=false",
             "--enable-mediasource=false",
@@ -249,6 +252,7 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
         };
         char *argv_minibrowser_accel_js[] = {
             (char *)name,
+            "--enable-sandbox=false",
             "--enable-webgl=false",
             "--enable-webaudio=false",
             "--enable-mediasource=false",
@@ -257,6 +261,28 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             "--enable-dns-prefetching=false",
             "--enable-offline-web-application-cache=false",
             (char *)(arg1 ? arg1 : "https://www.google.com/"),
+            NULL,
+        };
+        char *argv_minibrowser_youtube_desktop_accel[] = {
+            (char *)name,
+            "--enable-sandbox=false",
+            "--enable-webgl=true",
+            "--enable-page-cache=false",
+            "--enable-dns-prefetching=false",
+            "--enable-offline-web-application-cache=false",
+            "--user-agent=Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+            (char *)(arg1 ? arg1 : "https://www.youtube.com/?app=desktop&persist_app=1"),
+            NULL,
+        };
+        char *argv_minibrowser_youtube_mobile_accel[] = {
+            (char *)name,
+            "--enable-sandbox=false",
+            "--enable-webgl=true",
+            "--enable-page-cache=false",
+            "--enable-dns-prefetching=false",
+            "--enable-offline-web-application-cache=false",
+            "--user-agent=Mozilla/5.0 (Linux; Android 6.0; Nexus 5 Build/MRA58N) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/49.0.2623.105 Mobile Safari/537.36",
+            (char *)(arg1 ? arg1 : "https://m.youtube.com/"),
             NULL,
         };
         char *envp_default[] = {
@@ -292,6 +318,7 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             "WEBKIT_EXEC_PATH=/libexec/webkit2gtk-4.1",
             "WEBKIT_INJECTED_BUNDLE_PATH=/lib/webkit2gtk-4.1/injected-bundle",
             "WEBKIT_DISABLE_NETWORK_CACHE=1",
+            "WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS=1",
             "WEBKIT_DISABLE_COMPOSITING_MODE=1",
             "WEBKIT_XV6_DISABLE_COMPOSITING_UPDATE=1",
             "EPOXY_XV6_ALLOW_MISSING=1",
@@ -334,15 +361,14 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             "WEBKIT_EXEC_PATH=/libexec/webkit2gtk-4.1",
             "WEBKIT_INJECTED_BUNDLE_PATH=/lib/webkit2gtk-4.1/injected-bundle",
             "WEBKIT_DISABLE_NETWORK_CACHE=1",
-            "WEBKIT_DISABLE_COMPOSITING_MODE=1",
-            "WEBKIT_XV6_DISABLE_COMPOSITING_UPDATE=1",
-            "SOUP_FORCE_HTTP1=1",
+            "WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS=1",
             "LIBGL_ALWAYS_SOFTWARE=0",
             "MESA_LOADER_DRIVER_OVERRIDE=virpipe",
             "GALLIUM_DRIVER=virpipe",
             "ANGLE_DEFAULT_PLATFORM=gl",
+            "WEBKIT_XV6_DISABLE_BCG_SWITCH=1",
+            "SOUP_FORCE_HTTP1=1",
             "EPOXY_XV6_ALLOW_MISSING=1",
-            "WEBKIT_XV6_SKIP_RULE_FEATURES=1",
             "JSC_useJIT=0",
             "JSC_useBaselineJIT=0",
             "JSC_useDFGJIT=0",
@@ -379,6 +405,10 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             is_minibrowser && webkit_accel_enabled_by_cmdline();
         int minibrowser_js =
             is_minibrowser && !webkit_js_disabled_by_cmdline();
+        int minibrowser_youtube =
+            is_minibrowser && arg1 && strstr(arg1, "youtube.com") != NULL;
+        int minibrowser_youtube_mobile =
+            minibrowser_youtube && strstr(arg1, "m.youtube.com") != NULL;
         int webkit_accel =
             (is_minibrowser && minibrowser_accel) || is_webkitgpusmoke;
         if (is_webkitgpusmoke)
@@ -386,7 +416,11 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
         execve(path,
                is_minibrowser ?
                     (minibrowser_accel ?
-                         (minibrowser_js ?
+                         (minibrowser_youtube && minibrowser_js ?
+                              (minibrowser_youtube_mobile ?
+                                   argv_minibrowser_youtube_mobile_accel :
+                                   argv_minibrowser_youtube_desktop_accel) :
+                          minibrowser_js ?
                               argv_minibrowser_accel_js :
                               argv_minibrowser_accel) :
                          (minibrowser_js ?

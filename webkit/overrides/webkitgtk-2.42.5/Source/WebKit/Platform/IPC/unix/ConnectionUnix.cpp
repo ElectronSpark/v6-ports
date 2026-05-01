@@ -54,9 +54,8 @@
 
 // Although it's available on Darwin, SOCK_SEQPACKET seems to work differently
 // than in traditional Unix so fallback to STREAM on that platform.
-// xv6 kernel does not support SOCK_SEQPACKET for AF_UNIX socketpairs.
 #if USE(GLIB)
-#define SOCKET_TYPE SOCK_STREAM
+#define SOCKET_TYPE SOCK_SEQPACKET
 #else
 #define SOCKET_TYPE SOCK_DGRAM
 #endif
@@ -490,19 +489,10 @@ bool Connection::sendOutputMessage(UnixMessage& outputMessage)
 
     message.msg_iovlen = iovLength;
 
-    size_t expectedBytes = 0;
-    for (int i = 0; i < iovLength; ++i)
-        expectedBytes += iov[i].iov_len;
-
-
     while (true) {
         ssize_t bytesSent = sendmsg(m_socketDescriptor, &message, MSG_NOSIGNAL);
-        if (bytesSent >= 0) {
-            if ((size_t)bytesSent == expectedBytes)
-                return true;
-
-            errno = EAGAIN;
-        }
+        if (bytesSent >= 0)
+            return true;
 
         if (errno == EINTR)
             continue;
@@ -511,15 +501,18 @@ bool Connection::sendOutputMessage(UnixMessage& outputMessage)
             m_pendingOutputMessage = makeUnique<UnixMessage>(WTFMove(outputMessage));
             m_writeSocketMonitor.start(m_socket.get(), G_IO_OUT, m_connectionQueue->runLoop(), [this, protectedThis = Ref { *this }] (GIOCondition condition) -> gboolean {
                 if (condition & G_IO_OUT) {
-                    ASSERT(m_pendingOutputMessage);
                     // We can't stop the monitor from this lambda, because stop destroys the lambda.
                     m_connectionQueue->dispatch([this, protectedThis = Ref { *this }] {
                         m_writeSocketMonitor.stop();
+                        if (!m_pendingOutputMessage)
+                            return;
+
                         auto message = WTFMove(m_pendingOutputMessage);
-                        if (m_isConnected) {
-                            sendOutputMessage(*message);
+                        if (!m_isConnected || m_socketDescriptor == -1)
+                            return;
+
+                        if (sendOutputMessage(*message) && !m_pendingOutputMessage)
                             sendOutgoingMessages();
-                        }
                     });
                 }
                 return G_SOURCE_REMOVE;
@@ -547,8 +540,14 @@ bool Connection::sendOutputMessage(UnixMessage& outputMessage)
             return false;
         }
 
-        if (m_isConnected)
-            WTFLogAlways("Error sending IPC message: %s", safeStrerror(errno).data());
+        if (m_isConnected) {
+            size_t expectedBytes = 0;
+            for (int i = 0; i < iovLength; ++i)
+                expectedBytes += iov[i].iov_len;
+            WTFLogAlways("Error sending IPC message: %s (pid=%d fd=%d errno=%d attachments=%zu bytes=%zu body=%zu)",
+                safeStrerror(errno).data(), getpid(), m_socketDescriptor, errno,
+                messageInfo.attachmentCount(), expectedBytes, outputMessage.bodySize());
+        }
         return false;
     }
 }

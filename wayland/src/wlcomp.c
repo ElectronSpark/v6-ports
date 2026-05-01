@@ -3115,6 +3115,7 @@ static void launch_desktop_app_arg(const char *path, const char *name,
         char *argv_minibrowser[] = {
             (char *)name,
             "--enable-javascript=false",
+            "--enable-sandbox=false",
             "--enable-webgl=false",
             "--enable-webaudio=false",
             "--enable-mediasource=false",
@@ -3127,6 +3128,7 @@ static void launch_desktop_app_arg(const char *path, const char *name,
         };
         char *argv_minibrowser_js[] = {
             (char *)name,
+            "--enable-sandbox=false",
             "--enable-webgl=false",
             "--enable-webaudio=false",
             "--enable-mediasource=false",
@@ -3140,6 +3142,7 @@ static void launch_desktop_app_arg(const char *path, const char *name,
         char *argv_minibrowser_accel[] = {
             (char *)name,
             "--enable-javascript=false",
+            "--enable-sandbox=false",
             "--enable-webgl=false",
             "--enable-webaudio=false",
             "--enable-mediasource=false",
@@ -3152,6 +3155,7 @@ static void launch_desktop_app_arg(const char *path, const char *name,
         };
         char *argv_minibrowser_accel_js[] = {
             (char *)name,
+            "--enable-sandbox=false",
             "--enable-webgl=false",
             "--enable-webaudio=false",
             "--enable-mediasource=false",
@@ -3160,6 +3164,28 @@ static void launch_desktop_app_arg(const char *path, const char *name,
             "--enable-dns-prefetching=false",
             "--enable-offline-web-application-cache=false",
             (char *)(arg ? arg : "https://www.google.com/"),
+            NULL,
+        };
+        char *argv_minibrowser_youtube_desktop_accel[] = {
+            (char *)name,
+            "--enable-sandbox=false",
+            "--enable-webgl=true",
+            "--enable-page-cache=false",
+            "--enable-dns-prefetching=false",
+            "--enable-offline-web-application-cache=false",
+            "--user-agent=Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+            (char *)(arg ? arg : "https://www.youtube.com/?app=desktop&persist_app=1"),
+            NULL,
+        };
+        char *argv_minibrowser_youtube_mobile_accel[] = {
+            (char *)name,
+            "--enable-sandbox=false",
+            "--enable-webgl=true",
+            "--enable-page-cache=false",
+            "--enable-dns-prefetching=false",
+            "--enable-offline-web-application-cache=false",
+            "--user-agent=Mozilla/5.0 (Linux; Android 6.0; Nexus 5 Build/MRA58N) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/49.0.2623.105 Mobile Safari/537.36",
+            (char *)(arg ? arg : "https://m.youtube.com/"),
             NULL,
         };
         char **argv = arg ? argv_def : argv_noarg;
@@ -3196,6 +3222,7 @@ static void launch_desktop_app_arg(const char *path, const char *name,
             "WEBKIT_EXEC_PATH=/libexec/webkit2gtk-4.1",
             "WEBKIT_INJECTED_BUNDLE_PATH=/lib/webkit2gtk-4.1/injected-bundle",
             "WEBKIT_DISABLE_NETWORK_CACHE=1",
+            "WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS=1",
             "WEBKIT_DISABLE_COMPOSITING_MODE=1",
             "WEBKIT_XV6_DISABLE_COMPOSITING_UPDATE=1",
             "EPOXY_XV6_ALLOW_MISSING=1",
@@ -3238,15 +3265,14 @@ static void launch_desktop_app_arg(const char *path, const char *name,
             "WEBKIT_EXEC_PATH=/libexec/webkit2gtk-4.1",
             "WEBKIT_INJECTED_BUNDLE_PATH=/lib/webkit2gtk-4.1/injected-bundle",
             "WEBKIT_DISABLE_NETWORK_CACHE=1",
-            "WEBKIT_DISABLE_COMPOSITING_MODE=1",
-            "WEBKIT_XV6_DISABLE_COMPOSITING_UPDATE=1",
-            "SOUP_FORCE_HTTP1=1",
+            "WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS=1",
             "LIBGL_ALWAYS_SOFTWARE=0",
             "MESA_LOADER_DRIVER_OVERRIDE=virpipe",
             "GALLIUM_DRIVER=virpipe",
             "ANGLE_DEFAULT_PLATFORM=gl",
+            "SOUP_FORCE_HTTP1=1",
             "EPOXY_XV6_ALLOW_MISSING=1",
-            "WEBKIT_XV6_SKIP_RULE_FEATURES=1",
+            "WEBKIT_XV6_DISABLE_BCG_SWITCH=1",
             "JSC_useJIT=0",
             "JSC_useBaselineJIT=0",
             "JSC_useDFGJIT=0",
@@ -3283,11 +3309,19 @@ static void launch_desktop_app_arg(const char *path, const char *name,
         if (is_webkit) {
             int accel = cmdline_flag_enabled("webkit_accel");
             int js = cmdline_int_value("webkit_js", 1) != 0;
+            int youtube = is_minibrowser && arg &&
+                          strstr(arg, "youtube.com") != NULL;
+            int youtube_mobile = youtube &&
+                                 strstr(arg, "m.youtube.com") != NULL;
 
             if (is_minibrowser) {
                 if (accel)
-                    argv = js ? argv_minibrowser_accel_js :
-                                argv_minibrowser_accel;
+                    argv = youtube && js ?
+                            (youtube_mobile ?
+                                 argv_minibrowser_youtube_mobile_accel :
+                                 argv_minibrowser_youtube_desktop_accel) :
+                            js ? argv_minibrowser_accel_js :
+                                 argv_minibrowser_accel;
                 else
                     argv = js ? argv_minibrowser_js : argv_minibrowser;
             }
