@@ -1,17 +1,12 @@
 # WebKitGTK xv6 Source Overrides
 
-`webkitgtk-2.42.5/` contains the xv6 source overrides needed to reproduce the
-repo-staged WebKitGTK runtime from a clean WebKitGTK 2.42.5 tree.
+This directory is intentionally empty.
 
-The overrides cover the xv6 IPC/shared-memory assumptions, surfaceless EGL
-fallback, WebKit GTK accelerated-compositing guards, and the small runtime
-feature gates used by the current Wayland/WebKit smoke tests.  Apply them before
-building WebKitGTK for the xv6 sysroot:
+The xv6 port no longer carries WebKitGTK 2.42.5 source override files, and
+`ports/webkit/apply-xv6-overrides.sh` is now a no-op validator. New WebKit work
+should prefer fixing xv6 kernel, driver, Wayland, libc, or port-runtime behavior
+instead of patching WebKitGTK source.
 
-```sh
-ports/webkit/apply-xv6-overrides.sh /path/to/webkitgtk-2.42.5
-```
-
-Keep this directory narrow: do not add temporary diagnostics or build products
-here.  If a clean rebuild exposes another xv6 behavior gap, land it as a source
-override and refresh the staged runtime.
+If a future clean upstream WebKitGTK rebuild exposes an unavoidable compatibility
+delta, document the kernel-side gap first and keep any temporary patch series out
+of this directory until it is intentionally reviewed.
