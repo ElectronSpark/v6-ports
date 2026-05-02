@@ -117,6 +117,8 @@ struct app_state {
     int resize_every;
     int width;
     int height;
+    int pending_width;
+    int pending_height;
     int loop;
     int sphere_demo;
     int sphere_vertex_count;
@@ -729,15 +731,18 @@ static int recreate_mesa_surface(struct app_state *app)
     return 0;
 }
 
-static int resize_surface_and_buffer(struct app_state *app)
+static int resize_surface_and_buffer_to(struct app_state *app, int width,
+                                        int height)
 {
-    if (app->width == WINDOW_W) {
-        app->width = 360;
-        app->height = 260;
-    } else {
-        app->width = WINDOW_W;
-        app->height = WINDOW_H;
-    }
+    if (width < 200)
+        width = 200;
+    if (height < 150)
+        height = 150;
+    if (width == app->width && height == app->height)
+        return 0;
+
+    app->width = width;
+    app->height = height;
 
     destroy_present_buffer(app);
     if (init_present_buffer(app) < 0)
@@ -745,6 +750,13 @@ static int resize_surface_and_buffer(struct app_state *app)
     if (recreate_mesa_surface(app) < 0)
         return -1;
     return 0;
+}
+
+static int resize_surface_and_buffer(struct app_state *app)
+{
+    if (app->width == WINDOW_W)
+        return resize_surface_and_buffer_to(app, 360, 260);
+    return resize_surface_and_buffer_to(app, WINDOW_W, WINDOW_H);
 }
 
 static void render_frame(struct app_state *app)
@@ -910,8 +922,19 @@ static void xdg_surface_configure(void *data, struct xdg_surface *surface,
     struct app_state *app = data;
 
     xdg_surface_ack_configure(surface, serial);
+    if (app->pending_width > 0 && app->pending_height > 0) {
+        if (resize_surface_and_buffer_to(app, app->pending_width,
+                                         app->pending_height) < 0) {
+            app->running = 0;
+            return;
+        }
+        app->pending_width = 0;
+        app->pending_height = 0;
+    }
     if (!app->configured) {
         app->configured = 1;
+        draw_and_commit(app);
+    } else if (!app->frame_cb) {
         draw_and_commit(app);
     }
 }
@@ -924,11 +947,14 @@ static void toplevel_configure(void *data, struct xdg_toplevel *toplevel,
                                int32_t width, int32_t height,
                                struct wl_array *states)
 {
-    (void)data;
+    struct app_state *app = data;
     (void)toplevel;
-    (void)width;
-    (void)height;
     (void)states;
+
+    if (width > 0 && height > 0) {
+        app->pending_width = width;
+        app->pending_height = height;
+    }
 }
 
 static void toplevel_close(void *data, struct xdg_toplevel *toplevel)

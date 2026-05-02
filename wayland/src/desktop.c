@@ -254,7 +254,7 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
         char *argv_minibrowser_accel_js[] = {
             (char *)name,
             "--enable-sandbox=false",
-            "--enable-webgl=false",
+            "--enable-webgl=true",
             "--enable-webaudio=false",
             "--enable-mediasource=false",
             "--enable-media-stream=false",
@@ -275,28 +275,6 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             "--enable-dns-prefetching=false",
             "--enable-offline-web-application-cache=false",
             (char *)(arg1 ? arg1 : "https://www.google.com/"),
-            NULL,
-        };
-        char *argv_minibrowser_youtube_desktop_accel[] = {
-            (char *)name,
-            "--enable-sandbox=false",
-            "--enable-webgl=true",
-            "--enable-page-cache=false",
-            "--enable-dns-prefetching=false",
-            "--enable-offline-web-application-cache=false",
-            "--user-agent=Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-            (char *)(arg1 ? arg1 : "https://www.youtube.com/?app=desktop&persist_app=1"),
-            NULL,
-        };
-        char *argv_minibrowser_youtube_mobile_accel[] = {
-            (char *)name,
-            "--enable-sandbox=false",
-            "--enable-webgl=true",
-            "--enable-page-cache=false",
-            "--enable-dns-prefetching=false",
-            "--enable-offline-web-application-cache=false",
-            "--user-agent=Mozilla/5.0 (Linux; Android 6.0; Nexus 5 Build/MRA58N) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/49.0.2623.105 Mobile Safari/537.36",
-            (char *)(arg1 ? arg1 : "https://m.youtube.com/"),
             NULL,
         };
         char *envp_default[] = {
@@ -380,16 +358,9 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             "EGL_PLATFORM=wayland",
             "MESA_LOADER_DRIVER_OVERRIDE=virtio_gpu",
             "GALLIUM_DRIVER=virgl",
-            "LIBGL_DEBUG=verbose",
-            "EGL_LOG_LEVEL=debug",
-            "XV6_VIRGL_DEBUG=1",
             "ANGLE_DEFAULT_PLATFORM=gl",
             "WEBKIT_XV6_DISABLE_BCG_SWITCH=1",
-            "WEBKIT_XV6_TRACE_PAINT=1",
-            "WEBKIT_XV6_SYNC_PAINT=1",
-            "WEBKIT_XV6_DISABLE_COMPOSITING_UPDATE=1",
             "WEBKIT_XV6_SKIP_RULE_FEATURES=1",
-            "WEBKIT_XV6_SKIP_INITIAL_EMPTY_RENDER=1",
             "SOUP_FORCE_HTTP1=1",
             "EPOXY_XV6_ALLOW_MISSING=1",
             "JSC_useJIT=0",
@@ -423,19 +394,12 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             "EGL_PLATFORM=wayland",
             "MESA_LOADER_DRIVER_OVERRIDE=virtio_gpu",
             "GALLIUM_DRIVER=virgl",
-            "LIBGL_DEBUG=verbose",
-            "EGL_LOG_LEVEL=debug",
-            "XV6_VIRGL_DEBUG=1",
             NULL
         };
         int minibrowser_accel =
             is_minibrowser && webkit_accel_enabled_by_cmdline();
         int minibrowser_js =
             is_minibrowser && !webkit_js_disabled_by_cmdline();
-        int minibrowser_youtube =
-            is_minibrowser && arg1 && strstr(arg1, "youtube.com") != NULL;
-        int minibrowser_youtube_mobile =
-            minibrowser_youtube && strstr(arg1, "m.youtube.com") != NULL;
         int minibrowser_webgl_smoke =
             is_minibrowser && webkit_webgl_smoke_enabled_by_cmdline();
         int webkit_accel =
@@ -446,11 +410,7 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
         execve(path,
                is_minibrowser ?
                     (minibrowser_accel ?
-                         (minibrowser_youtube && minibrowser_js ?
-                              (minibrowser_youtube_mobile ?
-                                   argv_minibrowser_youtube_mobile_accel :
-                                   argv_minibrowser_youtube_desktop_accel) :
-                          minibrowser_js ?
+                         (minibrowser_js ?
                               (minibrowser_webgl_smoke ?
                                    argv_minibrowser_accel_webgl_js :
                                    argv_minibrowser_accel_js) :

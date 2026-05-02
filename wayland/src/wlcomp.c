@@ -3627,7 +3627,7 @@ static void launch_desktop_app_arg(const char *path, const char *name,
         char *argv_minibrowser_accel_js[] = {
             (char *)name,
             "--enable-sandbox=false",
-            "--enable-webgl=false",
+            "--enable-webgl=true",
             "--enable-webaudio=false",
             "--enable-mediasource=false",
             "--enable-media-stream=false",
@@ -3635,28 +3635,6 @@ static void launch_desktop_app_arg(const char *path, const char *name,
             "--enable-dns-prefetching=false",
             "--enable-offline-web-application-cache=false",
             (char *)(arg ? arg : "https://www.google.com/"),
-            NULL,
-        };
-        char *argv_minibrowser_youtube_desktop_accel[] = {
-            (char *)name,
-            "--enable-sandbox=false",
-            "--enable-webgl=true",
-            "--enable-page-cache=false",
-            "--enable-dns-prefetching=false",
-            "--enable-offline-web-application-cache=false",
-            "--user-agent=Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-            (char *)(arg ? arg : "https://www.youtube.com/?app=desktop&persist_app=1"),
-            NULL,
-        };
-        char *argv_minibrowser_youtube_mobile_accel[] = {
-            (char *)name,
-            "--enable-sandbox=false",
-            "--enable-webgl=true",
-            "--enable-page-cache=false",
-            "--enable-dns-prefetching=false",
-            "--enable-offline-web-application-cache=false",
-            "--user-agent=Mozilla/5.0 (Linux; Android 6.0; Nexus 5 Build/MRA58N) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/49.0.2623.105 Mobile Safari/537.36",
-            (char *)(arg ? arg : "https://m.youtube.com/"),
             NULL,
         };
         char **argv = arg ? argv_def : argv_noarg;
@@ -3782,18 +3760,9 @@ static void launch_desktop_app_arg(const char *path, const char *name,
         if (is_webkit) {
             int accel = cmdline_flag_enabled("webkit_accel");
             int js = cmdline_int_value("webkit_js", 1) != 0;
-            int youtube = is_minibrowser && arg &&
-                          strstr(arg, "youtube.com") != NULL;
-            int youtube_mobile = youtube &&
-                                 strstr(arg, "m.youtube.com") != NULL;
-
             if (is_minibrowser) {
                 if (accel)
-                    argv = youtube && js ?
-                            (youtube_mobile ?
-                                 argv_minibrowser_youtube_mobile_accel :
-                                 argv_minibrowser_youtube_desktop_accel) :
-                            js ? argv_minibrowser_accel_js :
+                    argv = js ? argv_minibrowser_accel_js :
                                  argv_minibrowser_accel;
                 else
                     argv = js ? argv_minibrowser_js : argv_minibrowser;
@@ -4322,6 +4291,48 @@ static int surface_close_hit(const struct wlcomp_surface *surf, int mx, int my)
                my < surf->y + gy + close_h;
     }
     return 0;
+}
+
+static uint32_t surface_demo_resize_edges(const struct wlcomp_surface *surf,
+                                          int mx, int my)
+{
+    int32_t gx, gy, gw, gh;
+    int frame_x, frame_y, frame_w, frame_h;
+    uint32_t edges = 0;
+    const int grip = 10;
+
+    if (!surface_is_demo_window(surf))
+        return 0;
+
+    surface_window_geometry(surf, &gx, &gy, &gw, &gh);
+    frame_x = surf->x - WAYLAND_DEMO_BORDER;
+    frame_y = surf->y - WAYLAND_DEMO_TITLE_H - WAYLAND_DEMO_BORDER;
+    frame_w = gw + WAYLAND_DEMO_BORDER * 2;
+    frame_h = gh + WAYLAND_DEMO_TITLE_H + WAYLAND_DEMO_BORDER * 2;
+
+    if (mx >= frame_x + frame_w - grip && mx < frame_x + frame_w)
+        edges |= 8; /* XDG_TOPLEVEL_RESIZE_EDGE_RIGHT */
+    if (my >= frame_y + frame_h - grip && my < frame_y + frame_h)
+        edges |= 2; /* XDG_TOPLEVEL_RESIZE_EDGE_BOTTOM */
+    return edges;
+}
+
+static int surface_demo_title_hit(const struct wlcomp_surface *surf,
+                                  int mx, int my)
+{
+    int32_t gx, gy, gw, gh;
+    int frame_x, frame_y, frame_w;
+
+    if (!surface_is_demo_window(surf))
+        return 0;
+
+    surface_window_geometry(surf, &gx, &gy, &gw, &gh);
+    frame_x = surf->x - WAYLAND_DEMO_BORDER;
+    frame_y = surf->y - WAYLAND_DEMO_TITLE_H - WAYLAND_DEMO_BORDER;
+    frame_w = gw + WAYLAND_DEMO_BORDER * 2;
+    return mx >= frame_x && mx < frame_x + frame_w &&
+           my >= frame_y && my < frame_y + WAYLAND_DEMO_TITLE_H +
+                                  WAYLAND_DEMO_BORDER * 2;
 }
 
 /* Draw the bottom taskbar */
@@ -7017,6 +7028,38 @@ static void process_mouse(void)
             destroy_surface_client(target);
             target = NULL;
             desktop_handled = 1;
+        } else if (target && surface_is_demo_window(target)) {
+            uint32_t edges = surface_demo_resize_edges(target, g_cursor_x,
+                                                       g_cursor_y);
+
+            damage_surface(target);
+            g_iwin_focus = -1;
+            surface_raise_to_top(target);
+            surface_set_keyboard_focus(target);
+            if (edges != 0) {
+                g_grab_surface = target;
+                g_grab_mode = 2;
+                g_grab_edges = edges;
+                g_grab_start_mx = g_cursor_x;
+                g_grab_start_my = g_cursor_y;
+                g_grab_start_x = target->x;
+                g_grab_start_y = target->y;
+                g_grab_start_w = target->committed_buf ?
+                                 target->committed_buf->width : 200;
+                g_grab_start_h = target->committed_buf ?
+                                 target->committed_buf->height : 200;
+                desktop_handled = 1;
+            } else if (surface_demo_title_hit(target, g_cursor_x,
+                                              g_cursor_y)) {
+                g_grab_surface = target;
+                g_grab_mode = 1;
+                g_grab_start_mx = g_cursor_x;
+                g_grab_start_my = g_cursor_y;
+                g_grab_start_x = target->x;
+                g_grab_start_y = target->y;
+                desktop_handled = 1;
+            }
+            damage_surface(target);
         } else if (target) {
             /* Clicking on Wayland surface — unfocus internal windows */
             damage_surface(target);
