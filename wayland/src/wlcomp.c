@@ -56,6 +56,7 @@
 #ifndef DRM_FORMAT_MOD_LINEAR
 #define DRM_FORMAT_MOD_LINEAR 0
 #endif
+#define WLCOMP_INVALID_FORMAT UINT32_MAX
 #define FB_GPU_BO_F_EXPORTABLE 0x1
 #define MAX_DAMAGE_RECTS     32
 
@@ -526,6 +527,7 @@ static struct wl_global *g_output_global;
 static struct wl_global *g_xdg_wm_global;
 static struct wl_global *g_xv6_gpu_global;
 static struct wl_global *g_dmabuf_global;
+static struct wl_global *g_subcompositor_global;
 
 /* ══════════════════════════════════════════════════════════════════════
  *  Surface / window tracking
@@ -551,6 +553,7 @@ struct wlcomp_buffer {
     int32_t             height;
     int32_t             stride;
     uint32_t            format;
+    int                 y_inverted;
 };
 
 struct wlcomp_surface {
@@ -566,7 +569,13 @@ struct wlcomp_surface {
     int     mapped;
     int     minimized;
     int     maximized;        /* 1 = currently maximized */
+    int     xdg_initial_configure_sent;
+    int32_t pending_configure_w, pending_configure_h;
     int     is_cursor;        /* 1 = cursor surface, skip normal rendering */
+    int     is_subsurface;
+    int32_t sub_x, sub_y;
+    struct wlcomp_surface *parent;
+    struct wl_resource *subsurface;
     pid_t   client_pid;       /* pid from Wayland credentials, if known */
     int     has_window_geometry;
     int32_t window_x, window_y, window_w, window_h;
@@ -574,6 +583,7 @@ struct wlcomp_surface {
     int32_t saved_x, saved_y, saved_w, saved_h;
     char    title[64];
     char    app_id[64];
+    uint32_t log_events;
     struct wl_list link;  /* in g_surfaces */
 };
 
@@ -584,6 +594,58 @@ static int g_kbd_enter_pending; /* deferred keyboard enter for g_kbd_focused */
 static int g_iwin_focus = -1;   /* index of focused internal window */
 
 static void surface_set_keyboard_focus(struct wlcomp_surface *surf);
+
+static void surface_log_limited(struct wlcomp_surface *surf,
+                                const char *event,
+                                struct wlcomp_buffer *buf)
+{
+    if (!surf || surf->log_events >= 48)
+        return;
+    surf->log_events++;
+    fprintf(stderr,
+            "wlcomp: surface %s pid=%d sub=%d mapped=%d xdg=%d top=%d "
+            "buf=%p size=%dx%d gpu=%d pending=%d committed=%d\n",
+            event, surf->client_pid, surf->is_subsurface, surf->mapped,
+            surf->xdg_surface != NULL, surf->xdg_toplevel != NULL,
+            (void *)buf,
+            buf ? buf->width : 0,
+            buf ? buf->height : 0,
+            buf ? buf->is_gpu_bo : 0,
+            surf->has_pending_buffer,
+            surf->committed_buf != NULL);
+}
+
+static void xdg_surface_send_initial_configure_if_needed(struct wlcomp_surface *surf)
+{
+    struct wl_array states;
+    uint32_t *s;
+    int32_t def_w, def_h;
+
+    if (!surf || !surf->xdg_surface || !surf->xdg_toplevel ||
+        surf->xdg_initial_configure_sent)
+        return;
+
+    def_w = surf->pending_configure_w > 0 ? surf->pending_configure_w :
+        (int32_t)g_fb_w * 4 / 5;
+    def_h = surf->pending_configure_h > 0 ? surf->pending_configure_h :
+        ((int32_t)g_fb_h - TASKBAR_H) * 4 / 5;
+    if (def_w < 400) def_w = (int32_t)g_fb_w;
+    if (def_h < 300) def_h = (int32_t)g_fb_h - TASKBAR_H;
+
+    wl_array_init(&states);
+    s = wl_array_add(&states, sizeof(uint32_t));
+    if (s)
+        *s = XDG_TOPLEVEL_STATE_ACTIVATED;
+
+    xdg_toplevel_send_configure(surf->xdg_toplevel, def_w, def_h, &states);
+    wl_array_release(&states);
+    xdg_surface_send_configure(surf->xdg_surface, ++g_serial);
+    surf->xdg_initial_configure_sent = 1;
+
+    fprintf(stderr,
+            "wlcomp: xdg initial configure pid=%d serial=%u size=%dx%d\n",
+            surf->client_pid, g_serial, def_w, def_h);
+}
 
 /* Client cursor state */
 static struct wlcomp_surface *g_cursor_surface;   /* client-provided cursor */
@@ -629,6 +691,42 @@ static void damage_all_frame_callbacks(uint32_t now)
 static struct wlcomp_surface *surface_from_resource(struct wl_resource *r)
 {
     return (struct wlcomp_surface *)wl_resource_get_user_data(r);
+}
+
+static struct wlcomp_surface *surface_root(struct wlcomp_surface *surf)
+{
+    while (surf && surf->parent)
+        surf = surf->parent;
+    return surf;
+}
+
+static int surface_tree_visible(const struct wlcomp_surface *surf)
+{
+    while (surf) {
+        if (!surf->mapped || surf->minimized)
+            return 0;
+        surf = surf->parent;
+    }
+    return 1;
+}
+
+static void surface_absolute_position(const struct wlcomp_surface *surf,
+                                      int32_t *x, int32_t *y)
+{
+    if (!surf) {
+        *x = 0;
+        *y = 0;
+        return;
+    }
+    if (surf->parent) {
+        int32_t px, py;
+        surface_absolute_position(surf->parent, &px, &py);
+        *x = px + surf->sub_x;
+        *y = py + surf->sub_y;
+    } else {
+        *x = surf->x;
+        *y = surf->y;
+    }
 }
 
 static inline uint32_t buffer_pixel_alpha(struct wlcomp_buffer *buf,
@@ -699,25 +797,38 @@ static void surface_window_geometry(const struct wlcomp_surface *s,
     }
 }
 
-static void damage_surface(const struct wlcomp_surface *s)
+static void damage_surface_self(const struct wlcomp_surface *s)
 {
     int32_t gx, gy, gw, gh;
+    int32_t ax, ay;
     struct wlcomp_buffer *buf;
     int frame_top = 0;
     int frame_border = 0;
 
-    if (!s || !s->mapped || s->minimized || !s->committed_buf)
+    if (!s || !surface_tree_visible(s) || !s->committed_buf)
         return;
 
     buf = s->committed_buf;
     surface_window_geometry(s, &gx, &gy, &gw, &gh);
+    surface_absolute_position(s, &ax, &ay);
     if (surface_is_demo_window(s)) {
         frame_top = WAYLAND_DEMO_TITLE_H;
         frame_border = WAYLAND_DEMO_BORDER;
     }
     (void)buf;
-    damage_rect(s->x - frame_border, s->y - frame_top - frame_border,
+    damage_rect(ax - frame_border, ay - frame_top - frame_border,
                 gw + frame_border * 2, gh + frame_top + frame_border * 2);
+}
+
+static void damage_surface(const struct wlcomp_surface *s)
+{
+    struct wlcomp_surface *child;
+
+    damage_surface_self(s);
+    wl_list_for_each(child, &g_surfaces, link) {
+        if (child->parent == s)
+            damage_surface(child);
+    }
 }
 
 static void cursor_bounds_at(int32_t cx, int32_t cy,
@@ -744,6 +855,7 @@ static void damage_cursor_at(int32_t cx, int32_t cy)
 
 static void surface_raise_to_top(struct wlcomp_surface *surf)
 {
+    surf = surface_root(surf);
     if (!surf)
         return;
 
@@ -762,24 +874,26 @@ static struct wlcomp_surface *surface_at(int32_t px, int32_t py,
     struct wlcomp_surface *s;
     /* Walk reversed (top first). Topmost surfaces live at the list tail. */
     wl_list_for_each_reverse(s, &g_surfaces, link) {
-        if (!s->mapped || s->minimized || !s->committed_buf || s->is_cursor)
+        if (!surface_tree_visible(s) || !s->committed_buf || s->is_cursor)
             continue;
         int32_t gx, gy, gw, gh;
+        int32_t ax, ay;
         int32_t draw_x, draw_y;
         surface_window_geometry(s, &gx, &gy, &gw, &gh);
-        draw_x = s->x - gx;
-        draw_y = s->y - gy;
+        surface_absolute_position(s, &ax, &ay);
+        draw_x = ax - gx;
+        draw_y = ay - gy;
         if (surface_is_demo_window(s)) {
-            int frame_x = s->x - WAYLAND_DEMO_BORDER;
-            int frame_y = s->y - WAYLAND_DEMO_TITLE_H - WAYLAND_DEMO_BORDER;
+            int frame_x = ax - WAYLAND_DEMO_BORDER;
+            int frame_y = ay - WAYLAND_DEMO_TITLE_H - WAYLAND_DEMO_BORDER;
             int frame_w = gw + WAYLAND_DEMO_BORDER * 2;
             int frame_h = gh + WAYLAND_DEMO_TITLE_H + WAYLAND_DEMO_BORDER * 2;
             if (px < frame_x || px >= frame_x + frame_w ||
                 py < frame_y || py >= frame_y + frame_h)
                 continue;
         } else {
-            if (px < s->x || px >= s->x + gw ||
-                py < s->y || py >= s->y + gh)
+            if (px < ax || px >= ax + gw ||
+                py < ay || py >= ay + gh)
                 continue;
         }
         if (sx) *sx = px - draw_x;
@@ -997,6 +1111,9 @@ static void pool_create_buffer(struct wl_client *client,
                                int32_t stride, uint32_t format)
 {
     struct wlcomp_shm_pool *pool = wl_resource_get_user_data(resource);
+    pid_t client_pid = 0;
+    uid_t client_uid = 0;
+    gid_t client_gid = 0;
 
     struct wlcomp_buffer *buf = calloc(1, sizeof(*buf));
     if (!buf) {
@@ -1023,6 +1140,10 @@ static void pool_create_buffer(struct wl_client *client,
     buf->resource = buf_res;
     wl_resource_set_implementation(buf_res, &buffer_impl, buf,
                                   buffer_destroy_handler);
+    wl_client_get_credentials(client, &client_pid, &client_uid, &client_gid);
+    fprintf(stderr,
+            "wlcomp: shm buffer pid=%d size=%dx%d stride=%d fmt=0x%x\n",
+            client_pid, width, height, stride, format);
 }
 
 static void pool_destroy(struct wl_client *client, struct wl_resource *resource)
@@ -1142,7 +1263,7 @@ static uint32_t dmabuf_format_to_wl(uint32_t format)
         return WL_SHM_FORMAT_ARGB8888;
     if (format == DRM_FORMAT_XRGB8888)
         return WL_SHM_FORMAT_XRGB8888;
-    return 0;
+    return WLCOMP_INVALID_FORMAT;
 }
 
 static void dmabuf_params_free(struct dmabuf_params *params)
@@ -1169,6 +1290,9 @@ static void dmabuf_buffer_import_common(struct wl_client *client,
     struct wl_resource *buf_res;
     uint32_t wl_format;
     uint64_t min_size;
+    pid_t client_pid = 0;
+    uid_t client_uid = 0;
+    gid_t client_gid = 0;
 
     if (!params || params->used) {
         wl_resource_post_error(params_res,
@@ -1191,8 +1315,14 @@ static void dmabuf_buffer_import_common(struct wl_client *client,
         return;
     }
     wl_format = dmabuf_format_to_wl(format);
-    if (wl_format == 0 || params->modifier != DRM_FORMAT_MOD_LINEAR ||
-        flags != 0) {
+    if (wl_format == WLCOMP_INVALID_FORMAT ||
+        params->modifier != DRM_FORMAT_MOD_LINEAR ||
+        (flags & ~ZWP_LINUX_BUFFER_PARAMS_V1_FLAGS_Y_INVERT) != 0) {
+        wl_client_get_credentials(client, &client_pid, &client_uid,
+                                  &client_gid);
+        fprintf(stderr,
+                "wlcomp: unsupported dmabuf pid=%d fmt=0x%x modifier=0x%lx flags=0x%x\n",
+                client_pid, format, (unsigned long)params->modifier, flags);
         wl_resource_post_error(params_res,
                                ZWP_LINUX_BUFFER_PARAMS_V1_ERROR_INVALID_FORMAT,
                                "unsupported dmabuf format/modifier/flags");
@@ -1251,6 +1381,7 @@ static void dmabuf_buffer_import_common(struct wl_client *client,
     buf->height = height;
     buf->stride = params->stride;
     buf->format = wl_format;
+    buf->y_inverted = (flags & ZWP_LINUX_BUFFER_PARAMS_V1_FLAGS_Y_INVERT) != 0;
 
     buf_res = wl_resource_create(client, &wl_buffer_interface, 1, buffer_id);
     if (!buf_res) {
@@ -1261,6 +1392,10 @@ static void dmabuf_buffer_import_common(struct wl_client *client,
     buf->resource = buf_res;
     wl_resource_set_implementation(buf_res, &buffer_impl, buf,
                                    buffer_destroy_handler);
+    wl_client_get_credentials(client, &client_pid, &client_uid, &client_gid);
+    fprintf(stderr,
+            "wlcomp: dmabuf buffer pid=%d size=%dx%d stride=%u fmt=0x%x flags=0x%x\n",
+            client_pid, width, height, params->stride, format, flags);
     if (!immediate)
         zwp_linux_buffer_params_v1_send_created(params_res, buf_res);
 }
@@ -1282,8 +1417,15 @@ static void dmabuf_params_add(struct wl_client *client,
                               uint32_t modifier_lo)
 {
     struct dmabuf_params *params = wl_resource_get_user_data(resource);
+    pid_t client_pid = 0;
+    uid_t client_uid = 0;
+    gid_t client_gid = 0;
 
     (void)client;
+    wl_client_get_credentials(client, &client_pid, &client_uid, &client_gid);
+    fprintf(stderr,
+            "wlcomp: dmabuf add pid=%d plane=%u stride=%u modifier=%08x:%08x fd=%d\n",
+            client_pid, plane_idx, stride, modifier_hi, modifier_lo, fd);
     if (!params || params->used) {
         if (fd >= 0)
             close(fd);
@@ -1353,6 +1495,119 @@ static void dmabuf_params_destroy_handler(struct wl_resource *resource)
     dmabuf_params_free(params);
 }
 
+struct dmabuf_feedback_entry {
+    uint32_t format;
+    uint32_t padding;
+    uint64_t modifier;
+};
+
+static void dmabuf_feedback_destroy(struct wl_client *client,
+                                    struct wl_resource *resource)
+{
+    (void)client;
+    wl_resource_destroy(resource);
+}
+
+static const struct zwp_linux_dmabuf_feedback_v1_interface
+dmabuf_feedback_impl = {
+    .destroy = dmabuf_feedback_destroy,
+};
+
+static int dmabuf_feedback_table_fd(uint32_t *size_out)
+{
+    static const struct dmabuf_feedback_entry entries[] = {
+        { DRM_FORMAT_ARGB8888, 0, DRM_FORMAT_MOD_LINEAR },
+        { DRM_FORMAT_XRGB8888, 0, DRM_FORMAT_MOD_LINEAR },
+    };
+    char path[] = "/tmp/wlcomp-dmabuf-feedback.XXXXXX";
+    int fd;
+    size_t off = 0;
+
+    fd = mkstemp(path);
+    if (fd < 0)
+        return -1;
+    unlink(path);
+
+    while (off < sizeof(entries)) {
+        ssize_t n = write(fd, (const char *)entries + off,
+                          sizeof(entries) - off);
+        if (n < 0) {
+            if (errno == EINTR)
+                continue;
+            close(fd);
+            return -1;
+        }
+        if (n == 0) {
+            close(fd);
+            errno = EIO;
+            return -1;
+        }
+        off += (size_t)n;
+    }
+    lseek(fd, 0, SEEK_SET);
+    *size_out = (uint32_t)sizeof(entries);
+    return fd;
+}
+
+static void dmabuf_feedback_device_array(struct wl_array *device)
+{
+    struct stat st;
+    dev_t dev;
+    dev_t *slot;
+
+    wl_array_init(device);
+    if (stat("/dev/dri/renderD128", &st) == 0)
+        dev = st.st_rdev;
+    else
+        dev = ((dev_t)226 << 20) | 128;
+
+    slot = wl_array_add(device, sizeof(dev));
+    if (slot)
+        *slot = dev;
+}
+
+static int dmabuf_feedback_send(struct wl_resource *feedback)
+{
+    struct wl_array device;
+    struct wl_array indices;
+    uint16_t *idx;
+    uint32_t table_size = 0;
+    int table_fd;
+
+    dmabuf_feedback_device_array(&device);
+    wl_array_init(&indices);
+    idx = wl_array_add(&indices, sizeof(uint16_t) * 2);
+    if (!idx || device.size == 0) {
+        wl_array_release(&indices);
+        wl_array_release(&device);
+        errno = ENOMEM;
+        return -1;
+    }
+    idx[0] = 0;
+    idx[1] = 1;
+
+    table_fd = dmabuf_feedback_table_fd(&table_size);
+    if (table_fd < 0) {
+        wl_array_release(&indices);
+        wl_array_release(&device);
+        return -1;
+    }
+
+    zwp_linux_dmabuf_feedback_v1_send_format_table(feedback, table_fd,
+                                                   table_size);
+    close(table_fd);
+    zwp_linux_dmabuf_feedback_v1_send_main_device(feedback, &device);
+    zwp_linux_dmabuf_feedback_v1_send_tranche_target_device(feedback, &device);
+    zwp_linux_dmabuf_feedback_v1_send_tranche_flags(feedback, 0);
+    zwp_linux_dmabuf_feedback_v1_send_tranche_formats(feedback, &indices);
+    zwp_linux_dmabuf_feedback_v1_send_tranche_done(feedback);
+    zwp_linux_dmabuf_feedback_v1_send_done(feedback);
+
+    wl_array_release(&indices);
+    wl_array_release(&device);
+    return 0;
+}
+
 static void dmabuf_destroy(struct wl_client *client,
                            struct wl_resource *resource)
 {
@@ -1385,15 +1640,33 @@ static void dmabuf_create_params(struct wl_client *client,
     }
     wl_resource_set_implementation(params_res, &dmabuf_params_impl, params,
                                    dmabuf_params_destroy_handler);
+    {
+        pid_t client_pid = 0;
+        uid_t client_uid = 0;
+        gid_t client_gid = 0;
+        wl_client_get_credentials(client, &client_pid, &client_uid,
+                                  &client_gid);
+        fprintf(stderr, "wlcomp: dmabuf create_params pid=%d id=%u\n",
+                client_pid, params_id);
+    }
 }
 
 static void dmabuf_get_default_feedback(struct wl_client *client,
                                         struct wl_resource *resource,
                                         uint32_t id)
 {
-    (void)client;
-    (void)id;
-    wl_resource_post_error(resource, 0, "dmabuf feedback unsupported");
+    struct wl_resource *feedback;
+    uint32_t version = wl_resource_get_version(resource);
+
+    feedback = wl_resource_create(client, &zwp_linux_dmabuf_feedback_v1_interface,
+                                  version, id);
+    if (!feedback) {
+        wl_client_post_no_memory(client);
+        return;
+    }
+    wl_resource_set_implementation(feedback, &dmabuf_feedback_impl, NULL, NULL);
+    if (dmabuf_feedback_send(feedback) < 0)
+        wl_resource_post_no_memory(resource);
 }
 
 static void dmabuf_get_surface_feedback(struct wl_client *client,
@@ -1401,10 +1674,8 @@ static void dmabuf_get_surface_feedback(struct wl_client *client,
                                         uint32_t id,
                                         struct wl_resource *surface)
 {
-    (void)client;
-    (void)id;
     (void)surface;
-    wl_resource_post_error(resource, 0, "dmabuf feedback unsupported");
+    dmabuf_get_default_feedback(client, resource, id);
 }
 
 static const struct zwp_linux_dmabuf_v1_interface dmabuf_impl = {
@@ -1420,8 +1691,8 @@ static void dmabuf_bind(struct wl_client *client, void *data,
     struct wl_resource *res;
 
     (void)data;
-    if (version > 3)
-        version = 3;
+    if (version > 4)
+        version = 4;
     res = wl_resource_create(client, &zwp_linux_dmabuf_v1_interface,
                              version, id);
     if (!res) {
@@ -1554,6 +1825,16 @@ static void xv6_gpu_create_buffer_common(struct wl_client *client,
     buf->resource = buf_res;
     wl_resource_set_implementation(buf_res, &buffer_impl, buf,
                                    buffer_destroy_handler);
+    {
+        pid_t client_pid = 0;
+        uid_t client_uid = 0;
+        gid_t client_gid = 0;
+        wl_client_get_credentials(client, &client_pid, &client_uid,
+                                  &client_gid);
+        fprintf(stderr,
+                "wlcomp: xv6gpu buffer pid=%d size=%dx%d stride=%d fmt=0x%x handle=%u\n",
+                client_pid, width, height, stride, format, handle);
+    }
 }
 
 static void xv6_gpu_create_buffer(struct wl_client *client,
@@ -1632,6 +1913,7 @@ static void surface_attach(struct wl_client *client, struct wl_resource *resourc
         surf->pending_buf = NULL;
     }
     surf->has_pending_buffer = 1;
+    surface_log_limited(surf, "attach", surf->pending_buf);
 
     if (old_pending && old_pending != surf->pending_buf)
         buffer_maybe_free(old_pending);
@@ -1658,6 +1940,7 @@ static void surface_frame(struct wl_client *client, struct wl_resource *resource
     }
     /* Store the latest frame callback; we'll fire it after compositing */
     surf->frame_cb = cb;
+    surface_log_limited(surf, "frame", surf->committed_buf);
 }
 
 static void surface_set_opaque_region(struct wl_client *client,
@@ -1686,6 +1969,7 @@ static void surface_commit(struct wl_client *client, struct wl_resource *resourc
     if (!surf) return;
 
     if (surf->has_pending_buffer) {
+        surface_log_limited(surf, "commit-pending", surf->pending_buf);
         old_committed = surf->committed_buf;
         old_buffer_released = surf->buffer_released;
         if (old_committed) {
@@ -1710,6 +1994,11 @@ static void surface_commit(struct wl_client *client, struct wl_resource *resourc
 
         surf->buffer_released = 0;
     }
+    else
+        surface_log_limited(surf, "commit-empty", surf->committed_buf);
+
+    if (!surf->has_pending_buffer && !surf->committed_buf)
+        xdg_surface_send_initial_configure_if_needed(surf);
 
     if (surf->committed_buf && surf->xdg_toplevel && !surf->mapped) {
         /* Center the logical xdg window, not any buffer margins. */
@@ -1723,6 +2012,11 @@ static void surface_commit(struct wl_client *client, struct wl_resource *resourc
         if (surf->y < 0) surf->y = 0;
         surf->mapped = 1;
         first_map = 1;
+        fprintf(stderr, "wlcomp: mapped toplevel pid=%d size=%dx%d geom=%dx%d\n",
+                surf->client_pid,
+                surf->committed_buf ? surf->committed_buf->width : 0,
+                surf->committed_buf ? surf->committed_buf->height : 0,
+                gw, gh);
 
         /*
          * A newly mapped Wayland toplevel is a foreground activation.  Clear
@@ -1733,6 +2027,18 @@ static void surface_commit(struct wl_client *client, struct wl_resource *resourc
         g_iwin_focus = -1;
         surface_raise_to_top(surf);
         surface_set_keyboard_focus(surf);
+    }
+
+    if (surf->committed_buf && surf->is_subsurface && surf->parent &&
+        !surf->mapped) {
+        surf->mapped = 1;
+        first_map = 1;
+        fprintf(stderr,
+                "wlcomp: mapped subsurface pid=%d parent_pid=%d pos=%d,%d size=%dx%d\n",
+                surf->client_pid,
+                surf->parent ? surf->parent->client_pid : 0,
+                surf->sub_x, surf->sub_y,
+                surf->committed_buf->width, surf->committed_buf->height);
     }
 
     if (first_map || buffer_size_changed)
@@ -1790,8 +2096,16 @@ static void surface_destroy_handler(struct wl_resource *resource)
     if (surf) {
         struct wlcomp_buffer *pending_buf = surf->pending_buf;
         struct wlcomp_buffer *committed_buf = surf->committed_buf;
+        struct wlcomp_surface *child;
 
         damage_surface(surf);
+        wl_list_for_each(child, &g_surfaces, link) {
+            if (child->parent == surf) {
+                child->parent = NULL;
+                child->is_subsurface = 0;
+                child->mapped = 0;
+            }
+        }
         if (g_focused == surf)
             g_focused = NULL;
         if (g_kbd_focused == surf)
@@ -1802,6 +2116,8 @@ static void surface_destroy_handler(struct wl_resource *resource)
             g_grab_surface = NULL;
             g_grab_mode = 0;
         }
+        if (surf->subsurface)
+            wl_resource_set_user_data(surf->subsurface, NULL);
         wl_list_remove(&surf->link);
         free(surf);
 
@@ -1868,6 +2184,8 @@ static void comp_create_surface(struct wl_client *client,
     wl_resource_set_implementation(res, &surface_impl, surf,
                                   surface_destroy_handler);
     wl_list_insert(g_surfaces.prev, &surf->link);
+    fprintf(stderr, "wlcomp: created surface pid=%d id=%u\n",
+            client_pid, id);
 }
 
 static void comp_create_region(struct wl_client *client,
@@ -1900,6 +2218,159 @@ static void compositor_bind(struct wl_client *client, void *data,
         return;
     }
     wl_resource_set_implementation(res, &compositor_impl, NULL, NULL);
+}
+
+/* wl_subcompositor / wl_subsurface
+ *
+ * WebKitGTK embeds page content in child Wayland surfaces.  wlcomp used to
+ * advertise only top-level surfaces, so those child buffers could be committed
+ * but never mapped or composited.
+ */
+
+static void subsurface_destroy(struct wl_client *client,
+                               struct wl_resource *resource)
+{
+    (void)client;
+    wl_resource_destroy(resource);
+}
+
+static void subsurface_set_position(struct wl_client *client,
+                                    struct wl_resource *resource,
+                                    int32_t x, int32_t y)
+{
+    (void)client;
+    struct wlcomp_surface *surf = surface_from_resource(resource);
+
+    if (!surf)
+        return;
+    damage_surface(surf);
+    surf->sub_x = x;
+    surf->sub_y = y;
+    damage_surface(surf);
+}
+
+static void subsurface_place_above(struct wl_client *client,
+                                   struct wl_resource *resource,
+                                   struct wl_resource *sibling_resource)
+{
+    (void)client;
+    struct wlcomp_surface *surf = surface_from_resource(resource);
+    struct wlcomp_surface *sibling = surface_from_resource(sibling_resource);
+
+    if (!surf || !sibling)
+        return;
+    wl_list_remove(&surf->link);
+    wl_list_insert(&sibling->link, &surf->link);
+    damage_surface(surf);
+}
+
+static void subsurface_place_below(struct wl_client *client,
+                                   struct wl_resource *resource,
+                                   struct wl_resource *sibling_resource)
+{
+    (void)client;
+    struct wlcomp_surface *surf = surface_from_resource(resource);
+    struct wlcomp_surface *sibling = surface_from_resource(sibling_resource);
+
+    if (!surf || !sibling)
+        return;
+    wl_list_remove(&surf->link);
+    wl_list_insert(sibling->link.prev, &surf->link);
+    damage_surface(surf);
+}
+
+static void subsurface_set_sync(struct wl_client *client,
+                                struct wl_resource *resource)
+{
+    (void)client;
+    (void)resource;
+}
+
+static void subsurface_set_desync(struct wl_client *client,
+                                  struct wl_resource *resource)
+{
+    (void)client;
+    (void)resource;
+}
+
+static const struct wl_subsurface_interface subsurface_impl = {
+    .destroy = subsurface_destroy,
+    .set_position = subsurface_set_position,
+    .place_above = subsurface_place_above,
+    .place_below = subsurface_place_below,
+    .set_sync = subsurface_set_sync,
+    .set_desync = subsurface_set_desync,
+};
+
+static void subsurface_destroy_handler(struct wl_resource *resource)
+{
+    struct wlcomp_surface *surf = surface_from_resource(resource);
+
+    if (!surf)
+        return;
+    damage_surface(surf);
+    surf->subsurface = NULL;
+    surf->is_subsurface = 0;
+    surf->parent = NULL;
+    surf->mapped = 0;
+    damage_full_reason(FULL_DAMAGE_CLIENT);
+}
+
+static void subcompositor_destroy(struct wl_client *client,
+                                  struct wl_resource *resource)
+{
+    (void)client;
+    wl_resource_destroy(resource);
+}
+
+static void subcompositor_get_subsurface(struct wl_client *client,
+                                         struct wl_resource *resource,
+                                         uint32_t id,
+                                         struct wl_resource *surface_resource,
+                                         struct wl_resource *parent_resource)
+{
+    struct wlcomp_surface *surf = surface_from_resource(surface_resource);
+    struct wlcomp_surface *parent = surface_from_resource(parent_resource);
+    struct wl_resource *sub;
+
+    if (!surf || !parent || surf == parent || surf->subsurface) {
+        wl_resource_post_error(resource, 0, "invalid subsurface request");
+        return;
+    }
+
+    sub = wl_resource_create(client, &wl_subsurface_interface, 1, id);
+    if (!sub) {
+        wl_client_post_no_memory(client);
+        return;
+    }
+
+    surf->is_subsurface = 1;
+    surf->parent = parent;
+    surf->subsurface = sub;
+    surf->sub_x = 0;
+    surf->sub_y = 0;
+    wl_resource_set_implementation(sub, &subsurface_impl, surf,
+                                   subsurface_destroy_handler);
+    fprintf(stderr, "wlcomp: assigned subsurface pid=%d parent_pid=%d\n",
+            surf->client_pid, parent->client_pid);
+}
+
+static const struct wl_subcompositor_interface subcompositor_impl = {
+    .destroy = subcompositor_destroy,
+    .get_subsurface = subcompositor_get_subsurface,
+};
+
+static void subcompositor_bind(struct wl_client *client, void *data,
+                               uint32_t version, uint32_t id)
+{
+    (void)data;
+    struct wl_resource *res = wl_resource_create(
+        client, &wl_subcompositor_interface, version, id);
+    if (!res) {
+        wl_client_post_no_memory(client);
+        return;
+    }
+    wl_resource_set_implementation(res, &subcompositor_impl, NULL, NULL);
 }
 
 /* ══════════════════════════════════════════════════════════════════════
@@ -2141,26 +2612,22 @@ static void xdg_surface_get_toplevel(struct wl_client *client,
     if (surf)
         surf->xdg_toplevel = tl;
 
-    /* Send configure: normal windowed size (not maximized) */
-    struct wl_array states;
-    wl_array_init(&states);
-    uint32_t *s;
-    s = wl_array_add(&states, sizeof(uint32_t));
-    *s = XDG_TOPLEVEL_STATE_ACTIVATED;
     /* Default to 80% of screen, capped to leave room for taskbar */
     int32_t def_w = (int32_t)g_fb_w * 4 / 5;
-    int32_t def_h = ((int32_t)g_fb_h - 36) * 4 / 5;
+    int32_t def_h = ((int32_t)g_fb_h - TASKBAR_H) * 4 / 5;
     if (def_w < 400) def_w = (int32_t)g_fb_w;
-    if (def_h < 300) def_h = (int32_t)g_fb_h - 36;
+    if (def_h < 300) def_h = (int32_t)g_fb_h - TASKBAR_H;
     if (surf) {
+        surf->pending_configure_w = def_w;
+        surf->pending_configure_h = def_h;
         surf->saved_w = def_w;
         surf->saved_h = def_h;
         surf->saved_x = ((int32_t)g_fb_w - def_w) / 2;
-        surf->saved_y = ((int32_t)g_fb_h - 36 - def_h) / 2;
+        surf->saved_y = ((int32_t)g_fb_h - TASKBAR_H - def_h) / 2;
     }
-    xdg_toplevel_send_configure(tl, def_w, def_h, &states);
-    wl_array_release(&states);
-    xdg_surface_send_configure(resource, ++g_serial);
+    fprintf(stderr,
+            "wlcomp: xdg toplevel pending initial configure pid=%d size=%dx%d\n",
+            surf ? surf->client_pid : 0, def_w, def_h);
 }
 
 /* xdg_popup — minimal implementation to avoid NULL proxy on client side */
@@ -2242,7 +2709,11 @@ static void xdg_surface_ack_configure(struct wl_client *c,
                                       struct wl_resource *r,
                                       uint32_t serial)
 {
-    (void)c; (void)r; (void)serial;
+    struct wlcomp_surface *surf = wl_resource_get_user_data(r);
+
+    (void)c;
+    fprintf(stderr, "wlcomp: xdg ack_configure pid=%d serial=%u\n",
+            surf ? surf->client_pid : 0, serial);
 }
 
 static const struct xdg_surface_interface xdg_surface_impl = {
@@ -3267,8 +3738,9 @@ static void launch_desktop_app_arg(const char *path, const char *name,
             "WEBKIT_DISABLE_NETWORK_CACHE=1",
             "WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS=1",
             "LIBGL_ALWAYS_SOFTWARE=0",
-            "MESA_LOADER_DRIVER_OVERRIDE=virpipe",
-            "GALLIUM_DRIVER=virpipe",
+            "EGL_PLATFORM=wayland",
+            "MESA_LOADER_DRIVER_OVERRIDE=virtio_gpu",
+            "GALLIUM_DRIVER=virgl",
             "ANGLE_DEFAULT_PLATFORM=gl",
             "SOUP_FORCE_HTTP1=1",
             "EPOXY_XV6_ALLOW_MISSING=1",
@@ -3301,8 +3773,9 @@ static void launch_desktop_app_arg(const char *path, const char *name,
             "XCURSOR_PATH=/share/icons",
             "XCURSOR_THEME=Adwaita",
             "LIBGL_ALWAYS_SOFTWARE=0",
-            "MESA_LOADER_DRIVER_OVERRIDE=virpipe",
-            "GALLIUM_DRIVER=virpipe",
+            "EGL_PLATFORM=wayland",
+            "MESA_LOADER_DRIVER_OVERRIDE=virtio_gpu",
+            "GALLIUM_DRIVER=virgl",
             NULL
         };
         char **envp = envp_default;
@@ -6223,7 +6696,7 @@ static void composite_and_flip(void)
     struct wlcomp_surface *surf;
     int acquire_blocked = 0;
     wl_list_for_each(surf, &g_surfaces, link) {
-        if (!surf->mapped || surf->minimized || !surf->committed_buf ||
+        if (!surface_tree_visible(surf) || !surf->committed_buf ||
             surf->is_cursor)
             continue;
 
@@ -6240,13 +6713,15 @@ static void composite_and_flip(void)
         int32_t bh = buf->height;
         int32_t src_stride_px = buf->stride / 4;
         int32_t gx, gy, gw, gh;
+        int32_t ax, ay;
         int32_t draw_x, draw_y;
         int32_t row0 = 0, row1 = bh;
         int32_t col0 = 0, col1 = bw;
 
         surface_window_geometry(surf, &gx, &gy, &gw, &gh);
-        draw_x = surf->x - gx;
-        draw_y = surf->y - gy;
+        surface_absolute_position(surf, &ax, &ay);
+        draw_x = ax - gx;
+        draw_y = ay - gy;
         if (surf->has_window_geometry) {
             row0 = gy < 0 ? 0 : gy;
             col0 = gx < 0 ? 0 : gx;
@@ -6261,8 +6736,8 @@ static void composite_and_flip(void)
         if (surface_is_demo_window(surf)) {
             int title_h = WAYLAND_DEMO_TITLE_H;
             int border = WAYLAND_DEMO_BORDER;
-            int frame_x = surf->x - border;
-            int frame_y = surf->y - title_h - border;
+            int frame_x = ax - border;
+            int frame_y = ay - title_h - border;
             int frame_w = gw + border * 2;
             int frame_h = gh + title_h + border * 2;
             int focused = surface_is_foreground(surf);
@@ -6298,12 +6773,13 @@ static void composite_and_flip(void)
 
         for (int32_t row = row0; row < row1; row++) {
             int32_t dy = draw_y + row;
+            int32_t src_row = buf->y_inverted ? (bh - 1 - row) : row;
             if (dy < 0 || dy >= (int32_t)g_fb_h) continue;
             for (int32_t col = col0; col < col1; col++) {
                 int32_t dx = draw_x + col;
                 if (dx < 0 || dx >= (int32_t)g_fb_w) continue;
                 blend_pixel(&g_fb_buf[dy * g_fb_w + dx], buf,
-                            src[row * src_stride_px + col]);
+                            src[src_row * src_stride_px + col]);
             }
         }
     }
@@ -6925,6 +7401,9 @@ int main(int argc, char **argv)
     /* Register globals */
     g_compositor_global = wl_global_create(g_display, &wl_compositor_interface,
                                            5, NULL, compositor_bind);
+    g_subcompositor_global = wl_global_create(g_display,
+                                              &wl_subcompositor_interface,
+                                              1, NULL, subcompositor_bind);
     g_shm_global = wl_global_create(g_display, &wl_shm_interface,
                                     1, NULL, shm_bind);
     g_seat_global = wl_global_create(g_display, &wl_seat_interface,
@@ -6940,7 +7419,7 @@ int main(int argc, char **argv)
                                         2, NULL, xv6_gpu_bind);
     g_dmabuf_global = wl_global_create(g_display,
                                        &zwp_linux_dmabuf_v1_interface,
-                                       3, NULL, dmabuf_bind);
+                                       4, NULL, dmabuf_bind);
 
     /* Add socket */
     if (wl_display_add_socket(g_display, "wayland-0") < 0) {

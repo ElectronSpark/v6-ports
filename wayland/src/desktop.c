@@ -41,6 +41,7 @@ static int webkit_js_disabled_by_cmdline(void);
 static int webkit_reopen_count_from_cmdline(void);
 static int webkit_timeout_ms_from_cmdline(int fallback);
 static int glsmoke_accel_enabled_by_cmdline(void);
+static int desktop_disabled_by_cmdline(void);
 
 static long long monotonic_ms(void)
 {
@@ -86,6 +87,7 @@ static pid_t launch_wlcomp(void)
             "HOME=/",
             "PATH=/bin:/usr/bin",
             "XDG_RUNTIME_DIR=/tmp",
+            "XV6_GUI_SESSION=1",
             NULL
         };
         execve("/bin/wlcomp", argv, envp);
@@ -152,18 +154,26 @@ static pid_t launch_http_smoke_server(void)
 static pid_t launch_client(const char *path, const char *name, const char *arg1,
                            const char *arg2, const char *arg3)
 {
+    int is_netsurf = strcmp(name, "netsurf") == 0;
+    int is_minibrowser = strcmp(name, "MiniBrowser") == 0;
+    int is_webkitgpusmoke = strcmp(name, "webkitgpusmoke") == 0;
+    int is_mesa_gl = strcmp(name, "mesawlegl") == 0 ||
+                     strcmp(name, "mesaglsmoke") == 0 ||
+                     strcmp(name, "mesaeglinfo") == 0;
+    int is_webkit = is_minibrowser || is_webkitgpusmoke;
+
+    if (is_netsurf || is_webkit) {
+        mkdir("/tmp/.cache", 0755);
+        mkdir("/tmp/.cache/fontconfig", 0755);
+        mkdir("/tmp/.local", 0755);
+        mkdir("/tmp/.local/share", 0755);
+        mkdir("/tmp/webkitgtk-4.1", 0755);
+    }
+    if (is_netsurf)
+        mkdir("/.netsurf", 0755);
+
     pid_t pid = fork();
     if (pid == 0) {
-        setpgid(0, 0);
-
-        int is_netsurf = strcmp(name, "netsurf") == 0;
-        int is_minibrowser = strcmp(name, "MiniBrowser") == 0;
-        int is_webkitgpusmoke = strcmp(name, "webkitgpusmoke") == 0;
-        int is_mesa_gl = strcmp(name, "mesawlegl") == 0 ||
-                         strcmp(name, "mesaglsmoke") == 0 ||
-                         strcmp(name, "mesaeglinfo") == 0;
-        int is_webkit = is_minibrowser || is_webkitgpusmoke;
-
         if (is_netsurf) {
             int logfd = open("/tmp/app_log.txt",
                              O_WRONLY | O_CREAT | O_TRUNC, 0644);
@@ -174,16 +184,7 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             }
         }
 
-        if (is_netsurf || is_webkit) {
-            mkdir("/tmp/.cache", 0755);
-            mkdir("/tmp/.cache/fontconfig", 0755);
-            mkdir("/tmp/.local", 0755);
-            mkdir("/tmp/.local/share", 0755);
-            mkdir("/tmp/webkitgtk-4.1", 0755);
-        }
-
         if (is_netsurf) {
-            mkdir("/.netsurf", 0755);
             int fd = open("/.netsurf/Choices",
                           O_WRONLY | O_CREAT | O_TRUNC, 0644);
             if (fd >= 0) {
@@ -254,6 +255,19 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             (char *)name,
             "--enable-sandbox=false",
             "--enable-webgl=false",
+            "--enable-webaudio=false",
+            "--enable-mediasource=false",
+            "--enable-media-stream=false",
+            "--enable-page-cache=false",
+            "--enable-dns-prefetching=false",
+            "--enable-offline-web-application-cache=false",
+            (char *)(arg1 ? arg1 : "https://www.google.com/"),
+            NULL,
+        };
+        char *argv_minibrowser_accel_webgl_js[] = {
+            (char *)name,
+            "--enable-sandbox=false",
+            "--enable-webgl=true",
             "--enable-webaudio=false",
             "--enable-mediasource=false",
             "--enable-media-stream=false",
@@ -363,10 +377,19 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             "WEBKIT_DISABLE_NETWORK_CACHE=1",
             "WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS=1",
             "LIBGL_ALWAYS_SOFTWARE=0",
-            "MESA_LOADER_DRIVER_OVERRIDE=virpipe",
-            "GALLIUM_DRIVER=virpipe",
+            "EGL_PLATFORM=wayland",
+            "MESA_LOADER_DRIVER_OVERRIDE=virtio_gpu",
+            "GALLIUM_DRIVER=virgl",
+            "LIBGL_DEBUG=verbose",
+            "EGL_LOG_LEVEL=debug",
+            "XV6_VIRGL_DEBUG=1",
             "ANGLE_DEFAULT_PLATFORM=gl",
             "WEBKIT_XV6_DISABLE_BCG_SWITCH=1",
+            "WEBKIT_XV6_TRACE_PAINT=1",
+            "WEBKIT_XV6_SYNC_PAINT=1",
+            "WEBKIT_XV6_DISABLE_COMPOSITING_UPDATE=1",
+            "WEBKIT_XV6_SKIP_RULE_FEATURES=1",
+            "WEBKIT_XV6_SKIP_INITIAL_EMPTY_RENDER=1",
             "SOUP_FORCE_HTTP1=1",
             "EPOXY_XV6_ALLOW_MISSING=1",
             "JSC_useJIT=0",
@@ -397,8 +420,12 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             "XCURSOR_PATH=/share/icons",
             "XCURSOR_THEME=Adwaita",
             "LIBGL_ALWAYS_SOFTWARE=0",
-            "MESA_LOADER_DRIVER_OVERRIDE=virpipe",
-            "GALLIUM_DRIVER=virpipe",
+            "EGL_PLATFORM=wayland",
+            "MESA_LOADER_DRIVER_OVERRIDE=virtio_gpu",
+            "GALLIUM_DRIVER=virgl",
+            "LIBGL_DEBUG=verbose",
+            "EGL_LOG_LEVEL=debug",
+            "XV6_VIRGL_DEBUG=1",
             NULL
         };
         int minibrowser_accel =
@@ -409,10 +436,13 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             is_minibrowser && arg1 && strstr(arg1, "youtube.com") != NULL;
         int minibrowser_youtube_mobile =
             minibrowser_youtube && strstr(arg1, "m.youtube.com") != NULL;
+        int minibrowser_webgl_smoke =
+            is_minibrowser && webkit_webgl_smoke_enabled_by_cmdline();
         int webkit_accel =
             (is_minibrowser && minibrowser_accel) || is_webkitgpusmoke;
         if (is_webkitgpusmoke)
             webkit_accel = 0;
+        errno = 0;
         execve(path,
                is_minibrowser ?
                     (minibrowser_accel ?
@@ -421,7 +451,9 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
                                    argv_minibrowser_youtube_mobile_accel :
                                    argv_minibrowser_youtube_desktop_accel) :
                           minibrowser_js ?
-                              argv_minibrowser_accel_js :
+                              (minibrowser_webgl_smoke ?
+                                   argv_minibrowser_accel_webgl_js :
+                                   argv_minibrowser_accel_js) :
                               argv_minibrowser_accel) :
                          (minibrowser_js ?
                               argv_minibrowser_js :
@@ -431,6 +463,8 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
                     (webkit_accel ? envp_minibrowser_accel : envp_minibrowser) :
                     (is_mesa_gl && glsmoke_accel_enabled_by_cmdline() ?
                          envp_mesa_accel : envp_default));
+        fprintf(stderr, "%s: execve failed errno=%d (%s)\n", path, errno,
+                errno ? strerror(errno) : "no errno from kernel");
         _exit(127);
     }
     if (pid > 0)
@@ -538,6 +572,16 @@ static int netsurf_disabled_by_cmdline(void)
         return 0;
 
     return token_is_disabled(buf, "netsurf");
+}
+
+static int desktop_disabled_by_cmdline(void)
+{
+    char buf[512];
+
+    if (read_cmdline(buf, sizeof(buf)) < 0)
+        return 0;
+
+    return token_is_disabled(buf, "desktop");
 }
 
 static int webkit_enabled_by_cmdline(void)
@@ -782,6 +826,11 @@ int main(void)
 {
     signal(SIGINT,  sighandler);
     signal(SIGTERM, sighandler);
+
+    if (desktop_disabled_by_cmdline()) {
+        fprintf(stderr, "[desktop] disabled by cmdline\n");
+        return 0;
+    }
 
     fprintf(stderr, "[desktop] starting Wayland session\n");
 

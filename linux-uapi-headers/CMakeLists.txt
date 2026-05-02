@@ -10,6 +10,7 @@ project(xv6-port-linux-uapi-headers LANGUAGES NONE)
 
 set(_dst    ${XV6_SYSROOT}/include)
 set(_marker ${_dst}/linux/input-event-codes.h)
+set(_asm_ioctl ${_dst}/asm/ioctl.h)
 
 # linux/, asm-generic/ live under /usr/include directly; asm/ is
 # multiarch on Debian (x86_64-linux-gnu/asm). We pick whichever exists.
@@ -24,7 +25,7 @@ if(NOT EXISTS ${_src_linux}/input-event-codes.h)
 endif()
 
 add_custom_command(
-    OUTPUT  ${_marker}
+    OUTPUT  ${_marker} ${_asm_ioctl}
     COMMAND ${CMAKE_COMMAND} -E make_directory ${_dst}
     COMMAND ${CMAKE_COMMAND} -E copy_directory ${_src_linux}       ${_dst}/linux
     COMMAND ${CMAKE_COMMAND} -E copy_directory ${_src_asm_generic} ${_dst}/asm-generic
@@ -32,7 +33,7 @@ add_custom_command(
     COMMENT "Installing Linux UAPI headers into sysroot"
     VERBATIM)
 
-add_custom_target(port-linux-uapi-headers ALL DEPENDS ${_marker})
+add_custom_target(port-linux-uapi-headers ALL DEPENDS ${_marker} ${_asm_ioctl})
 
 add_custom_target(port-linux-uapi-headers-clean
     COMMAND ${CMAKE_COMMAND} -E rm -rf

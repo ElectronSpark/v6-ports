@@ -10,12 +10,19 @@ xv6_port(
     NAME            gtk3
     SOURCE_DIR      ${CMAKE_CURRENT_SOURCE_DIR}/src
     BUILD_SYSTEM    meson
+    MESON_DEFAULT_LIBRARY both
     DEPENDS         glib glib-host gdk-pixbuf pango atk cairo
                     wayland-libs wayland-protocols libxkbcommon
                     fribidi harfbuzz fontconfig freetype libepoxy
                     linux-uapi-headers
     OUTPUT_FILES    lib/libgtk-3.a
+                    lib/libgtk-3.so
+                    lib/libgtk-3.so.0
+                    lib/libgtk-3.so.0.2421.32
                     lib/libgdk-3.a
+                    lib/libgdk-3.so
+                    lib/libgdk-3.so.0
+                    lib/libgdk-3.so.0.2421.32
                     include/gtk-3.0/gtk/gtk.h
     CMAKE_ARGS
         -Dwayland_backend=true

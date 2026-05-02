@@ -8,9 +8,24 @@ xv6_port(
     NAME            wayland-libs
     SOURCE_DIR      ${CMAKE_CURRENT_SOURCE_DIR}/../wayland-src/src
     BUILD_SYSTEM    meson
+    MESON_DEFAULT_LIBRARY both
     DEPENDS         libffi libexpat wayland-host
     OUTPUT_FILES    lib/libwayland-client.a
+                    lib/libwayland-client.so
+                    lib/libwayland-client.so.0
+                    lib/libwayland-client.so.0.25.90
+                    lib/libwayland-cursor.a
+                    lib/libwayland-cursor.so
+                    lib/libwayland-cursor.so.0
+                    lib/libwayland-cursor.so.0.25.90
+                    lib/libwayland-egl.a
+                    lib/libwayland-egl.so
+                    lib/libwayland-egl.so.1
+                    lib/libwayland-egl.so.1.25.90
                     lib/libwayland-server.a
+                    lib/libwayland-server.so
+                    lib/libwayland-server.so.0
+                    lib/libwayland-server.so.0.25.90
                     include/wayland-client.h
     CMAKE_ARGS
         -Dlibraries=true

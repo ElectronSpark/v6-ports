@@ -35,6 +35,7 @@ if(EXISTS "${XKEYBOARD_CONFIG_DIR}/rules/evdev")
         VERBATIM)
     add_custom_target(port-libxkbcommon-xkb-data ALL
         DEPENDS ${_xkb_data_stamp})
+    add_dependencies(port-libxkbcommon port-libxkbcommon-xkb-data)
 else()
     message(WARNING
         "ports/libxkbcommon: ${XKEYBOARD_CONFIG_DIR}/rules/evdev not found; "

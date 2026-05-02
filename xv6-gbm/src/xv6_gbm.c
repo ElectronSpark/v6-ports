@@ -46,6 +46,7 @@ struct gbm_bo {
     uint32_t height;
     uint32_t stride;
     uint32_t format;
+    uint64_t modifier;
     uint32_t handle;
     uint64_t size;
     void *addr;
@@ -55,6 +56,21 @@ struct gbm_bo {
 static int gbm_format_ok(uint32_t format)
 {
     return format == GBM_FORMAT_XRGB8888 || format == GBM_FORMAT_ARGB8888;
+}
+
+static int gbm_modifier_ok(const uint64_t *modifiers, uint32_t count)
+{
+    uint32_t i;
+
+    if (!modifiers || count == 0)
+        return 1;
+
+    for (i = 0; i < count; i++) {
+        if (modifiers[i] == GBM_FORMAT_MOD_LINEAR ||
+            modifiers[i] == GBM_FORMAT_MOD_INVALID)
+            return 1;
+    }
+    return 0;
 }
 
 struct gbm_device *gbm_create_device(int fd)
@@ -161,10 +177,41 @@ struct gbm_bo *gbm_bo_create(struct gbm_device *gbm, uint32_t width,
     bo->height = height;
     bo->stride = create.pitch;
     bo->format = format;
+    bo->modifier = GBM_FORMAT_MOD_LINEAR;
     bo->handle = create.handle;
     bo->size = create.size;
     bo->addr = (void *)(uintptr_t)create.addr;
     return bo;
+}
+
+struct gbm_bo *gbm_bo_create_with_modifiers(struct gbm_device *gbm,
+                                            uint32_t width, uint32_t height,
+                                            uint32_t format,
+                                            const uint64_t *modifiers,
+                                            uint32_t count)
+{
+    if (!gbm_modifier_ok(modifiers, count)) {
+        errno = EINVAL;
+        return NULL;
+    }
+
+    return gbm_bo_create(gbm, width, height, format,
+                         GBM_BO_USE_RENDERING | GBM_BO_USE_LINEAR);
+}
+
+struct gbm_bo *gbm_bo_create_with_modifiers2(struct gbm_device *gbm,
+                                             uint32_t width, uint32_t height,
+                                             uint32_t format,
+                                             const uint64_t *modifiers,
+                                             uint32_t count, uint32_t flags)
+{
+    if (!gbm_modifier_ok(modifiers, count)) {
+        errno = EINVAL;
+        return NULL;
+    }
+
+    return gbm_bo_create(gbm, width, height, format,
+                         flags | GBM_BO_USE_RENDERING | GBM_BO_USE_LINEAR);
 }
 
 struct gbm_bo *gbm_bo_import(struct gbm_device *gbm, uint32_t type,
@@ -205,6 +252,7 @@ struct gbm_bo *gbm_bo_import(struct gbm_device *gbm, uint32_t type,
     bo->height = import.height;
     bo->stride = import.pitch;
     bo->format = fd_data->format;
+    bo->modifier = GBM_FORMAT_MOD_LINEAR;
     bo->handle = import.handle;
     bo->size = import.size;
     bo->addr = (void *)(uintptr_t)import.addr;
@@ -248,9 +296,24 @@ uint32_t gbm_bo_get_stride(struct gbm_bo *bo)
     return bo ? bo->stride : 0;
 }
 
+uint32_t gbm_bo_get_stride_for_plane(struct gbm_bo *bo, int plane)
+{
+    return bo && plane == 0 ? bo->stride : 0;
+}
+
 uint32_t gbm_bo_get_format(struct gbm_bo *bo)
 {
     return bo ? bo->format : 0;
+}
+
+uint64_t gbm_bo_get_modifier(struct gbm_bo *bo)
+{
+    return bo ? bo->modifier : GBM_FORMAT_MOD_INVALID;
+}
+
+int gbm_bo_get_plane_count(struct gbm_bo *bo)
+{
+    return bo ? 1 : 0;
 }
 
 union gbm_bo_handle gbm_bo_get_handle(struct gbm_bo *bo)
@@ -261,6 +324,17 @@ union gbm_bo_handle gbm_bo_get_handle(struct gbm_bo *bo)
     if (bo)
         handle.u32 = bo->handle;
     return handle;
+}
+
+union gbm_bo_handle gbm_bo_get_handle_for_plane(struct gbm_bo *bo, int plane)
+{
+    if (plane != 0) {
+        union gbm_bo_handle handle;
+
+        memset(&handle, 0, sizeof(handle));
+        return handle;
+    }
+    return gbm_bo_get_handle(bo);
 }
 
 int gbm_bo_get_fd(struct gbm_bo *bo)
@@ -278,6 +352,20 @@ int gbm_bo_get_fd(struct gbm_bo *bo)
     if (ioctl(bo->dev->fd, FB_GPU_BO_EXPORT_FD, &export_fd) < 0)
         return -1;
     return export_fd.fd;
+}
+
+int gbm_bo_get_fd_for_plane(struct gbm_bo *bo, int plane)
+{
+    if (plane != 0) {
+        errno = EINVAL;
+        return -1;
+    }
+    return gbm_bo_get_fd(bo);
+}
+
+uint32_t gbm_bo_get_offset(struct gbm_bo *bo, int plane)
+{
+    return bo && plane == 0 ? 0 : 0;
 }
 
 int gbm_bo_write(struct gbm_bo *bo, const void *buf, size_t count)

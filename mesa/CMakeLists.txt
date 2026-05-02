@@ -10,7 +10,9 @@ xv6_port(
     NAME            mesa
     SOURCE_DIR      ${CMAKE_CURRENT_SOURCE_DIR}/src
     BUILD_SYSTEM    meson
-    CPP_ARGS        -include
+    C_ARGS          -DDETECT_OS_XV6=1
+    CPP_ARGS        -DDETECT_OS_XV6=1
+                    -include
                     ${CMAKE_CURRENT_LIST_DIR}/../../toolchain/musl-xv6/compat/cxx_mutex_compat.h
     DEPENDS         khronos-headers
                     libdrm
@@ -21,6 +23,8 @@ xv6_port(
     OUTPUT_FILES    lib/libEGL.so.1.0.0
                     lib/libGLESv2.so.2.0.0
                     lib/libgallium-26.2.0-devel.so
+                    lib/dri/virtio_gpu_dri.so
+                    lib/dri/swrast_dri.so
                     lib/pkgconfig/egl.pc
                     lib/pkgconfig/glesv2.pc
                     lib/pkgconfig/dri.pc
@@ -72,6 +76,9 @@ xv6_port(
 
 set(_mesa_libgl ${XV6_SYSROOT}/lib/libGL.so)
 set(_mesa_libgl_pc ${XV6_SYSROOT}/lib/pkgconfig/gl.pc)
+set(_mesa_dri_dir ${XV6_SYSROOT}/lib/dri)
+set(_mesa_virtio_dri ${_mesa_dri_dir}/virtio_gpu_dri.so)
+set(_mesa_swrast_dri ${_mesa_dri_dir}/swrast_dri.so)
 
 add_custom_command(
     OUTPUT  ${_mesa_libgl} ${_mesa_libgl_pc}
@@ -86,3 +93,18 @@ add_custom_command(
 
 add_custom_target(port-mesa-libgl-shim ALL DEPENDS ${_mesa_libgl} ${_mesa_libgl_pc})
 add_dependencies(port-mesa-libgl-shim port-mesa)
+
+add_custom_command(
+    OUTPUT  ${_mesa_virtio_dri} ${_mesa_swrast_dri}
+    COMMAND ${CMAKE_COMMAND} -E make_directory ${_mesa_dri_dir}
+    COMMAND ${CMAKE_COMMAND} -E create_symlink ../libgallium-26.2.0-devel.so
+            ${_mesa_virtio_dri}
+    COMMAND ${CMAKE_COMMAND} -E create_symlink ../libgallium-26.2.0-devel.so
+            ${_mesa_swrast_dri}
+    DEPENDS port-mesa
+    COMMENT "Installing Mesa DRI driver aliases"
+    VERBATIM)
+
+add_custom_target(port-mesa-dri-aliases ALL
+    DEPENDS ${_mesa_virtio_dri} ${_mesa_swrast_dri})
+add_dependencies(port-mesa-dri-aliases port-mesa)
