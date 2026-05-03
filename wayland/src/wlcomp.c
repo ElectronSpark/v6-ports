@@ -32,6 +32,14 @@
 
 /* xv6-specific syscall numbers (not in musl headers) */
 #define XV6_SYS_poweroff  166
+#define XV6_DRM_RENDER_NODE "/dev/dri/renderD128"
+#define DRM_IOCTL_VIRTGPU_GETPARAM 0xc0106443UL
+#define VIRTGPU_PARAM_3D_FEATURES  1
+
+struct drm_virtgpu_getparam_compat {
+    uint64_t param;
+    uint64_t value;
+};
 
 /* PTY/TTY ioctls used by the built-in terminal. */
 #define XV6_TIOCGPGRP  0x540F
@@ -135,6 +143,23 @@ struct kbd_event {
 static struct wl_display *g_display;
 
 static int cmdline_flag_enabled(const char *key);
+
+static int xv6_virgl_available(void)
+{
+    uint64_t value = 0;
+    struct drm_virtgpu_getparam_compat req = {
+        .param = VIRTGPU_PARAM_3D_FEATURES,
+        .value = (uint64_t)(uintptr_t)&value,
+    };
+    int fd = open(XV6_DRM_RENDER_NODE, O_RDWR | O_CLOEXEC);
+    int ok;
+
+    if (fd < 0)
+        return 0;
+    ok = ioctl(fd, DRM_IOCTL_VIRTGPU_GETPARAM, &req) == 0 && value != 0;
+    close(fd);
+    return ok;
+}
 
 static void wlcomp_wayland_log(const char *fmt, va_list args)
 {
@@ -3740,6 +3765,49 @@ static void launch_desktop_app_arg(const char *path, const char *name,
             "JSC_numberOfGCMarkers=1",
             NULL
         };
+        char *envp_minibrowser_accel_sw[] = {
+            "HOME=/",
+            "PATH=/bin:/usr/bin",
+            "XDG_RUNTIME_DIR=/tmp",
+            "XDG_CACHE_HOME=/tmp/.cache",
+            "XDG_DATA_HOME=/tmp/.local/share",
+            "XDG_DATA_DIRS=/share:/usr/share",
+            "WAYLAND_DISPLAY=wayland-0",
+            "GDK_BACKEND=wayland",
+            "GDK_DPI_SCALE=1.55",
+            "XCURSOR_PATH=/share/icons",
+            "XCURSOR_THEME=Adwaita",
+            "SSL_CERT_FILE=/share/netsurf/ca-bundle",
+            "GIO_MODULE_DIR=/lib/gio/modules",
+            "GIO_USE_TLS=openssl",
+            "XV6_GUI_SESSION=1",
+            "WEBKIT_EXEC_PATH=/libexec/webkit2gtk-4.1",
+            "WEBKIT_INJECTED_BUNDLE_PATH=/lib/webkit2gtk-4.1/injected-bundle",
+            "WEBKIT_DISABLE_NETWORK_CACHE=1",
+            "WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS=1",
+            "LIBGL_ALWAYS_SOFTWARE=1",
+            "EGL_PLATFORM=wayland",
+            "ANGLE_DEFAULT_PLATFORM=gl",
+            "SOUP_FORCE_HTTP1=1",
+            "EPOXY_XV6_ALLOW_MISSING=1",
+            "WEBKIT_XV6_DISABLE_BCG_SWITCH=1",
+            "JSC_useJIT=0",
+            "JSC_useBaselineJIT=0",
+            "JSC_useDFGJIT=0",
+            "JSC_useFTLJIT=0",
+            "JSC_useRegExpJIT=0",
+            "JSC_useDOMJIT=0",
+            "JSC_useBBQJIT=0",
+            "JSC_useOMGJIT=0",
+            "JSC_useConcurrentJIT=0",
+            "JSC_useConcurrentGC=0",
+            "JSC_numberOfDFGCompilerThreads=1",
+            "JSC_numberOfFTLCompilerThreads=1",
+            "JSC_numberOfWasmCompilerThreads=1",
+            "JSC_numberOfWorklistThreads=1",
+            "JSC_numberOfGCMarkers=1",
+            NULL
+        };
         char *envp_mesa_accel[] = {
             "HOME=/",
             "PATH=/bin:/usr/bin",
@@ -3756,7 +3824,22 @@ static void launch_desktop_app_arg(const char *path, const char *name,
             "GALLIUM_DRIVER=virgl",
             NULL
         };
+        char *envp_mesa_accel_sw[] = {
+            "HOME=/",
+            "PATH=/bin:/usr/bin",
+            "XDG_RUNTIME_DIR=/tmp",
+            "XDG_CACHE_HOME=/tmp/.cache",
+            "XDG_DATA_DIRS=/share:/usr/share",
+            "WAYLAND_DISPLAY=wayland-0",
+            "GDK_BACKEND=wayland",
+            "XCURSOR_PATH=/share/icons",
+            "XCURSOR_THEME=Adwaita",
+            "LIBGL_ALWAYS_SOFTWARE=1",
+            "EGL_PLATFORM=wayland",
+            NULL
+        };
         char **envp = envp_default;
+        int virgl_available = xv6_virgl_available();
         if (is_webkit) {
             int accel = cmdline_flag_enabled("webkit_accel");
             int js = cmdline_int_value("webkit_js", 1) != 0;
@@ -3769,9 +3852,12 @@ static void launch_desktop_app_arg(const char *path, const char *name,
             }
             if (is_webkitgpusmoke)
                 accel = 0;
-            envp = accel ? envp_minibrowser_accel : envp_minibrowser;
+            envp = accel ?
+                (virgl_available ? envp_minibrowser_accel :
+                                   envp_minibrowser_accel_sw) :
+                envp_minibrowser;
         } else if (is_mesa_gl && cmdline_flag_enabled("glsmoke_accel")) {
-            envp = envp_mesa_accel;
+            envp = virgl_available ? envp_mesa_accel : envp_mesa_accel_sw;
         }
         execve(path, argv, envp);
         _exit(127);

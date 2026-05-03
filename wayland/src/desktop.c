@@ -16,16 +16,26 @@
 #include <sys/wait.h>
 #include <sys/stat.h>
 #include <sys/socket.h>
+#include <sys/ioctl.h>
 #include <netinet/in.h>
 #include <fcntl.h>
 #include <errno.h>
 #include <time.h>
+#include <stdint.h>
 
 #define WAYLAND_SOCKET_PATH  "/tmp/wayland-0.lock" /* lockfile (real VFS file) */
 #define SOCKET_WAIT_TRIES    200      /* 200 × 20 ms = 4 s */
 #define SOCKET_WAIT_US       20000
 #define WEBKIT_NET_WAIT_US   35000000 /* DHCP fallback/network daemons need ~30s */
 #define WEBKIT_DEFAULT_URL   "https://www.google.com/search?q=xv6&gbv=1"
+#define XV6_DRM_RENDER_NODE  "/dev/dri/renderD128"
+#define DRM_IOCTL_VIRTGPU_GETPARAM 0xc0106443UL
+#define VIRTGPU_PARAM_3D_FEATURES  1
+
+struct drm_virtgpu_getparam_compat {
+    uint64_t param;
+    uint64_t value;
+};
 
 static volatile sig_atomic_t g_running = 1;
 static pid_t wlcomp_pid;
@@ -42,6 +52,23 @@ static int webkit_reopen_count_from_cmdline(void);
 static int webkit_timeout_ms_from_cmdline(int fallback);
 static int glsmoke_accel_enabled_by_cmdline(void);
 static int desktop_disabled_by_cmdline(void);
+
+static int xv6_virgl_available(void)
+{
+    uint64_t value = 0;
+    struct drm_virtgpu_getparam_compat req = {
+        .param = VIRTGPU_PARAM_3D_FEATURES,
+        .value = (uint64_t)(uintptr_t)&value,
+    };
+    int fd = open(XV6_DRM_RENDER_NODE, O_RDWR | O_CLOEXEC);
+    int ok;
+
+    if (fd < 0)
+        return 0;
+    ok = ioctl(fd, DRM_IOCTL_VIRTGPU_GETPARAM, &req) == 0 && value != 0;
+    close(fd);
+    return ok;
+}
 
 static long long monotonic_ms(void)
 {
@@ -380,6 +407,50 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             "JSC_numberOfGCMarkers=1",
             NULL
         };
+        char *envp_minibrowser_accel_sw[] = {
+            "HOME=/",
+            "PATH=/bin:/usr/bin",
+            "XDG_RUNTIME_DIR=/tmp",
+            "XDG_CACHE_HOME=/tmp/.cache",
+            "XDG_DATA_HOME=/tmp/.local/share",
+            "XDG_DATA_DIRS=/share:/usr/share",
+            "WAYLAND_DISPLAY=wayland-0",
+            "GDK_BACKEND=wayland",
+            "GDK_DPI_SCALE=1.55",
+            "XCURSOR_PATH=/share/icons",
+            "XCURSOR_THEME=Adwaita",
+            "SSL_CERT_FILE=/share/netsurf/ca-bundle",
+            "GIO_MODULE_DIR=/lib/gio/modules",
+            "GIO_USE_TLS=openssl",
+            "XV6_GUI_SESSION=1",
+            "WEBKIT_EXEC_PATH=/libexec/webkit2gtk-4.1",
+            "WEBKIT_INJECTED_BUNDLE_PATH=/lib/webkit2gtk-4.1/injected-bundle",
+            "WEBKIT_DISABLE_NETWORK_CACHE=1",
+            "WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS=1",
+            "LIBGL_ALWAYS_SOFTWARE=1",
+            "EGL_PLATFORM=wayland",
+            "ANGLE_DEFAULT_PLATFORM=gl",
+            "WEBKIT_XV6_DISABLE_BCG_SWITCH=1",
+            "WEBKIT_XV6_SKIP_RULE_FEATURES=1",
+            "SOUP_FORCE_HTTP1=1",
+            "EPOXY_XV6_ALLOW_MISSING=1",
+            "JSC_useJIT=0",
+            "JSC_useBaselineJIT=0",
+            "JSC_useDFGJIT=0",
+            "JSC_useFTLJIT=0",
+            "JSC_useRegExpJIT=0",
+            "JSC_useDOMJIT=0",
+            "JSC_useBBQJIT=0",
+            "JSC_useOMGJIT=0",
+            "JSC_useConcurrentJIT=0",
+            "JSC_useConcurrentGC=0",
+            "JSC_numberOfDFGCompilerThreads=1",
+            "JSC_numberOfFTLCompilerThreads=1",
+            "JSC_numberOfWasmCompilerThreads=1",
+            "JSC_numberOfWorklistThreads=1",
+            "JSC_numberOfGCMarkers=1",
+            NULL
+        };
         char *envp_mesa_accel[] = {
             "HOME=/",
             "PATH=/bin:/usr/bin",
@@ -396,6 +467,20 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             "GALLIUM_DRIVER=virgl",
             NULL
         };
+        char *envp_mesa_accel_sw[] = {
+            "HOME=/",
+            "PATH=/bin:/usr/bin",
+            "XDG_RUNTIME_DIR=/tmp",
+            "XDG_CACHE_HOME=/tmp/.cache",
+            "XDG_DATA_DIRS=/share:/usr/share",
+            "WAYLAND_DISPLAY=wayland-0",
+            "GDK_BACKEND=wayland",
+            "XCURSOR_PATH=/share/icons",
+            "XCURSOR_THEME=Adwaita",
+            "LIBGL_ALWAYS_SOFTWARE=1",
+            "EGL_PLATFORM=wayland",
+            NULL
+        };
         int minibrowser_accel =
             is_minibrowser && webkit_accel_enabled_by_cmdline();
         int minibrowser_js =
@@ -404,6 +489,7 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             is_minibrowser && webkit_webgl_smoke_enabled_by_cmdline();
         int webkit_accel =
             (is_minibrowser && minibrowser_accel) || is_webkitgpusmoke;
+        int virgl_available = xv6_virgl_available();
         if (is_webkitgpusmoke)
             webkit_accel = 0;
         errno = 0;
@@ -420,9 +506,14 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
                               argv_minibrowser)) :
                     argv_default,
                is_webkit ?
-                    (webkit_accel ? envp_minibrowser_accel : envp_minibrowser) :
+                    (webkit_accel ?
+                         (virgl_available ? envp_minibrowser_accel :
+                                            envp_minibrowser_accel_sw) :
+                         envp_minibrowser) :
                     (is_mesa_gl && glsmoke_accel_enabled_by_cmdline() ?
-                         envp_mesa_accel : envp_default));
+                         (virgl_available ? envp_mesa_accel :
+                                            envp_mesa_accel_sw) :
+                         envp_default));
         fprintf(stderr, "%s: execve failed errno=%d (%s)\n", path, errno,
                 errno ? strerror(errno) : "no errno from kernel");
         _exit(127);
