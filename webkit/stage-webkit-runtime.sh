@@ -25,6 +25,8 @@ remove_staged_webkit() {
         "${dst}/bin/gst-inspect-1.0" \
         "${dst}/bin/gst-launch-1.0" \
         "${dst}/bin/gst-typefind-1.0" \
+        "${dst}/lib/libgst"*.so* \
+        "${dst}/lib/libgstreamer-1.0.so"* \
         "${dst}/lib/libwebkit2gtk-4.1.so"* \
         "${dst}/lib/libjavascriptcoregtk-4.1.so"* \
         "${dst}/lib/pkgconfig/webkit2gtk-4.1.pc" \
@@ -37,6 +39,7 @@ remove_staged_webkit() {
         "${dst}/libexec/webkit2gtk-4.1/.webkit_install_stamp"
     rm -rf \
         "${dst}/libexec/gstreamer-1.0" \
+        "${dst}/lib/gstreamer-1.0" \
         "${dst}/usr/lib/gstreamer-1.0"
 }
 
@@ -68,6 +71,7 @@ mkdir -p \
     "${dst}/include" \
     "${dst}/lib" \
     "${dst}/lib/gio/modules" \
+    "${dst}/lib/gstreamer-1.0" \
     "${dst}/lib/pkgconfig" \
     "${dst}/lib/webkit2gtk-4.1" \
     "${dst}/libexec" \
@@ -89,6 +93,8 @@ copy_glob() {
 }
 
 lib_patterns=(
+    "${ref}/lib/libgstreamer-1.0.so"*
+    "${ref}/lib/libgst"*.so*
     "${ref}/lib/libwebkit2gtk-4.1.so"*
     "${ref}/lib/libjavascriptcoregtk-4.1.so"*
     "${ref}/lib/libnghttp2.so"*
@@ -163,6 +169,11 @@ done
 if [[ -x "${ref}/bin/jsc" ]]; then
     cp -a "${ref}/bin/jsc" "${dst}/bin/"
 fi
+if [[ -d "${ref}/lib/gstreamer-1.0" ]]; then
+    mkdir -p "${dst}/lib"
+    rm -rf "${dst}/lib/gstreamer-1.0"
+    cp -a "${ref}/lib/gstreamer-1.0" "${dst}/lib/"
+fi
 if [[ -d "${ref}/usr/lib/gstreamer-1.0" ]]; then
     mkdir -p "${dst}/usr/lib"
     rm -rf "${dst}/usr/lib/gstreamer-1.0"
@@ -181,6 +192,7 @@ done
 
 manifest_roots=("${dst}/lib" "${dst}/libexec/webkit2gtk-4.1")
 [[ -d "${dst}/libexec/gstreamer-1.0" ]] && manifest_roots+=("${dst}/libexec/gstreamer-1.0")
+[[ -d "${dst}/lib/gstreamer-1.0" ]] && manifest_roots+=("${dst}/lib/gstreamer-1.0")
 [[ -d "${dst}/usr/lib/gstreamer-1.0" ]] && manifest_roots+=("${dst}/usr/lib/gstreamer-1.0")
 
 {
@@ -189,7 +201,9 @@ manifest_roots=("${dst}/lib" "${dst}/libexec/webkit2gtk-4.1")
     find "${manifest_roots[@]}" \
         \( -name 'libwebkit2gtk-4.1.so*' \
         -o -name 'libjavascriptcoregtk-4.1.so*' \
+        -o -name 'libgstreamer-1.0.so*' \
         -o -name 'libgst*.so' \
+        -o -name 'libgst*.so.*' \
         -o -name 'gst-plugin-scanner' \
         -o -path "${dst}/lib/webkit2gtk-4.1/*" \
         -o -path "${dst}/libexec/webkit2gtk-4.1/*" \) \
