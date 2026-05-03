@@ -26,5 +26,7 @@ xv6_port(
         -Dnls=disabled
         -Dlibelf=disabled
         -Dintrospection=disabled
-        -Dglib_debug=disabled
+        -Dglib_debug=enabled
+        -Dglib_assert=true
+        -Dglib_checks=true
 )
