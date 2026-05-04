@@ -1,0 +1,10 @@
+prefix=/usr
+includedir=${prefix}/include
+libdir=${prefix}/lib
+
+Name: gstgtk
+Description: gst-plugins-good: gstgtk
+Version: 1.22.8
+Requires: gtk+-3.0, gstreamer-video-1.0 >=  1.22.0, gstreamer-base-1.0 >=  1.22.0
+Libs: -L${prefix}/lib/gstreamer-1.0 -lgstgtk -lm
+Cflags: -I${includedir}

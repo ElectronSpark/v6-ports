@@ -1,0 +1,10 @@
+prefix=/usr
+includedir=${prefix}/include
+libdir=${prefix}/lib
+
+Name: gstjpeg
+Description: gst-plugins-good: gstjpeg
+Version: 1.22.8
+Requires: gstreamer-1.0 >=  1.22.0, gstreamer-base-1.0 >=  1.22.0, gstreamer-video-1.0 >=  1.22.0, libjpeg
+Libs: -L${prefix}/lib/gstreamer-1.0 -lgstjpeg -lm
+Cflags: -I${includedir}

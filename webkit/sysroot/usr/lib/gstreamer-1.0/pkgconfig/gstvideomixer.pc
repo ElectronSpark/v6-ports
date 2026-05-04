@@ -1,0 +1,10 @@
+prefix=/usr
+includedir=${prefix}/include
+libdir=${prefix}/lib
+
+Name: gstvideomixer
+Description: gst-plugins-good: gstvideomixer
+Version: 1.22.8
+Requires: gstreamer-video-1.0 >=  1.22.0, gstreamer-base-1.0 >=  1.22.0
+Libs: -L${prefix}/lib/gstreamer-1.0 -lgstvideomixer -lm
+Cflags: -I${includedir}

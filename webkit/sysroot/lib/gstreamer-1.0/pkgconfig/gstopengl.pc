@@ -1,0 +1,10 @@
+prefix=/
+includedir=${prefix}/include
+libdir=${prefix}/lib
+
+Name: gstopengl
+Description: gst-plugins-base: gstopengl
+Version: 1.22.8
+Requires: gstreamer-gl-1.0, gstreamer-video-1.0, graphene-1.0, gstreamer-allocators-1.0, gstreamer-base-1.0 >=  1.22.0, gstreamer-controller-1.0 >=  1.22.0, gobject-2.0 >=  2.30.0, libpng >= 1.0, libjpeg, gstreamer-1.0 >=  1.22.0
+Libs: -L${prefix}/lib/gstreamer-1.0 -lgstopengl -lm -pthread
+Cflags: -I${includedir} -pthread

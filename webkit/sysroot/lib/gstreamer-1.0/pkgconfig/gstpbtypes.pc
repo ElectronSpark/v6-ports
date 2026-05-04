@@ -1,0 +1,10 @@
+prefix=/
+includedir=${prefix}/include
+libdir=${prefix}/lib
+
+Name: gstpbtypes
+Description: gst-plugins-base: gstpbtypes
+Version: 1.22.8
+Requires: gstreamer-video-1.0, gstreamer-base-1.0 >=  1.22.0
+Libs: -L${prefix}/lib/gstreamer-1.0 -lgstpbtypes -lm
+Cflags: -I${includedir}

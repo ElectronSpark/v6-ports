@@ -1,0 +1,10 @@
+prefix=/
+includedir=${prefix}/include
+libdir=${prefix}/lib
+
+Name: gsttcp
+Description: gst-plugins-base: gsttcp
+Version: 1.22.8
+Requires: gstreamer-base-1.0 >=  1.22.0, gstreamer-net-1.0 >=  1.22.0, gio-2.0 >=  2.62.0
+Libs: -L${prefix}/lib/gstreamer-1.0 -lgsttcp
+Cflags: -I${includedir}

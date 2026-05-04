@@ -1,0 +1,10 @@
+prefix=/usr
+includedir=${prefix}/include
+libdir=${prefix}/lib
+
+Name: gstcairo
+Description: gst-plugins-good: gstcairo
+Version: 1.22.8
+Requires: gstreamer-base-1.0 >=  1.22.0, gstreamer-video-1.0 >=  1.22.0, cairo-gobject >= 1.10.0
+Libs: -L${prefix}/lib/gstreamer-1.0 -lgstcairo
+Cflags: -I${includedir}

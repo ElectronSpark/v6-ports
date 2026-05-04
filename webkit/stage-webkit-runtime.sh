@@ -22,11 +22,6 @@ remove_staged_webkit() {
         "${dst}/include/webkitgtk-4.1"
     rm -f \
         "${dst}/bin/jsc" \
-        "${dst}/bin/gst-inspect-1.0" \
-        "${dst}/bin/gst-launch-1.0" \
-        "${dst}/bin/gst-typefind-1.0" \
-        "${dst}/lib/libgst"*.so* \
-        "${dst}/lib/libgstreamer-1.0.so"* \
         "${dst}/lib/libwebkit2gtk-4.1.so"* \
         "${dst}/lib/libjavascriptcoregtk-4.1.so"* \
         "${dst}/lib/pkgconfig/webkit2gtk-4.1.pc" \
@@ -37,10 +32,6 @@ remove_staged_webkit() {
         "${dst}/libexec/webkit2gtk-4.1/WebKitWebProcess" \
         "${dst}/libexec/webkit2gtk-4.1/jsc" \
         "${dst}/libexec/webkit2gtk-4.1/.webkit_install_stamp"
-    rm -rf \
-        "${dst}/libexec/gstreamer-1.0" \
-        "${dst}/lib/gstreamer-1.0" \
-        "${dst}/usr/lib/gstreamer-1.0"
 }
 
 if [[ -z "${ref}" || ! -x "${ref}/libexec/webkit2gtk-4.1/MiniBrowser" ]]; then
@@ -171,13 +162,13 @@ if [[ -x "${ref}/bin/jsc" ]]; then
 fi
 if [[ -d "${ref}/lib/gstreamer-1.0" ]]; then
     mkdir -p "${dst}/lib"
-    rm -rf "${dst}/lib/gstreamer-1.0"
-    cp -a "${ref}/lib/gstreamer-1.0" "${dst}/lib/"
+    mkdir -p "${dst}/lib/gstreamer-1.0"
+    cp -a "${ref}/lib/gstreamer-1.0"/. "${dst}/lib/gstreamer-1.0/"
 fi
 if [[ -d "${ref}/usr/lib/gstreamer-1.0" ]]; then
     mkdir -p "${dst}/usr/lib"
-    rm -rf "${dst}/usr/lib/gstreamer-1.0"
-    cp -a "${ref}/usr/lib/gstreamer-1.0" "${dst}/usr/lib/"
+    mkdir -p "${dst}/usr/lib/gstreamer-1.0"
+    cp -a "${ref}/usr/lib/gstreamer-1.0"/. "${dst}/usr/lib/gstreamer-1.0/"
 fi
 if [[ -x "${ref}/libexec/gstreamer-1.0/gst-plugin-scanner" ]]; then
     mkdir -p "${dst}/libexec/gstreamer-1.0"

@@ -1,0 +1,10 @@
+prefix=/usr
+includedir=${prefix}/include
+libdir=${prefix}/lib
+
+Name: gstgdkpixbuf
+Description: gst-plugins-good: gstgdkpixbuf
+Version: 1.22.8
+Requires: gstreamer-base-1.0 >=  1.22.0, gstreamer-video-1.0 >=  1.22.0, gstreamer-controller-1.0 >=  1.22.0, gdk-pixbuf-2.0 >= 2.8.0
+Libs: -L${prefix}/lib/gstreamer-1.0 -lgstgdkpixbuf
+Cflags: -I${includedir}

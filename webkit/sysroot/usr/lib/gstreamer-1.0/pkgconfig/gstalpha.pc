@@ -1,0 +1,10 @@
+prefix=/usr
+includedir=${prefix}/include
+libdir=${prefix}/lib
+
+Name: gstalpha
+Description: gst-plugins-good: gstalpha
+Version: 1.22.8
+Requires: gstreamer-video-1.0 >=  1.22.0, gstreamer-1.0 >=  1.22.0
+Libs: -L${prefix}/lib/gstreamer-1.0 -lgstalpha -lm
+Cflags: -I${includedir}
