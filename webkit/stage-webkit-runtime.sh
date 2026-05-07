@@ -83,9 +83,76 @@ copy_glob() {
     fi
 }
 
+copy_usr_glob() {
+    local pattern="$1"
+    local matches=()
+    shopt -s nullglob
+    matches=( ${pattern} )
+    shopt -u nullglob
+    if ((${#matches[@]})); then
+        mkdir -p "${dst}/usr/lib"
+        cp -a "${matches[@]}" "${dst}/usr/lib/"
+    fi
+}
+
+# Keep the existing GTK/GLib foundation coherent.  The WebKit/GStreamer
+# reference runtime is allowed to refresh WebKit and media pieces, but mixing a
+# newer GLib/GIO/GObject/GModule set with the older staged GTK/GDK pair hangs
+# GDK Wayland display initialization before gtk_init() returns.
+preserve_existing_glob() {
+    local pattern="$1"
+    local backup_dir="$2"
+    local matches=()
+    shopt -s nullglob
+    matches=( ${pattern} )
+    shopt -u nullglob
+    if ((${#matches[@]})); then
+        cp -a "${matches[@]}" "${backup_dir}/"
+    fi
+}
+
+preserve_existing_runtime_stack() {
+    local backup_dir="$1"
+    mkdir -p "${backup_dir}"
+    local patterns=(
+        "${dst}/lib/libgtk-3.so"*
+        "${dst}/lib/libgdk-3.so"*
+        "${dst}/lib/libgdk_pixbuf-2.0.so"*
+        "${dst}/lib/libgio-2.0.so"*
+        "${dst}/lib/libgobject-2.0.so"*
+        "${dst}/lib/libglib-2.0.so"*
+        "${dst}/lib/libgmodule-2.0.so"*
+        "${dst}/lib/libpangocairo-1.0.so"*
+        "${dst}/lib/libpango-1.0.so"*
+        "${dst}/lib/libpangoft2-1.0.so"*
+        "${dst}/lib/libatk-1.0.so"*
+        "${dst}/lib/libcairo-gobject.so"*
+        "${dst}/lib/libcairo.so"*
+    )
+    for pattern in "${patterns[@]}"; do
+        preserve_existing_glob "${pattern}" "${backup_dir}"
+    done
+}
+
+restore_existing_runtime_stack() {
+    local backup_dir="$1"
+    if [[ -d "${backup_dir}" ]] && compgen -G "${backup_dir}/*" > /dev/null; then
+        cp -a "${backup_dir}"/. "${dst}/lib/"
+    fi
+}
+
+runtime_stack_backup="$(mktemp -d)"
+trap 'rm -rf "${runtime_stack_backup}"' EXIT
+preserve_existing_runtime_stack "${runtime_stack_backup}"
+
 lib_patterns=(
     "${ref}/lib/libgstreamer-1.0.so"*
     "${ref}/lib/libgst"*.so*
+    "${ref}/lib/libogg.so"*
+    "${ref}/lib/libopus.so"*
+    "${ref}/lib/libvorbis.so"*
+    "${ref}/lib/libvorbisenc.so"*
+    "${ref}/lib/libvorbisfile.so"*
     "${ref}/lib/libwebkit2gtk-4.1.so"*
     "${ref}/lib/libjavascriptcoregtk-4.1.so"*
     "${ref}/lib/libnghttp2.so"*
@@ -117,6 +184,15 @@ lib_patterns=(
 
 for pattern in "${lib_patterns[@]}"; do
     copy_glob "${pattern}"
+done
+restore_existing_runtime_stack "${runtime_stack_backup}"
+
+usr_lib_patterns=(
+    "${ref}/usr/lib/libgst"*.so*
+)
+
+for pattern in "${usr_lib_patterns[@]}"; do
+    copy_usr_glob "${pattern}"
 done
 
 if [[ -e "${ref}/lib/gio/modules/libgioopenssl.so" ]]; then
@@ -182,6 +258,7 @@ for gst_tool in gst-inspect-1.0 gst-launch-1.0 gst-typefind-1.0; do
 done
 
 manifest_roots=("${dst}/lib" "${dst}/libexec/webkit2gtk-4.1")
+[[ -d "${dst}/usr/lib" ]] && manifest_roots+=("${dst}/usr/lib")
 [[ -d "${dst}/libexec/gstreamer-1.0" ]] && manifest_roots+=("${dst}/libexec/gstreamer-1.0")
 [[ -d "${dst}/lib/gstreamer-1.0" ]] && manifest_roots+=("${dst}/lib/gstreamer-1.0")
 [[ -d "${dst}/usr/lib/gstreamer-1.0" ]] && manifest_roots+=("${dst}/usr/lib/gstreamer-1.0")

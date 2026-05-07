@@ -32,6 +32,14 @@
 #define DRM_IOCTL_VIRTGPU_GETPARAM 0xc0106443UL
 #define VIRTGPU_PARAM_3D_FEATURES  1
 
+static const char *webkit_feature_flags =
+    "--features=+OffscreenCanvas,+OffscreenCanvasInWorkers,+requestIdleCallback";
+static const char *webkit_feature_flags_no_idle =
+    "--features=+OffscreenCanvas,+OffscreenCanvasInWorkers,-requestIdleCallback";
+static const char *webkit_youtube_compat_user_agent =
+    "--user-agent=Mozilla/5.0 (X11; xv6 x86_64) AppleWebKit/605.1.15 "
+    "(KHTML, like Gecko) Version/17.0 Safari/605.1.15";
+
 struct drm_virtgpu_getparam_compat {
     uint64_t param;
     uint64_t value;
@@ -47,6 +55,15 @@ static int webkit_gpu_smoke_enabled_by_cmdline(void);
 static int webkit_webgl_smoke_enabled_by_cmdline(void);
 static int webkit_api_smoke_enabled_by_cmdline(void);
 static int webkit_http_smoke_enabled_by_cmdline(void);
+static int webkit_coop_smoke_enabled_by_cmdline(void);
+static int webkit_js_smoke_enabled_by_cmdline(void);
+static int webkit_youtube_boot_smoke_enabled_by_cmdline(void);
+static int webkit_youtube_waterfall_smoke_enabled_by_cmdline(void);
+static int webkit_youtube_compat_disabled_by_cmdline(void);
+static int webkit_request_idle_disabled_by_cmdline(void);
+static int webkit_feature_gate_smoke_enabled_by_cmdline(void);
+static int webkit_idle_browse_smoke_enabled_by_cmdline(void);
+static int webkit_compat_gate_smoke_enabled_by_cmdline(void);
 static int webkit_js_disabled_by_cmdline(void);
 static int webkit_reopen_count_from_cmdline(void);
 static int webkit_timeout_ms_from_cmdline(int fallback);
@@ -99,10 +116,17 @@ static int wait_for_socket(void)
 
 static int url_needs_network_wait(const char *url)
 {
-    return url && (strncmp(url, "http://", 7) == 0 ||
-                   strncmp(url, "https://", 8) == 0) &&
-           strncmp(url, "http://127.0.0.1", 16) != 0 &&
-           strncmp(url, "http://localhost", 16) != 0;
+    (void)url;
+    return 0;
+}
+
+static int webkit_youtube_compat_url(const char *url)
+{
+    if (!url || webkit_youtube_compat_disabled_by_cmdline())
+        return 0;
+    return strstr(url, "youtube.com") != NULL ||
+           strstr(url, "youtube-nocookie.com") != NULL ||
+           strstr(url, "youtu.be") != NULL;
 }
 
 static pid_t launch_wlcomp(void)
@@ -125,10 +149,196 @@ static pid_t launch_wlcomp(void)
 
 static void run_http_smoke_server(void)
 {
-    static const char body[] =
+    static const char plain_body[] =
         "<!doctype html><title>xv6 plain HTTP smoke</title>"
         "<h1>xv6 plain HTTP smoke</h1>\n";
-    char header[160];
+    static const char js_body[] =
+        "<!doctype html><meta charset=utf-8>"
+        "<title>xv6-js-smoke:boot</title>"
+        "<h1 id=out>boot</h1><xv6-smoke></xv6-smoke>"
+        "<script>"
+        "window.__xv6Smoke=[];"
+        "function mark(x){if(__xv6Smoke.indexOf(x)<0)__xv6Smoke.push(x);"
+        "document.getElementById('out').textContent=__xv6Smoke.join(',');"
+        "document.title='xv6-js-smoke:'+__xv6Smoke.join(',');"
+        "console.log('XV6-JS-SMOKE '+__xv6Smoke.join(','));}"
+        "function done(){var need=['external','ce','promise','microtask','timeout','raf','idle','fetch','fetch-stream','xhr','domcontent','load'];"
+        "if(need.every(function(x){return __xv6Smoke.indexOf(x)>=0;})){document.title='xv6-js-smoke:PASS:'+__xv6Smoke.join(',');console.log('XV6-JS-SMOKE PASS');}}"
+        "function hit(x){mark(x);done();}"
+        "document.addEventListener('DOMContentLoaded',function(){hit('domcontent');});"
+        "window.addEventListener('load',function(){hit('load');});"
+        "customElements.define('xv6-smoke',class extends HTMLElement{connectedCallback(){hit('ce');}});"
+        "Promise.resolve().then(function(){hit('promise');});"
+        "queueMicrotask(function(){hit('microtask');});"
+        "setTimeout(function(){hit('timeout');},20);"
+        "requestAnimationFrame(function(){hit('raf');});"
+        "requestIdleCallback(function(){hit('idle');},{timeout:1000});"
+        "fetch('/json').then(function(r){return r.json();}).then(function(j){if(j.ok)hit('fetch');}).catch(function(e){console.error('XV6-JS-SMOKE fetch '+e);});"
+        "fetch('/stream').then(function(r){if(!r.body||typeof r.body.getReader!=='function')throw new Error('missing body reader');var rd=r.body.getReader();var total=0;function pump(){return rd.read().then(function(x){if(x.done){if(total>0)hit('fetch-stream');else throw new Error('empty stream');return;}total+=x.value?x.value.byteLength:0;return pump();});}return pump();}).catch(function(e){console.error('XV6-JS-SMOKE fetch-stream '+e);});"
+        "var x=new XMLHttpRequest();x.onload=function(){if(x.responseText==='ok')hit('xhr');};x.onerror=function(){console.error('XV6-JS-SMOKE xhr error');};x.open('GET','/xhr');x.send();"
+        "</script><script src=/after.js></script>";
+    static const char after_js[] = "hit('external');\n";
+    static const char ytboot_body[] =
+        "<!doctype html><meta charset=utf-8>"
+        "<title>xv6-ytboot:boot</title><h1 id=out>boot</h1>"
+        "<script>"
+        "window.__xv6Boot=[];"
+        "function mark(x){if(__xv6Boot.indexOf(x)<0)__xv6Boot.push(x);"
+        "document.getElementById('out').textContent=__xv6Boot.join(',');"
+        "document.title='xv6-ytboot:'+__xv6Boot.join(',');"
+        "console.log('XV6-YTBOOT '+__xv6Boot.join(','));done();}"
+        "function done(){var need=['small','large','postlarge','browse','domcontent','load'];"
+        "if(need.every(function(x){return __xv6Boot.indexOf(x)>=0;})){document.title='xv6-ytboot:PASS:'+__xv6Boot.join(',');console.log('XV6-YTBOOT PASS');}}"
+        "document.addEventListener('DOMContentLoaded',function(){mark('domcontent');});"
+        "window.addEventListener('load',function(){mark('load');});"
+        "</script><script src=/small.js></script><script src=/large.js></script>"
+        "<script>mark('postlarge');</script>";
+    static const char small_js[] = "mark('small');\n";
+    static const char large_js_prefix[] =
+        "window.__xv6LargeSeen=1;\n";
+    static const char large_js_suffix[] =
+        "mark('large');\n"
+        "fetch('/youtubei/v1/browse',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'})"
+        ".then(function(r){return r.json();}).then(function(j){if(j.ok)mark('browse');})"
+        ".catch(function(e){console.error('XV6-YTBOOT fetch '+e);});\n";
+    static const char ytw_body[] =
+        "<!doctype html><html><head><meta charset=utf-8>"
+        "<title>xv6-ytwaterfall:boot</title>"
+        "<script>"
+        "window.__xv6Waterfall=[];"
+        "function mark(x){if(__xv6Waterfall.indexOf(x)<0)__xv6Waterfall.push(x);"
+        "document.title='xv6-ytwaterfall:'+__xv6Waterfall.join(',');"
+        "console.log('XV6-YTWATERFALL '+__xv6Waterfall.join(','));done();}"
+        "function done(){var need=['kevlar','webanimations','adapter','webcomponents','intersection','i18n','scheduler','spf','network','inline','body','app-connected','domcontent','load','browse'];"
+        "if(need.every(function(x){return __xv6Waterfall.indexOf(x)>=0;})){document.title='xv6-ytwaterfall:PASS:'+__xv6Waterfall.join(',');console.log('XV6-YTWATERFALL PASS');}}"
+        "document.addEventListener('DOMContentLoaded',function(){mark('domcontent');});"
+        "window.addEventListener('load',function(){mark('load');});"
+        "</script>"
+        "<script src=/yt/kevlar.js></script>"
+        "<script src=/yt/webanimations.js></script>"
+        "<script src=/yt/adapter.js></script>"
+        "<script src=/yt/webcomponents.js></script>"
+        "<script src=/yt/intersection.js></script>"
+        "<script src=/yt/i18n.js></script>"
+        "<script src=/yt/scheduler.js></script>"
+        "<script src=/yt/spf.js></script>"
+        "<script src=/yt/network.js></script>"
+        "<script>"
+        "window.ytInitialData={contents:{twoColumnBrowseResultsRenderer:{tabs:[{tabRenderer:{content:{richGridRenderer:{contents:[{richItemRenderer:{content:{videoRenderer:{videoId:'xv6'}}}}]}}}}]}}};"
+        "customElements.define('ytd-app',class extends HTMLElement{connectedCallback(){mark('app-connected');}});"
+        "mark('inline');"
+        "fetch('/youtubei/v1/browse',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({context:{client:{clientName:'WEB'}}})})"
+        ".then(function(r){return r.json();}).then(function(j){if(j.ok)mark('browse');})"
+        ".catch(function(e){console.error('XV6-YTWATERFALL fetch '+e);});"
+        "</script></head><body><ytd-app><main id=feed><ytd-rich-grid-renderer>"
+        "<ytd-rich-item-renderer><ytd-video-renderer><img src=/thumb.jpg></ytd-video-renderer></ytd-rich-item-renderer>"
+        "</ytd-rich-grid-renderer></main></ytd-app>"
+        "<script>mark('body');</script></body></html>";
+    static const char ytw_kevlar_js[] =
+        "window.ytcfg={data_:{EMERGENCY_BASE_URL:'http://127.0.0.1:18080',WEB_PLAYER_CONTEXT_CONFIGS:{WEB_PLAYER_CONTEXT_CONFIG_ID_KEVLAR_WATCH:{}}}};mark('kevlar');\n";
+    static const char ytw_webanimations_js[] = "mark('webanimations');\n";
+    static const char ytw_adapter_js[] = "mark('adapter');\n";
+    static const char ytw_webcomponents_js[] = "window.ShadyCSS={};window.Polymer={};mark('webcomponents');\n";
+    static const char ytw_intersection_js[] = "if(!window.IntersectionObserver)throw new Error('missing IntersectionObserver');mark('intersection');\n";
+    static const char ytw_i18n_js[] = "window.yt={};mark('i18n');\n";
+    static const char ytw_scheduler_js[] =
+        "Promise.resolve().then(function(){mark('scheduler');});\n";
+    static const char ytw_spf_js[] = "mark('spf');\n";
+    static const char ytw_network_js[] = "mark('network');\n";
+    static const char feature_gate_body[] =
+        "<!doctype html><meta charset=utf-8>"
+        "<title>xv6-feature-gates:boot</title><h1 id=out>boot</h1>"
+        "<script>"
+        "window.__xv6Feature=[];"
+        "function mark(x){if(__xv6Feature.indexOf(x)<0)__xv6Feature.push(x);"
+        "document.getElementById('out').textContent=__xv6Feature.join(',');"
+        "document.title='xv6-feature-gates:'+__xv6Feature.join(',');"
+        "console.log('XV6-FEATURE-GATES '+__xv6Feature.join(','));done();}"
+        "function fail(x,e){document.title='xv6-feature-gates:FAIL:'+x;"
+        "console.error('XV6-FEATURE-GATES FAIL '+x+' '+(e&&e.stack||e));}"
+        "function done(){var need=['crypto','digest','offscreen','domcontent','load'];"
+        "if(need.every(function(x){return __xv6Feature.indexOf(x)>=0;})){"
+        "document.title='xv6-feature-gates:PASS:'+__xv6Feature.join(',');"
+        "console.log('XV6-FEATURE-GATES PASS');}}"
+        "document.addEventListener('DOMContentLoaded',function(){mark('domcontent');});"
+        "window.addEventListener('load',function(){mark('load');});"
+        "try{if(!window.crypto||!crypto.subtle)throw new Error('missing crypto.subtle');"
+        "mark('crypto');crypto.subtle.digest('SHA-256',new Uint8Array([1,2,3])).then(function(){mark('digest');}).catch(function(e){fail('digest',e);});}"
+        "catch(e){fail('crypto',e);}"
+        "try{if(!window.OffscreenCanvas)throw new Error('missing OffscreenCanvas');"
+        "var c=new OffscreenCanvas(8,8);var ctx=c.getContext('2d');ctx.fillRect(0,0,1,1);mark('offscreen');}"
+        "catch(e){fail('offscreen',e);}"
+        "</script>";
+    static const char idle_browse_body[] =
+        "<!doctype html><meta charset=utf-8>"
+        "<title>xv6-idle-browse:boot</title><h1 id=out>boot</h1><ytd-app></ytd-app>"
+        "<script>"
+        "window.__xv6Idle=[];"
+        "function mark(x){if(__xv6Idle.indexOf(x)<0)__xv6Idle.push(x);"
+        "document.getElementById('out').textContent=__xv6Idle.join(',');"
+        "document.title='xv6-idle-browse:'+__xv6Idle.join(',');"
+        "console.log('XV6-IDLE-BROWSE '+__xv6Idle.join(','));done();}"
+        "function fail(x,e){document.title='xv6-idle-browse:FAIL:'+x;"
+        "console.error('XV6-IDLE-BROWSE FAIL '+x+' '+(e&&e.stack||e));}"
+        "function done(){var need=['ce','idle-api','idle-run','browse','domcontent','load'];"
+        "if(need.every(function(x){return __xv6Idle.indexOf(x)>=0;})){"
+        "document.title='xv6-idle-browse:PASS:'+__xv6Idle.join(',');"
+        "console.log('XV6-IDLE-BROWSE PASS');}}"
+        "document.addEventListener('DOMContentLoaded',function(){mark('domcontent');});"
+        "window.addEventListener('load',function(){mark('load');});"
+        "customElements.define('ytd-app',class extends HTMLElement{connectedCallback(){mark('ce');}});"
+        "try{if(typeof requestIdleCallback!=='function')throw new Error('missing requestIdleCallback');mark('idle-api');"
+        "requestIdleCallback(function(deadline){try{if(!deadline||typeof deadline.timeRemaining!=='function')throw new Error('bad deadline');"
+        "mark('idle-run');fetch('/youtubei/v1/browse',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'})"
+        ".then(function(r){return r.json();}).then(function(j){if(j.ok)mark('browse');else fail('browse-status','bad json');})"
+        ".catch(function(e){fail('browse-fetch',e);});}catch(e){fail('idle-run',e);}}, {timeout:500});}"
+        "catch(e){fail('idle-api',e);}"
+        "</script>";
+    static const char compat_gate_body[] =
+        "<!doctype html><meta charset=utf-8>"
+        "<title>xv6-compat-gates:boot</title><h1 id=out>boot</h1><ytd-app></ytd-app>"
+        "<script>"
+        "window.__xv6Compat=[];"
+        "function mark(x){if(__xv6Compat.indexOf(x)<0)__xv6Compat.push(x);"
+        "document.getElementById('out').textContent=__xv6Compat.join(',');"
+        "document.title='xv6-compat-gates:'+__xv6Compat.join(',');"
+        "console.log('XV6-COMPAT-GATES '+__xv6Compat.join(','));done();}"
+        "function fail(x,e){document.title='xv6-compat-gates:FAIL:'+x;"
+        "console.error('XV6-COMPAT-GATES FAIL '+x+' '+(e&&e.stack||e));}"
+        "function done(){var need=['ce','tt-api','tt-policy','ua-api','ua-high','idle-run','browse','domcontent','load'];"
+        "if(need.every(function(x){return __xv6Compat.indexOf(x)>=0;})){"
+        "document.title='xv6-compat-gates:PASS:'+__xv6Compat.join(',');"
+        "console.log('XV6-COMPAT-GATES PASS');}}"
+        "document.addEventListener('DOMContentLoaded',function(){mark('domcontent');});"
+        "window.addEventListener('load',function(){mark('load');});"
+        "customElements.define('ytd-app',class extends HTMLElement{connectedCallback(){mark('ce');}});"
+        "try{if(!window.trustedTypes||typeof trustedTypes.createPolicy!=='function')throw new Error('missing trustedTypes');"
+        "mark('tt-api');var p=trustedTypes.createPolicy('xv6',{createHTML:function(s){return String(s).replace('bad','good');},createScript:function(s){return String(s);},createScriptURL:function(s){return String(s);}});"
+        "if(p.createHTML('bad')!=='good')throw new Error('bad Trusted Types policy');"
+        "if(trustedTypes.createPolicy('xv6',{createHTML:function(s){return String(s);}})!==p)throw new Error('bad duplicate policy reuse');mark('tt-policy');}"
+        "catch(e){fail('trusted-types',e);}"
+        "try{if(!navigator.userAgentData||typeof navigator.userAgentData.getHighEntropyValues!=='function')throw new Error('missing userAgentData');"
+        "mark('ua-api');navigator.userAgentData.getHighEntropyValues(['architecture','bitness','fullVersionList','platformVersion','uaFullVersion']).then(function(v){"
+        "if(!v||!v.architecture||!v.bitness||!v.fullVersionList)throw new Error('bad high entropy values');mark('ua-high');}).catch(function(e){fail('ua-high',e);});}"
+        "catch(e){fail('ua-api',e);}"
+        "try{requestIdleCallback(function(){mark('idle-run');fetch('/youtubei/v1/browse',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'})"
+        ".then(function(r){return r.json();}).then(function(j){if(j.ok)mark('browse');else fail('browse-status','bad json');})"
+        ".catch(function(e){fail('browse-fetch',e);});},{timeout:500});}"
+        "catch(e){fail('idle-run',e);}"
+        "</script>";
+    static const char json_body[] = "{\"ok\":true}\n";
+    static const char xhr_body[] = "ok";
+    static const char stream_body[] =
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\n"
+        "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210\n";
+    int coop = webkit_coop_smoke_enabled_by_cmdline();
+    int js_smoke = webkit_js_smoke_enabled_by_cmdline();
+    int ytboot_smoke = webkit_youtube_boot_smoke_enabled_by_cmdline();
+    int ytw_smoke = webkit_youtube_waterfall_smoke_enabled_by_cmdline();
+    int feature_gate_smoke = webkit_feature_gate_smoke_enabled_by_cmdline();
+    int idle_browse_smoke = webkit_idle_browse_smoke_enabled_by_cmdline();
+    int compat_gate_smoke = webkit_compat_gate_smoke_enabled_by_cmdline();
+    char header[384];
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     int one = 1;
     struct sockaddr_in addr;
@@ -145,22 +355,181 @@ static void run_http_smoke_server(void)
         listen(fd, 4) < 0)
         _exit(1);
 
-    snprintf(header, sizeof(header),
-             "HTTP/1.1 200 OK\r\n"
-             "Content-Type: text/html\r\n"
-             "Content-Length: %u\r\n"
-             "Connection: close\r\n\r\n",
-             (unsigned)strlen(body));
-
     for (;;) {
-        char req[256];
+        char req[2048];
+        const char *path = "/";
+        const char *body = plain_body;
+        const char *ctype = "text/html";
+        const char *extra = coop ? "Cross-Origin-Opener-Policy: same-origin\r\n" : "";
+        size_t used = 0;
         int cfd = accept(fd, NULL, NULL);
         if (cfd < 0) {
             if (errno == EINTR)
                 continue;
             break;
         }
-        read(cfd, req, sizeof(req));
+        while (used + 1 < sizeof(req)) {
+            int n = read(cfd, req + used, sizeof(req) - used - 1);
+
+            if (n <= 0)
+                break;
+            used += (size_t)n;
+            req[used] = '\0';
+            if (strstr(req, "\r\n\r\n"))
+                break;
+        }
+        char *header_end = strstr(req, "\r\n\r\n");
+        size_t body_seen = 0;
+        size_t content_length = 0;
+
+        if (header_end) {
+            char *cl = strstr(req, "Content-Length:");
+
+            if (!cl)
+                cl = strstr(req, "content-length:");
+            body_seen = used - (size_t)((header_end + 4) - req);
+            if (cl) {
+                cl = strchr(cl, ':');
+                if (cl) {
+                    cl++;
+                    while (*cl == ' ' || *cl == '\t')
+                        cl++;
+                    content_length = strtoul(cl, NULL, 10);
+                }
+            }
+        }
+        while (body_seen < content_length) {
+            char drain[512];
+            size_t want = content_length - body_seen;
+            int n;
+
+            if (want > sizeof(drain))
+                want = sizeof(drain);
+            n = read(cfd, drain, want);
+            if (n <= 0)
+                break;
+            body_seen += (size_t)n;
+        }
+        if (strncmp(req, "GET ", 4) == 0 || strncmp(req, "POST ", 5) == 0) {
+            path = req + (req[0] == 'G' ? 4 : 5);
+            char *end = strchr(path, ' ');
+            if (end)
+                *end = '\0';
+        }
+        if (ytboot_smoke && strcmp(path, "/large.js") == 0) {
+            static const char pad[] =
+                "                                                                ";
+            const unsigned pad_bytes = 10 * 1024 * 1024;
+            unsigned content_length = strlen(large_js_prefix) + pad_bytes +
+                strlen(large_js_suffix);
+
+            snprintf(header, sizeof(header),
+                     "HTTP/1.1 200 OK\r\n"
+                     "Content-Type: text/javascript\r\n"
+                     "Content-Length: %u\r\n"
+                     "%s"
+                     "Connection: close\r\n\r\n",
+                     content_length, extra);
+            write(cfd, header, strlen(header));
+            write(cfd, large_js_prefix, strlen(large_js_prefix));
+            for (unsigned sent = 0; sent < pad_bytes; ) {
+                unsigned n = sizeof(pad) - 1;
+
+                if (n > pad_bytes - sent)
+                    n = pad_bytes - sent;
+                write(cfd, pad, n);
+                sent += n;
+            }
+            write(cfd, large_js_suffix, strlen(large_js_suffix));
+            close(cfd);
+            continue;
+        }
+        if (compat_gate_smoke) {
+            if (strcmp(path, "/youtubei/v1/browse") == 0) {
+                body = json_body;
+                ctype = "application/json";
+            } else {
+                body = compat_gate_body;
+            }
+        } else if (idle_browse_smoke) {
+            if (strcmp(path, "/youtubei/v1/browse") == 0) {
+                body = json_body;
+                ctype = "application/json";
+            } else {
+                body = idle_browse_body;
+            }
+        } else if (feature_gate_smoke) {
+            body = feature_gate_body;
+        } else if (ytw_smoke) {
+            if (strncmp(path, "/yt/", 4) == 0) {
+                ctype = "text/javascript";
+                if (strcmp(path, "/yt/kevlar.js") == 0) {
+                    usleep(250000);
+                    body = ytw_kevlar_js;
+                } else if (strcmp(path, "/yt/webanimations.js") == 0) {
+                    body = ytw_webanimations_js;
+                } else if (strcmp(path, "/yt/adapter.js") == 0) {
+                    body = ytw_adapter_js;
+                } else if (strcmp(path, "/yt/webcomponents.js") == 0) {
+                    usleep(150000);
+                    body = ytw_webcomponents_js;
+                } else if (strcmp(path, "/yt/intersection.js") == 0) {
+                    body = ytw_intersection_js;
+                } else if (strcmp(path, "/yt/i18n.js") == 0) {
+                    body = ytw_i18n_js;
+                } else if (strcmp(path, "/yt/scheduler.js") == 0) {
+                    body = ytw_scheduler_js;
+                } else if (strcmp(path, "/yt/spf.js") == 0) {
+                    usleep(100000);
+                    body = ytw_spf_js;
+                } else if (strcmp(path, "/yt/network.js") == 0) {
+                    body = ytw_network_js;
+                } else {
+                    body = "";
+                }
+            } else if (strcmp(path, "/youtubei/v1/browse") == 0) {
+                body = json_body;
+                ctype = "application/json";
+            } else if (strcmp(path, "/thumb.jpg") == 0) {
+                body = "";
+                ctype = "image/jpeg";
+            } else {
+                body = ytw_body;
+            }
+        } else if (ytboot_smoke) {
+            if (strcmp(path, "/small.js") == 0) {
+                body = small_js;
+                ctype = "text/javascript";
+            } else if (strcmp(path, "/youtubei/v1/browse") == 0) {
+                body = json_body;
+                ctype = "application/json";
+            } else {
+                body = ytboot_body;
+            }
+        } else if (js_smoke) {
+            if (strcmp(path, "/after.js") == 0) {
+                body = after_js;
+                ctype = "text/javascript";
+            } else if (strcmp(path, "/json") == 0) {
+                body = json_body;
+                ctype = "application/json";
+            } else if (strcmp(path, "/xhr") == 0) {
+                body = xhr_body;
+                ctype = "text/plain";
+            } else if (strcmp(path, "/stream") == 0) {
+                body = stream_body;
+                ctype = "application/octet-stream";
+            } else {
+                body = js_body;
+            }
+        }
+        snprintf(header, sizeof(header),
+                 "HTTP/1.1 200 OK\r\n"
+                 "Content-Type: %s\r\n"
+                 "Content-Length: %u\r\n"
+                 "%s"
+                 "Connection: close\r\n\r\n",
+                 ctype, (unsigned)strlen(body), extra);
         write(cfd, header, strlen(header));
         write(cfd, body, strlen(body));
         close(cfd);
@@ -237,8 +606,16 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             argv_default[2] = NULL;
         if (arg3 == NULL)
             argv_default[3] = NULL;
+        const char *minibrowser_url = arg1 ? arg1 : "https://www.google.com/";
+        int minibrowser_youtube_compat =
+            is_minibrowser && webkit_youtube_compat_url(minibrowser_url);
+        const char *minibrowser_feature_flags =
+            (minibrowser_youtube_compat ||
+             webkit_request_idle_disabled_by_cmdline()) ?
+            webkit_feature_flags_no_idle : webkit_feature_flags;
         char *argv_minibrowser[] = {
             (char *)name,
+            "--autoplay-policy=allow",
             "--enable-javascript=false",
             "--enable-sandbox=false",
             "--enable-webgl=false",
@@ -248,12 +625,30 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             "--enable-page-cache=false",
             "--enable-dns-prefetching=false",
             "--enable-offline-web-application-cache=false",
-            "--features=+requestIdleCallback",
-            (char *)(arg1 ? arg1 : "https://www.google.com/"),
+            (char *)minibrowser_feature_flags,
+            (char *)minibrowser_url,
+            NULL,
+        };
+        char *argv_minibrowser_youtube[] = {
+            (char *)name,
+            "--autoplay-policy=allow",
+            (char *)webkit_youtube_compat_user_agent,
+            "--enable-javascript=false",
+            "--enable-sandbox=false",
+            "--enable-webgl=false",
+            "--enable-webaudio=true",
+            "--enable-mediasource=true",
+            "--enable-media-stream=false",
+            "--enable-page-cache=false",
+            "--enable-dns-prefetching=false",
+            "--enable-offline-web-application-cache=false",
+            (char *)minibrowser_feature_flags,
+            (char *)minibrowser_url,
             NULL,
         };
         char *argv_minibrowser_js[] = {
             (char *)name,
+            "--autoplay-policy=allow",
             "--enable-sandbox=false",
             "--enable-webgl=false",
             "--enable-webaudio=true",
@@ -262,12 +657,29 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             "--enable-page-cache=false",
             "--enable-dns-prefetching=false",
             "--enable-offline-web-application-cache=false",
-            "--features=+requestIdleCallback",
-            (char *)(arg1 ? arg1 : "https://www.google.com/"),
+            (char *)minibrowser_feature_flags,
+            (char *)minibrowser_url,
+            NULL,
+        };
+        char *argv_minibrowser_js_youtube[] = {
+            (char *)name,
+            "--autoplay-policy=allow",
+            (char *)webkit_youtube_compat_user_agent,
+            "--enable-sandbox=false",
+            "--enable-webgl=false",
+            "--enable-webaudio=true",
+            "--enable-mediasource=true",
+            "--enable-media-stream=false",
+            "--enable-page-cache=false",
+            "--enable-dns-prefetching=false",
+            "--enable-offline-web-application-cache=false",
+            (char *)minibrowser_feature_flags,
+            (char *)minibrowser_url,
             NULL,
         };
         char *argv_minibrowser_accel[] = {
             (char *)name,
+            "--autoplay-policy=allow",
             "--enable-javascript=false",
             "--enable-sandbox=false",
             "--enable-webgl=false",
@@ -277,12 +689,30 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             "--enable-page-cache=false",
             "--enable-dns-prefetching=false",
             "--enable-offline-web-application-cache=false",
-            "--features=+requestIdleCallback",
-            (char *)(arg1 ? arg1 : "https://www.google.com/"),
+            (char *)minibrowser_feature_flags,
+            (char *)minibrowser_url,
+            NULL,
+        };
+        char *argv_minibrowser_accel_youtube[] = {
+            (char *)name,
+            "--autoplay-policy=allow",
+            (char *)webkit_youtube_compat_user_agent,
+            "--enable-javascript=false",
+            "--enable-sandbox=false",
+            "--enable-webgl=false",
+            "--enable-webaudio=true",
+            "--enable-mediasource=true",
+            "--enable-media-stream=false",
+            "--enable-page-cache=false",
+            "--enable-dns-prefetching=false",
+            "--enable-offline-web-application-cache=false",
+            (char *)minibrowser_feature_flags,
+            (char *)minibrowser_url,
             NULL,
         };
         char *argv_minibrowser_accel_js[] = {
             (char *)name,
+            "--autoplay-policy=allow",
             "--enable-sandbox=false",
             "--enable-webgl=true",
             "--enable-webaudio=true",
@@ -291,12 +721,29 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             "--enable-page-cache=false",
             "--enable-dns-prefetching=false",
             "--enable-offline-web-application-cache=false",
-            "--features=+requestIdleCallback",
-            (char *)(arg1 ? arg1 : "https://www.google.com/"),
+            (char *)minibrowser_feature_flags,
+            (char *)minibrowser_url,
+            NULL,
+        };
+        char *argv_minibrowser_accel_js_youtube[] = {
+            (char *)name,
+            "--autoplay-policy=allow",
+            (char *)webkit_youtube_compat_user_agent,
+            "--enable-sandbox=false",
+            "--enable-webgl=true",
+            "--enable-webaudio=true",
+            "--enable-mediasource=true",
+            "--enable-media-stream=false",
+            "--enable-page-cache=false",
+            "--enable-dns-prefetching=false",
+            "--enable-offline-web-application-cache=false",
+            (char *)minibrowser_feature_flags,
+            (char *)minibrowser_url,
             NULL,
         };
         char *argv_minibrowser_accel_webgl_js[] = {
             (char *)name,
+            "--autoplay-policy=allow",
             "--enable-sandbox=false",
             "--enable-webgl=true",
             "--enable-webaudio=true",
@@ -305,8 +752,24 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             "--enable-page-cache=false",
             "--enable-dns-prefetching=false",
             "--enable-offline-web-application-cache=false",
-            "--features=+requestIdleCallback",
-            (char *)(arg1 ? arg1 : "https://www.google.com/"),
+            (char *)minibrowser_feature_flags,
+            (char *)minibrowser_url,
+            NULL,
+        };
+        char *argv_minibrowser_accel_webgl_js_youtube[] = {
+            (char *)name,
+            "--autoplay-policy=allow",
+            (char *)webkit_youtube_compat_user_agent,
+            "--enable-sandbox=false",
+            "--enable-webgl=true",
+            "--enable-webaudio=true",
+            "--enable-mediasource=true",
+            "--enable-media-stream=false",
+            "--enable-page-cache=false",
+            "--enable-dns-prefetching=false",
+            "--enable-offline-web-application-cache=false",
+            (char *)minibrowser_feature_flags,
+            (char *)minibrowser_url,
             NULL,
         };
         char *envp_default[] = {
@@ -354,21 +817,6 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             "WEBKIT_XV6_SKIP_RULE_FEATURES=1",
             "WEBKIT_XV6_SKIP_INITIAL_EMPTY_RENDER=1",
             "SOUP_FORCE_HTTP1=1",
-            "JSC_useJIT=0",
-            "JSC_useBaselineJIT=0",
-            "JSC_useDFGJIT=0",
-            "JSC_useFTLJIT=0",
-            "JSC_useRegExpJIT=0",
-            "JSC_useDOMJIT=0",
-            "JSC_useBBQJIT=0",
-            "JSC_useOMGJIT=0",
-            "JSC_useConcurrentJIT=0",
-            "JSC_useConcurrentGC=0",
-            "JSC_numberOfDFGCompilerThreads=1",
-            "JSC_numberOfFTLCompilerThreads=1",
-            "JSC_numberOfWasmCompilerThreads=1",
-            "JSC_numberOfWorklistThreads=1",
-            "JSC_numberOfGCMarkers=1",
             NULL
         };
         char *envp_minibrowser_accel[] = {
@@ -401,21 +849,6 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             "ANGLE_DEFAULT_PLATFORM=gl",
             "SOUP_FORCE_HTTP1=1",
             "EPOXY_XV6_ALLOW_MISSING=1",
-            "JSC_useJIT=0",
-            "JSC_useBaselineJIT=0",
-            "JSC_useDFGJIT=0",
-            "JSC_useFTLJIT=0",
-            "JSC_useRegExpJIT=0",
-            "JSC_useDOMJIT=0",
-            "JSC_useBBQJIT=0",
-            "JSC_useOMGJIT=0",
-            "JSC_useConcurrentJIT=0",
-            "JSC_useConcurrentGC=0",
-            "JSC_numberOfDFGCompilerThreads=1",
-            "JSC_numberOfFTLCompilerThreads=1",
-            "JSC_numberOfWasmCompilerThreads=1",
-            "JSC_numberOfWorklistThreads=1",
-            "JSC_numberOfGCMarkers=1",
             NULL
         };
         char *envp_minibrowser_accel_sw[] = {
@@ -450,21 +883,6 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             "WEBKIT_XV6_SKIP_RULE_FEATURES=1",
             "SOUP_FORCE_HTTP1=1",
             "EPOXY_XV6_ALLOW_MISSING=1",
-            "JSC_useJIT=0",
-            "JSC_useBaselineJIT=0",
-            "JSC_useDFGJIT=0",
-            "JSC_useFTLJIT=0",
-            "JSC_useRegExpJIT=0",
-            "JSC_useDOMJIT=0",
-            "JSC_useBBQJIT=0",
-            "JSC_useOMGJIT=0",
-            "JSC_useConcurrentJIT=0",
-            "JSC_useConcurrentGC=0",
-            "JSC_numberOfDFGCompilerThreads=1",
-            "JSC_numberOfFTLCompilerThreads=1",
-            "JSC_numberOfWasmCompilerThreads=1",
-            "JSC_numberOfWorklistThreads=1",
-            "JSC_numberOfGCMarkers=1",
             NULL
         };
         char *envp_mesa_accel[] = {
@@ -504,21 +922,38 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
         int webkit_accel =
             (is_minibrowser && minibrowser_accel) || is_webkitgpusmoke;
         int virgl_available = xv6_virgl_available();
+        char **argv_exec = argv_default;
         if (is_webkitgpusmoke)
             webkit_accel = 0;
+        if (is_minibrowser) {
+            if (minibrowser_accel) {
+                if (minibrowser_js) {
+                    if (minibrowser_webgl_smoke)
+                        argv_exec = minibrowser_youtube_compat ?
+                            argv_minibrowser_accel_webgl_js_youtube :
+                            argv_minibrowser_accel_webgl_js;
+                    else
+                        argv_exec = minibrowser_youtube_compat ?
+                            argv_minibrowser_accel_js_youtube :
+                            argv_minibrowser_accel_js;
+                } else {
+                    argv_exec = minibrowser_youtube_compat ?
+                        argv_minibrowser_accel_youtube :
+                        argv_minibrowser_accel;
+                }
+            } else {
+                argv_exec = minibrowser_js ?
+                    (minibrowser_youtube_compat ?
+                         argv_minibrowser_js_youtube :
+                         argv_minibrowser_js) :
+                    (minibrowser_youtube_compat ?
+                         argv_minibrowser_youtube :
+                         argv_minibrowser);
+            }
+        }
         errno = 0;
         execve(path,
-               is_minibrowser ?
-                    (minibrowser_accel ?
-                         (minibrowser_js ?
-                              (minibrowser_webgl_smoke ?
-                                   argv_minibrowser_accel_webgl_js :
-                                   argv_minibrowser_accel_js) :
-                              argv_minibrowser_accel) :
-                         (minibrowser_js ?
-                              argv_minibrowser_js :
-                              argv_minibrowser)) :
-                    argv_default,
+               argv_exec,
                is_webkit ?
                     (webkit_accel ?
                          (virgl_available ? envp_minibrowser_accel :
@@ -709,6 +1144,96 @@ static int webkit_http_smoke_enabled_by_cmdline(void)
     return token_is_enabled(buf, "webkit_http_smoke");
 }
 
+static int webkit_coop_smoke_enabled_by_cmdline(void)
+{
+    char buf[512];
+
+    if (read_cmdline(buf, sizeof(buf)) < 0)
+        return 0;
+
+    return token_is_enabled(buf, "webkit_coop_smoke");
+}
+
+static int webkit_js_smoke_enabled_by_cmdline(void)
+{
+    char buf[512];
+
+    if (read_cmdline(buf, sizeof(buf)) < 0)
+        return 0;
+
+    return token_is_enabled(buf, "webkit_js_smoke");
+}
+
+static int webkit_youtube_boot_smoke_enabled_by_cmdline(void)
+{
+    char buf[512];
+
+    if (read_cmdline(buf, sizeof(buf)) < 0)
+        return 0;
+
+    return token_is_enabled(buf, "webkit_youtube_boot_smoke");
+}
+
+static int webkit_youtube_waterfall_smoke_enabled_by_cmdline(void)
+{
+    char buf[512];
+
+    if (read_cmdline(buf, sizeof(buf)) < 0)
+        return 0;
+
+    return token_is_enabled(buf, "webkit_youtube_waterfall_smoke");
+}
+
+static int webkit_youtube_compat_disabled_by_cmdline(void)
+{
+    char buf[512];
+
+    if (read_cmdline(buf, sizeof(buf)) < 0)
+        return 0;
+
+    return token_is_disabled(buf, "webkit_youtube_compat");
+}
+
+static int webkit_request_idle_disabled_by_cmdline(void)
+{
+    char buf[512];
+
+    if (read_cmdline(buf, sizeof(buf)) < 0)
+        return 0;
+
+    return token_is_disabled(buf, "webkit_request_idle");
+}
+
+static int webkit_feature_gate_smoke_enabled_by_cmdline(void)
+{
+    char buf[512];
+
+    if (read_cmdline(buf, sizeof(buf)) < 0)
+        return 0;
+
+    return token_is_enabled(buf, "webkit_feature_gate_smoke");
+}
+
+static int webkit_idle_browse_smoke_enabled_by_cmdline(void)
+{
+    char buf[512];
+
+    if (read_cmdline(buf, sizeof(buf)) < 0)
+        return 0;
+
+    return token_is_enabled(buf, "webkit_idle_browse_smoke");
+}
+
+static int webkit_compat_gate_smoke_enabled_by_cmdline(void)
+{
+    char buf[512];
+
+    if (read_cmdline(buf, sizeof(buf)) < 0)
+        return 0;
+
+    return token_is_enabled(buf, "webkit_compat_gate_smoke");
+}
+
 static int webkit_js_disabled_by_cmdline(void)
 {
     char buf[512];
@@ -756,8 +1281,8 @@ static int webkit_timeout_ms_from_cmdline(int fallback)
     }
     if (timeout_ms < 0)
         timeout_ms = 0;
-    if (timeout_ms > 120000)
-        timeout_ms = 120000;
+    if (timeout_ms > 600000)
+        timeout_ms = 600000;
     return timeout_ms;
 }
 
@@ -1028,6 +1553,7 @@ int main(void)
 
         while (g_running) {
             int status;
+            long long now_ms;
             pid_t exited = waitpid(-1, &status, WNOHANG);
             if (exited > 0) {
                 if (exited == wlcomp_pid) {
@@ -1067,8 +1593,9 @@ int main(void)
                 }
             }
             usleep(100000);
+            now_ms = monotonic_ms();
             if (webkit_timeout_ms > 0 && client_pid > 0 &&
-                monotonic_ms() - launch_ms >= webkit_timeout_ms) {
+                now_ms - launch_ms >= webkit_timeout_ms) {
                 fprintf(stderr,
                         "[desktop] WebKit timeout reached, closing pid=%d\n",
                         client_pid);

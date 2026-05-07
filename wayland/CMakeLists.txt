@@ -51,6 +51,10 @@ set(_mesaeglinfo_installed ${XV6_SYSROOT}/bin/mesaeglinfo)
 set(_dmabufsmoke_installed ${XV6_SYSROOT}/bin/dmabufsmoke)
 set(_drmgpuprobe_installed ${XV6_SYSROOT}/bin/drmgpuprobe)
 set(_webkitgpusmoke_installed ${XV6_SYSROOT}/bin/webkitgpusmoke)
+# The small xv6 EGL/GLES shim is linked directly into wlcomp/glsmoke from the
+# build directory. Do not install it under Mesa's public libEGL/libGLESv2 names:
+# GTK/WebKit depend on Mesa's shared EGL stack, and a stale static shim archive
+# in the sysroot can be picked up by Meson and linked into shared libraries.
 set(_egl_installed ${XV6_SYSROOT}/lib/libEGL.a)
 set(_gles_installed ${XV6_SYSROOT}/lib/libGLESv2.a)
 file(MAKE_DIRECTORY ${_wl_build} ${_wl_proto_dir} ${XV6_SYSROOT}/bin)
@@ -130,6 +134,7 @@ add_custom_command(
                 -lffi -lpthread -lrt -lm
     DEPENDS ${_wl_src} ${_wl_font} ${_xdg_header} ${_xdg_code}
             ${_dmabuf_header} ${_dmabuf_code}
+            ${XV6_SYSROOT}/lib/libwayland-server.a
     COMMENT "Compiling wlcomp from source"
     VERBATIM)
 
@@ -143,7 +148,7 @@ add_custom_command(
 
 add_custom_command(
     OUTPUT  ${_xv6egl_obj}
-    COMMAND ${CMAKE_C_COMPILER} -O2 -g -Wall -static
+    COMMAND ${CMAKE_C_COMPILER} -O2 -g -Wall -fPIC
                 -DWL_EGL_PLATFORM
                 -isystem ${XV6_SYSROOT}/include
                 -I ${XV6_SYSROOT}/include/wayland
@@ -180,6 +185,7 @@ add_custom_command(
                 -lffi -lpthread -lrt -lm
     DEPENDS ${WAYLAND_SRC_DIR}/glsmoke.c ${_xdg_client_header}
             ${_xdg_client_code} ${_xv6egl_lib} ${_xv6gles_lib}
+            ${XV6_SYSROOT}/lib/libwayland-client.a
     COMMENT "Compiling glsmoke Wayland client"
     VERBATIM)
 
@@ -293,7 +299,6 @@ add_custom_command(
             ${_mesaglsmoke_installed} ${_mesawlegl_installed}
             ${_mesaeglinfo_installed} ${_dmabufsmoke_installed}
             ${_drmgpuprobe_installed} ${_webkitgpusmoke_installed}
-            ${_egl_installed} ${_gles_installed}
     COMMAND ${CMAKE_COMMAND} -E copy ${_wl_bin} ${_wl_installed}
     COMMAND ${CMAKE_COMMAND} -E copy ${_desktop_bin} ${_desktop_installed}
     COMMAND ${CMAKE_COMMAND} -E copy ${_glsmoke_bin} ${_glsmoke_installed}
@@ -303,12 +308,10 @@ add_custom_command(
     COMMAND ${CMAKE_COMMAND} -E copy ${_dmabufsmoke_bin} ${_dmabufsmoke_installed}
     COMMAND ${CMAKE_COMMAND} -E copy ${_drmgpuprobe_bin} ${_drmgpuprobe_installed}
     COMMAND ${CMAKE_COMMAND} -E copy ${_webkitgpusmoke_bin} ${_webkitgpusmoke_installed}
-    COMMAND ${CMAKE_COMMAND} -E copy ${_xv6egl_lib} ${_egl_installed}
-    COMMAND ${CMAKE_COMMAND} -E copy ${_xv6gles_lib} ${_gles_installed}
+    COMMAND ${CMAKE_COMMAND} -E rm -f ${_egl_installed} ${_gles_installed}
     DEPENDS ${_wl_bin} ${_desktop_bin} ${_glsmoke_bin} ${_mesaglsmoke_bin}
             ${_mesawlegl_bin} ${_mesaeglinfo_bin} ${_dmabufsmoke_bin}
-            ${_drmgpuprobe_bin} ${_webkitgpusmoke_bin} ${_xv6egl_lib}
-            ${_xv6gles_lib}
+            ${_drmgpuprobe_bin} ${_webkitgpusmoke_bin}
     COMMENT "Installing GUI session into ${XV6_SYSROOT}/bin"
     VERBATIM)
 
@@ -317,8 +320,7 @@ add_custom_target(port-wayland ALL DEPENDS
     ${_mesaglsmoke_installed} ${_mesawlegl_installed}
     ${_mesaeglinfo_installed} ${_dmabufsmoke_installed}
     ${_drmgpuprobe_installed}
-    ${_webkitgpusmoke_installed}
-    ${_egl_installed} ${_gles_installed})
+    ${_webkitgpusmoke_installed})
 if(TARGET port-wayland-libs)
     add_dependencies(port-wayland port-wayland-libs)
 endif()

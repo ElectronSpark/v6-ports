@@ -581,6 +581,11 @@ struct wlcomp_buffer {
     int                 y_inverted;
 };
 
+struct wlcomp_frame_callback {
+    struct wl_resource *resource;
+    struct wl_list link;
+};
+
 struct wlcomp_surface {
     struct wl_resource *resource;
     struct wl_resource *xdg_surface;
@@ -589,7 +594,7 @@ struct wlcomp_surface {
     int     has_pending_buffer;
     struct wlcomp_buffer *committed_buf;
     int     buffer_released;  /* 1 = release sent, don't re-release */
-    struct wl_resource *frame_cb;
+    struct wl_list frame_callbacks;
     int32_t x, y;
     int     mapped;
     int     minimized;
@@ -620,11 +625,23 @@ static int g_iwin_focus = -1;   /* index of focused internal window */
 
 static void surface_set_keyboard_focus(struct wlcomp_surface *surf);
 
+static int xv6_wlcomp_trace_enabled(void)
+{
+    static int enabled = -1;
+
+    if (enabled < 0) {
+        const char *env = getenv("WLCOMP_XV6_TRACE");
+        enabled = env && env[0] && strcmp(env, "0") != 0;
+    }
+
+    return enabled;
+}
+
 static void surface_log_limited(struct wlcomp_surface *surf,
                                 const char *event,
                                 struct wlcomp_buffer *buf)
 {
-    if (!surf || surf->log_events >= 48)
+    if (!xv6_wlcomp_trace_enabled() || !surf || surf->log_events >= 48)
         return;
     surf->log_events++;
     fprintf(stderr,
@@ -705,10 +722,14 @@ static void damage_all_frame_callbacks(uint32_t now)
     struct wlcomp_surface *cb_surf;
 
     wl_list_for_each(cb_surf, &g_surfaces, link) {
-        if (cb_surf->frame_cb) {
-            wl_callback_send_done(cb_surf->frame_cb, now);
-            wl_resource_destroy(cb_surf->frame_cb);
-            cb_surf->frame_cb = NULL;
+        struct wlcomp_frame_callback *cb;
+        struct wlcomp_frame_callback *tmp;
+
+        wl_list_for_each_safe(cb, tmp, &cb_surf->frame_callbacks, link) {
+            wl_callback_send_done(cb->resource, now);
+            wl_resource_destroy(cb->resource);
+            wl_list_remove(&cb->link);
+            free(cb);
         }
     }
 }
@@ -1166,9 +1187,10 @@ static void pool_create_buffer(struct wl_client *client,
     wl_resource_set_implementation(buf_res, &buffer_impl, buf,
                                   buffer_destroy_handler);
     wl_client_get_credentials(client, &client_pid, &client_uid, &client_gid);
-    fprintf(stderr,
-            "wlcomp: shm buffer pid=%d size=%dx%d stride=%d fmt=0x%x\n",
-            client_pid, width, height, stride, format);
+    if (xv6_wlcomp_trace_enabled())
+        fprintf(stderr,
+                "wlcomp: shm buffer pid=%d size=%dx%d stride=%d fmt=0x%x\n",
+                client_pid, width, height, stride, format);
 }
 
 static void pool_destroy(struct wl_client *client, struct wl_resource *resource)
@@ -1955,16 +1977,24 @@ static void surface_frame(struct wl_client *client, struct wl_resource *resource
                           uint32_t callback_id)
 {
     struct wlcomp_surface *surf = surface_from_resource(resource);
+    struct wlcomp_frame_callback *frame_cb;
     if (!surf) return;
+
+    frame_cb = calloc(1, sizeof(*frame_cb));
+    if (!frame_cb) {
+        wl_resource_post_no_memory(resource);
+        return;
+    }
 
     struct wl_resource *cb = wl_resource_create(client,
         &wl_callback_interface, 1, callback_id);
     if (!cb) {
+        free(frame_cb);
         wl_resource_post_no_memory(resource);
         return;
     }
-    /* Store the latest frame callback; we'll fire it after compositing */
-    surf->frame_cb = cb;
+    frame_cb->resource = cb;
+    wl_list_insert(surf->frame_callbacks.prev, &frame_cb->link);
     surface_log_limited(surf, "frame", surf->committed_buf);
 }
 
@@ -2122,8 +2152,15 @@ static void surface_destroy_handler(struct wl_resource *resource)
         struct wlcomp_buffer *pending_buf = surf->pending_buf;
         struct wlcomp_buffer *committed_buf = surf->committed_buf;
         struct wlcomp_surface *child;
+        struct wlcomp_frame_callback *cb;
+        struct wlcomp_frame_callback *tmp;
 
         damage_surface(surf);
+        wl_list_for_each_safe(cb, tmp, &surf->frame_callbacks, link) {
+            wl_resource_destroy(cb->resource);
+            wl_list_remove(&cb->link);
+            free(cb);
+        }
         wl_list_for_each(child, &g_surfaces, link) {
             if (child->parent == surf) {
                 child->parent = NULL;
@@ -2141,8 +2178,13 @@ static void surface_destroy_handler(struct wl_resource *resource)
             g_grab_surface = NULL;
             g_grab_mode = 0;
         }
+        if (surf->xdg_toplevel)
+            wl_resource_set_user_data(surf->xdg_toplevel, NULL);
+        if (surf->xdg_surface)
+            wl_resource_set_user_data(surf->xdg_surface, NULL);
         if (surf->subsurface)
             wl_resource_set_user_data(surf->subsurface, NULL);
+        wl_resource_set_user_data(resource, NULL);
         wl_list_remove(&surf->link);
         free(surf);
 
@@ -2204,6 +2246,7 @@ static void comp_create_surface(struct wl_client *client,
     }
 
     surf->resource = res;
+    wl_list_init(&surf->frame_callbacks);
     wl_client_get_credentials(client, &client_pid, &client_uid, &client_gid);
     surf->client_pid = client_pid;
     wl_resource_set_implementation(res, &surface_impl, surf,
@@ -6926,10 +6969,16 @@ static void composite_and_flip(void)
 
         if (ready)
             surface_release_committed_buffer(surf);
-        if (ready && surf->frame_cb) {
-            wl_callback_send_done(surf->frame_cb, now);
-            wl_resource_destroy(surf->frame_cb);
-            surf->frame_cb = NULL;
+        if (ready) {
+            struct wlcomp_frame_callback *cb;
+            struct wlcomp_frame_callback *tmp;
+
+            wl_list_for_each_safe(cb, tmp, &surf->frame_callbacks, link) {
+                wl_callback_send_done(cb->resource, now);
+                wl_resource_destroy(cb->resource);
+                wl_list_remove(&cb->link);
+                free(cb);
+            }
         }
     }
     flush_buffer_releases_after_present();
