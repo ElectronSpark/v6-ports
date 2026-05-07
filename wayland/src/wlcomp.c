@@ -3551,6 +3551,53 @@ static void signal_process_group(pid_t pid, int sig)
     kill(pid, sig);
 }
 
+static void destroy_surfaces_for_pid(pid_t pid)
+{
+    struct wlcomp_surface *surf;
+    struct wlcomp_surface *tmp;
+    struct wl_client *client = NULL;
+
+    if (pid <= 0)
+        return;
+
+    wl_list_for_each_safe(surf, tmp, &g_surfaces, link) {
+        if (surf->client_pid != pid || !surf->resource)
+            continue;
+        client = wl_resource_get_client(surf->resource);
+        damage_surface(surf);
+        break;
+    }
+
+    if (!client)
+        return;
+
+    fprintf(stderr, "wlcomp: destroying Wayland client for exited pid %d\n",
+            pid);
+    wl_client_destroy(client);
+    damage_full_reason(FULL_DAMAGE_CLIENT);
+}
+
+static void destroy_dead_client_surfaces(void)
+{
+    struct wlcomp_surface *surf;
+    struct wlcomp_surface *tmp;
+
+    wl_list_for_each_safe(surf, tmp, &g_surfaces, link) {
+        pid_t pid = surf->client_pid;
+        char path[64];
+
+        if (pid <= 0)
+            continue;
+
+        snprintf(path, sizeof(path), "/proc/%d", pid);
+        if (access(path, F_OK) == 0 || errno != ENOENT)
+            continue;
+
+        destroy_surfaces_for_pid(pid);
+        return;
+    }
+}
+
 static int shortcut_exec_allowed(const char *path, const char *name)
 {
     if (!path || !path[0])
@@ -3950,6 +3997,7 @@ static void reap_children(void)
                     fprintf(stderr, "wlcomp: child pid %d wait status 0x%x\n",
                             g_children[i], status);
                 }
+                destroy_surfaces_for_pid(g_children[i]);
                 g_children[i] = 0;
                 g_child_launch_ms[i] = 0;
                 g_child_name[i][0] = '\0';
@@ -3961,6 +4009,7 @@ static void reap_children(void)
                         "wlcomp: MiniBrowser timeout reached, closing pid %d\n",
                         g_children[i]);
                 terminate_client_pid(g_children[i]);
+                destroy_surfaces_for_pid(g_children[i]);
                 remember_pending_reap(g_children[i]);
                 g_children[i] = 0;
                 g_child_launch_ms[i] = 0;
@@ -7675,6 +7724,10 @@ int main(int argc, char **argv)
 
         /* Process terminal PTY output and auto-refresh monitors */
         process_terminals();
+
+        /* Clients may be launched by desktop, not wlcomp; clean their stale
+         * Wayland resources once their owner process has gone away. */
+        destroy_dead_client_surfaces();
 
         /* Composite and present */
         composite_and_flip();
