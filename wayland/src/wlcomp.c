@@ -186,6 +186,8 @@ struct damage_rect {
 };
 static struct damage_rect g_damage[MAX_DAMAGE_RECTS];
 static int      g_damage_count;
+static struct damage_rect g_paint_clip;
+static int      g_paint_clip_enabled;
 
 enum full_damage_reason {
     FULL_DAMAGE_OTHER,
@@ -228,6 +230,32 @@ static uint32_t g_serial;
 static int rect_area(const struct damage_rect *r)
 {
     return (r->x2 - r->x1) * (r->y2 - r->y1);
+}
+
+static int clip_xyxy_to_paint(int fb_w, int fb_h,
+                              int *x0, int *y0, int *x1, int *y1)
+{
+    if (*x0 < 0) *x0 = 0;
+    if (*y0 < 0) *y0 = 0;
+    if (*x1 > fb_w) *x1 = fb_w;
+    if (*y1 > fb_h) *y1 = fb_h;
+    if (g_paint_clip_enabled) {
+        if (*x0 < g_paint_clip.x1) *x0 = g_paint_clip.x1;
+        if (*y0 < g_paint_clip.y1) *y0 = g_paint_clip.y1;
+        if (*x1 > g_paint_clip.x2) *x1 = g_paint_clip.x2;
+        if (*y1 > g_paint_clip.y2) *y1 = g_paint_clip.y2;
+    }
+    return *x0 < *x1 && *y0 < *y1;
+}
+
+static int pixel_in_paint_clip(int x, int y, int fb_w, int fb_h)
+{
+    if (x < 0 || x >= fb_w || y < 0 || y >= fb_h)
+        return 0;
+    if (!g_paint_clip_enabled)
+        return 1;
+    return x >= g_paint_clip.x1 && x < g_paint_clip.x2 &&
+           y >= g_paint_clip.y1 && y < g_paint_clip.y2;
 }
 
 static int rects_touch_or_overlap(const struct damage_rect *a,
@@ -705,6 +733,7 @@ static int32_t g_grab_start_w, g_grab_start_h;    /* surface size at grab start 
 
 #define WAYLAND_DEMO_TITLE_H 24
 #define WAYLAND_DEMO_BORDER  2
+#define WAYLAND_DEMO_SHADOW  3
 
 static int surface_is_demo_window(const struct wlcomp_surface *surf)
 {
@@ -863,7 +892,10 @@ static void damage_surface_self(const struct wlcomp_surface *s)
     }
     (void)buf;
     damage_rect(ax - frame_border, ay - frame_top - frame_border,
-                gw + frame_border * 2, gh + frame_top + frame_border * 2);
+                gw + frame_border * 2 +
+                    (surface_is_demo_window(s) ? WAYLAND_DEMO_SHADOW : 0),
+                gh + frame_top + frame_border * 2 +
+                    (surface_is_demo_window(s) ? WAYLAND_DEMO_SHADOW : 0));
 }
 
 static void damage_surface(const struct wlcomp_surface *s)
@@ -3380,7 +3412,7 @@ static void draw_char(uint32_t *fb, int fb_w, int fb_h,
                     for (int sx = 0; sx < scale; sx++) {
                         int px = x + col * scale + sx;
                         int py = y + row * scale + sy;
-                        if (px >= 0 && px < fb_w && py >= 0 && py < fb_h)
+                        if (pixel_in_paint_clip(px, py, fb_w, fb_h))
                             fb[py * fb_w + px] = color;
                     }
             }
@@ -3405,10 +3437,18 @@ static int string_pixel_width(const char *s, int scale)
 static void draw_rect(uint32_t *fb, int fb_w, int fb_h,
                       int x, int y, int w, int h, uint32_t color)
 {
-    for (int row = y; row < y + h && row < fb_h; row++) {
-        if (row < 0) continue;
-        for (int col = x; col < x + w && col < fb_w; col++) {
-            if (col < 0) continue;
+    int x0 = x;
+    int y0 = y;
+    int x1 = x + w;
+    int y1 = y + h;
+
+    if (w <= 0 || h <= 0)
+        return;
+    if (!clip_xyxy_to_paint(fb_w, fb_h, &x0, &y0, &x1, &y1))
+        return;
+
+    for (int row = y0; row < y1; row++) {
+        for (int col = x0; col < x1; col++) {
             fb[row * fb_w + col] = color;
         }
     }
@@ -3425,30 +3465,31 @@ static void draw_rounded_rect(uint32_t *fb, int fb_w, int fb_h,
             if (cx * cx + cy * cy <= r * r) {
                 int px, py;
                 px = x + r - cx; py = y + r - cy;
-                if (px >= 0 && px < fb_w && py >= 0 && py < fb_h)
+                if (pixel_in_paint_clip(px, py, fb_w, fb_h))
                     fb[py * fb_w + px] = color;
                 px = x + w - r - 1 + cx; py = y + r - cy;
-                if (px >= 0 && px < fb_w && py >= 0 && py < fb_h)
+                if (pixel_in_paint_clip(px, py, fb_w, fb_h))
                     fb[py * fb_w + px] = color;
                 px = x + r - cx; py = y + h - r - 1 + cy;
-                if (px >= 0 && px < fb_w && py >= 0 && py < fb_h)
+                if (pixel_in_paint_clip(px, py, fb_w, fb_h))
                     fb[py * fb_w + px] = color;
                 px = x + w - r - 1 + cx; py = y + h - r - 1 + cy;
-                if (px >= 0 && px < fb_w && py >= 0 && py < fb_h)
+                if (pixel_in_paint_clip(px, py, fb_w, fb_h))
                     fb[py * fb_w + px] = color;
             }
         }
     }
 }
 
-static void draw_circle(uint32_t *fb, int fb_w, int fb_h,
-                        int cx, int cy, int r, uint32_t color)
+static void __attribute__((unused))
+draw_circle(uint32_t *fb, int fb_w, int fb_h,
+            int cx, int cy, int r, uint32_t color)
 {
     for (int dy = -r; dy <= r; dy++)
         for (int dx = -r; dx <= r; dx++)
             if (dx * dx + dy * dy <= r * r) {
                 int px = cx + dx, py = cy + dy;
-                if (px >= 0 && px < fb_w && py >= 0 && py < fb_h)
+                if (pixel_in_paint_clip(px, py, fb_w, fb_h))
                     fb[py * fb_w + px] = color;
             }
 }
@@ -3577,6 +3618,15 @@ static void destroy_surfaces_for_pid(pid_t pid)
     damage_full_reason(FULL_DAMAGE_CLIENT);
 }
 
+static int process_exists(pid_t pid)
+{
+    if (pid <= 0)
+        return 0;
+    if (kill(pid, 0) == 0)
+        return 1;
+    return errno != ESRCH;
+}
+
 static void destroy_dead_client_surfaces(void)
 {
     struct wlcomp_surface *surf;
@@ -3584,13 +3634,11 @@ static void destroy_dead_client_surfaces(void)
 
     wl_list_for_each_safe(surf, tmp, &g_surfaces, link) {
         pid_t pid = surf->client_pid;
-        char path[64];
 
         if (pid <= 0)
             continue;
 
-        snprintf(path, sizeof(path), "/proc/%d", pid);
-        if (access(path, F_OK) == 0 || errno != ENOENT)
+        if (process_exists(pid))
             continue;
 
         destroy_surfaces_for_pid(pid);
@@ -3956,7 +4004,7 @@ static void launch_desktop_app_arg(const char *path, const char *name,
                 (virgl_available ? envp_minibrowser_accel :
                                    envp_minibrowser_accel_sw) :
                 envp_minibrowser;
-        } else if (is_mesa_gl && cmdline_flag_enabled("glsmoke_accel")) {
+        } else if (is_mesa_gl) {
             envp = virgl_available ? envp_mesa_accel : envp_mesa_accel_sw;
         }
         execve(path, argv, envp);
@@ -4053,15 +4101,30 @@ static char *trim_space(char *s)
     return s;
 }
 
+static void copy_shortcut_field(char *dst, size_t dst_size, const char *src)
+{
+    size_t i = 0;
+
+    if (dst_size == 0)
+        return;
+    if (!src)
+        src = "";
+    while (i + 1 < dst_size && src[i]) {
+        dst[i] = src[i];
+        i++;
+    }
+    dst[i] = '\0';
+}
+
 static void shortcut_set(desktop_icon_t *sc, const char *label, int action,
                          const char *exec_path, const char *exec_name,
                          const char *exec_arg, uint32_t color, char symbol)
 {
     memset(sc, 0, sizeof(*sc));
-    snprintf(sc->label, sizeof(sc->label), "%s", label ? label : "");
-    snprintf(sc->exec_path, sizeof(sc->exec_path), "%s", exec_path ? exec_path : "");
-    snprintf(sc->exec_name, sizeof(sc->exec_name), "%s", exec_name ? exec_name : "");
-    snprintf(sc->exec_arg, sizeof(sc->exec_arg), "%s", exec_arg ? exec_arg : "");
+    copy_shortcut_field(sc->label, sizeof(sc->label), label);
+    copy_shortcut_field(sc->exec_path, sizeof(sc->exec_path), exec_path);
+    copy_shortcut_field(sc->exec_name, sizeof(sc->exec_name), exec_name);
+    copy_shortcut_field(sc->exec_arg, sizeof(sc->exec_arg), exec_arg);
     sc->action = action;
     sc->icon_color = color;
     sc->symbol = symbol ? symbol : '?';
@@ -4272,7 +4335,15 @@ static void layout_icons(int fb_w, int fb_h)
 /* Draw the wallpaper gradient (matches LVGL desktop style) */
 static void draw_wallpaper(uint32_t *fb, int fb_w, int fb_h)
 {
-    for (int y = 0; y < fb_h; y++) {
+    int x0 = 0;
+    int y0 = 0;
+    int x1 = fb_w;
+    int y1 = fb_h;
+
+    if (!clip_xyxy_to_paint(fb_w, fb_h, &x0, &y0, &x1, &y1))
+        return;
+
+    for (int y = y0; y < y1; y++) {
         int frac = y * 1000 / (fb_h > 1 ? fb_h - 1 : 1);
         uint8_t r, g, b;
         if (frac < 600) {
@@ -4292,7 +4363,7 @@ static void draw_wallpaper(uint32_t *fb, int fb_w, int fb_h)
         }
         /* Slight noise for texture */
         uint32_t *row_p = fb + y * fb_w;
-        for (int x = 0; x < fb_w; x++) {
+        for (int x = x0; x < x1; x++) {
             int noise = ((x * 7 + y * 13) & 7) - 4;
             int rn = (int)r + noise; if (rn < 0) rn = 0; if (rn > 255) rn = 255;
             int gn = (int)g + noise; if (gn < 0) gn = 0; if (gn > 255) gn = 255;
@@ -6849,36 +6920,9 @@ static uint32_t get_time_ms(void)
     return (uint32_t)(ts.tv_sec * 1000 + ts.tv_nsec / 1000000);
 }
 
-static void composite_and_flip(void)
+static void paint_scene(int fb_w, int fb_h, int *acquire_blocked)
 {
-    int fb_w = (int)g_fb_w;
-    int fb_h = (int)g_fb_h;
-    static uint32_t next_clock_damage_ms;
-    static uint32_t next_repair_damage_ms;
-    uint32_t now = get_time_ms();
-    int repair_ms = damage_repair_interval_ms();
-
-    damage_stats_maybe_log(now);
-
-    /* Lay out icons if not done */
-    layout_icons(fb_w, fb_h);
-
-    if (now >= next_clock_damage_ms) {
-        damage_taskbar();
-        next_clock_damage_ms = now + 1000;
-    }
-
-    if (repair_ms > 0 && now >= next_repair_damage_ms) {
-        damage_full_reason(FULL_DAMAGE_REPAIR);
-        next_repair_damage_ms = now + (uint32_t)repair_ms;
-    }
-
-    if (!damage_has_any()) {
-        damage_all_frame_callbacks(now);
-        return;
-    }
-    damage_cursor_at(g_cursor_x, g_cursor_y);
-    tune_damage_for_present();
+    struct wlcomp_surface *surf;
 
     /* Draw desktop wallpaper */
     draw_wallpaper(g_fb_buf, fb_w, fb_h);
@@ -6892,8 +6936,6 @@ static void composite_and_flip(void)
         draw_iwin_all(g_fb_buf, fb_w, fb_h);
 
     /* Draw client (Wayland) surfaces */
-    struct wlcomp_surface *surf;
-    int acquire_blocked = 0;
     wl_list_for_each(surf, &g_surfaces, link) {
         if (!surface_tree_visible(surf) || !surf->committed_buf ||
             surf->is_cursor)
@@ -6902,7 +6944,7 @@ static void composite_and_flip(void)
         struct wlcomp_buffer *buf = surf->committed_buf;
         uint32_t *src;
         if (!buffer_acquire_ready(buf)) {
-            acquire_blocked = 1;
+            *acquire_blocked = 1;
             continue;
         }
         src = (uint32_t *)buffer_data(buf);
@@ -6946,7 +6988,8 @@ static void composite_and_flip(void)
             uint32_t border_color = focused ? 0xFF5F7EA8 : 0xFF3C5078;
             const char *title = surf->title[0] ? surf->title : "3D Demo";
 
-            draw_rect(g_fb_buf, fb_w, fb_h, frame_x + 3, frame_y + 3,
+            draw_rect(g_fb_buf, fb_w, fb_h, frame_x + WAYLAND_DEMO_SHADOW,
+                      frame_y + WAYLAND_DEMO_SHADOW,
                       frame_w, frame_h, 0xFF101418);
             draw_rect(g_fb_buf, fb_w, fb_h, frame_x, frame_y,
                       frame_w, frame_h, 0xFF15191F);
@@ -6968,6 +7011,44 @@ static void composite_and_flip(void)
             draw_rect(g_fb_buf, fb_w, fb_h,
                       frame_x + frame_w - border, frame_y,
                       border, frame_h, border_color);
+        }
+
+        if (g_paint_clip_enabled) {
+            if (row0 < g_paint_clip.y1 - draw_y)
+                row0 = g_paint_clip.y1 - draw_y;
+            if (row1 > g_paint_clip.y2 - draw_y)
+                row1 = g_paint_clip.y2 - draw_y;
+            if (col0 < g_paint_clip.x1 - draw_x)
+                col0 = g_paint_clip.x1 - draw_x;
+            if (col1 > g_paint_clip.x2 - draw_x)
+                col1 = g_paint_clip.x2 - draw_x;
+        }
+
+        if (row0 < 0) row0 = 0;
+        if (col0 < 0) col0 = 0;
+        if (row1 > bh) row1 = bh;
+        if (col1 > bw) col1 = bw;
+        if (row0 < -draw_y) row0 = -draw_y;
+        if (col0 < -draw_x) col0 = -draw_x;
+        if (row1 > (int32_t)g_fb_h - draw_y)
+            row1 = (int32_t)g_fb_h - draw_y;
+        if (col1 > (int32_t)g_fb_w - draw_x)
+            col1 = (int32_t)g_fb_w - draw_x;
+        if (row0 >= row1 || col0 >= col1)
+            continue;
+
+        if (buf->format == WL_SHM_FORMAT_XRGB8888) {
+            size_t copy_bytes = (size_t)(col1 - col0) * sizeof(uint32_t);
+
+            for (int32_t row = row0; row < row1; row++) {
+                int32_t dy = draw_y + row;
+                int32_t dx = draw_x + col0;
+                int32_t src_row = buf->y_inverted ? (bh - 1 - row) : row;
+
+                memcpy(&g_fb_buf[dy * g_fb_w + dx],
+                       &src[src_row * src_stride_px + col0], copy_bytes);
+            }
+            continue;
         }
 
         for (int32_t row = row0; row < row1; row++) {
@@ -6993,10 +7074,55 @@ static void composite_and_flip(void)
     /* Draw popup menu if open */
     draw_menu(g_fb_buf, fb_w, fb_h);
 
-    /* Draw one compositor-owned cursor.  Client cursor buffers vary in size
-     * and alpha convention; drawing both paths leaves stale cursor fragments
-     * unless every possible client cursor bound is damaged. */
+    /* Draw one compositor-owned cursor. */
     draw_default_cursor();
+}
+
+static void composite_and_flip(void)
+{
+    int fb_w = (int)g_fb_w;
+    int fb_h = (int)g_fb_h;
+    static uint32_t next_clock_damage_ms;
+    static uint32_t next_repair_damage_ms;
+    uint32_t now = get_time_ms();
+    int repair_ms = damage_repair_interval_ms();
+
+    damage_stats_maybe_log(now);
+
+    /* Lay out icons if not done */
+    layout_icons(fb_w, fb_h);
+
+    if (now >= next_clock_damage_ms) {
+        damage_taskbar();
+        next_clock_damage_ms = now + 1000;
+    }
+
+    if (repair_ms > 0 && now >= next_repair_damage_ms) {
+        damage_full_reason(FULL_DAMAGE_REPAIR);
+        next_repair_damage_ms = now + (uint32_t)repair_ms;
+    }
+
+    if (!damage_has_any()) {
+        damage_all_frame_callbacks(now);
+        return;
+    }
+    damage_cursor_at(g_cursor_x, g_cursor_y);
+    tune_damage_for_present();
+
+    int acquire_blocked = 0;
+    int paint_count = g_damage_count;
+    struct damage_rect paint_rects[MAX_DAMAGE_RECTS];
+    struct wlcomp_surface *surf;
+
+    for (int i = 0; i < paint_count; i++)
+        paint_rects[i] = g_damage[i];
+
+    for (int i = 0; i < paint_count; i++) {
+        g_paint_clip = paint_rects[i];
+        g_paint_clip_enabled = 1;
+        paint_scene(fb_w, fb_h, &acquire_blocked);
+    }
+    g_paint_clip_enabled = 0;
 
     present_damage_rects(fb_w);
     if (acquire_blocked) {

@@ -34,9 +34,22 @@
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif
+#ifndef GL_BGRA_EXT
+#define GL_BGRA_EXT 0x80E1
+#endif
+#ifndef GL_IMPLEMENTATION_COLOR_READ_FORMAT
+#define GL_IMPLEMENTATION_COLOR_READ_FORMAT 0x8B9B
+#endif
+#ifndef GL_IMPLEMENTATION_COLOR_READ_TYPE
+#define GL_IMPLEMENTATION_COLOR_READ_TYPE 0x8B9A
+#endif
 
 #define WINDOW_W 480
 #define WINDOW_H 360
+#define DEMO_W 360
+#define DEMO_H 260
+#define DEFAULT_SPHERE_QUALITY 4
+#define DEMO_SPHERE_QUALITY 3
 
 #define FB_GPU_BO_CREATE       0x4614
 #define FB_GPU_BO_DESTROY      0x4616
@@ -121,7 +134,13 @@ struct app_state {
     int pending_height;
     int loop;
     int sphere_demo;
+    int sphere_quality;
+    int fixed_size;
     int sphere_vertex_count;
+    GLenum read_format;
+    uint8_t *readback;
+    size_t readback_size;
+    uint64_t start_ns;
 };
 
 static const struct wl_interface *xv6_gpu_buffer_create_types[] = {
@@ -338,6 +357,27 @@ static GLuint link_program(const char *vs, const char *fs)
     return program;
 }
 
+static int gl_has_extension(const char *name)
+{
+    const char *all = (const char *)glGetString(GL_EXTENSIONS);
+    const char *exts = all;
+    size_t name_len;
+
+    if (!exts || !name || !*name)
+        return 0;
+    name_len = strlen(name);
+    while ((exts = strstr(exts, name)) != NULL) {
+        char before = exts == all ? ' ' : exts[-1];
+        char after = exts[name_len];
+
+        if ((before == ' ' || before == '\0') &&
+            (after == ' ' || after == '\0'))
+            return 1;
+        exts += name_len;
+    }
+    return 0;
+}
+
 static void mat4_identity(float m[16])
 {
     memset(m, 0, sizeof(float) * 16);
@@ -478,9 +518,6 @@ static struct sphere_vertex barycentric_sphere_point(struct sphere_vertex a,
 
 static int init_sphere_resources(struct app_state *app)
 {
-    static const int frequency = 4;
-    static const int base_faces = 20;
-    static const int verts_per_face = frequency * frequency * 3;
     static const float phi = 1.61803398875f;
     static const struct {
         int a;
@@ -536,10 +573,20 @@ static int init_sphere_resources(struct app_state *app)
         { -phi, 0.0f, -1.0f, 0.0f, 0.0f, 1.0f },
         { -phi, 0.0f,  1.0f, 0.0f, 0.0f, 1.0f },
     };
-    int count = base_faces * verts_per_face;
-    struct sphere_vertex *vertices = calloc((size_t)count, sizeof(*vertices));
+    int frequency = app->sphere_quality;
+    const int base_faces = 20;
+    int verts_per_face;
+    int count;
+    struct sphere_vertex *vertices;
     int idx = 0;
 
+    if (frequency < 1)
+        frequency = DEFAULT_SPHERE_QUALITY;
+    if (frequency > 8)
+        frequency = 8;
+    verts_per_face = frequency * frequency * 3;
+    count = base_faces * verts_per_face;
+    vertices = calloc((size_t)count, sizeof(*vertices));
     if (!vertices)
         return -1;
 
@@ -691,10 +738,26 @@ static int init_mesa(struct app_state *app)
         return -1;
     }
 
-    fprintf(stderr, "mesaglsmoke: EGL %d.%d GL %s renderer=%s buffer=%s%s\n",
+    app->read_format = GL_RGBA;
+    {
+        GLint impl_format = 0;
+        GLint impl_type = 0;
+
+        glGetIntegerv(GL_IMPLEMENTATION_COLOR_READ_FORMAT, &impl_format);
+        glGetIntegerv(GL_IMPLEMENTATION_COLOR_READ_TYPE, &impl_type);
+        if ((impl_format == GL_BGRA_EXT && impl_type == GL_UNSIGNED_BYTE) ||
+            gl_has_extension("GL_EXT_read_format_bgra"))
+            app->read_format = GL_BGRA_EXT;
+    }
+
+    fprintf(stderr,
+            "mesaglsmoke: EGL %d.%d GL %s renderer=%s buffer=%s read=%s%s%s%d\n",
             major, minor, glGetString(GL_VERSION), glGetString(GL_RENDERER),
             app->buffer.bo_backed ? "xv6-gpu-bo" : "wl-shm",
-            app->sphere_demo ? " spherical-poly-demo" : "");
+            app->read_format == GL_BGRA_EXT ? "bgra" : "rgba",
+            app->sphere_demo ? " spherical-poly-demo" : "",
+            app->sphere_demo ? " quality=" : "",
+            app->sphere_demo ? app->sphere_quality : 0);
     return 0;
 }
 
@@ -841,26 +904,37 @@ static void render_sphere_frame(struct app_state *app)
 static int copy_pixels_to_wayland_buffer(struct app_state *app)
 {
     size_t bytes = (size_t)app->width * (size_t)app->height * 4;
-    uint8_t *rgba = malloc(bytes);
 
-    if (!rgba)
-        return -1;
-    glReadPixels(0, 0, app->width, app->height, GL_RGBA, GL_UNSIGNED_BYTE,
-                 rgba);
+    if (app->readback_size < bytes) {
+        uint8_t *new_readback = realloc(app->readback, bytes);
+
+        if (!new_readback)
+            return -1;
+        app->readback = new_readback;
+        app->readback_size = bytes;
+    }
+    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    glReadPixels(0, 0, app->width, app->height, app->read_format,
+                 GL_UNSIGNED_BYTE,
+                 app->readback);
     for (int y = 0; y < app->height; y++) {
         uint32_t *dst = (uint32_t *)((uint8_t *)app->buffer.pixels +
                                      (size_t)y * (size_t)app->buffer.stride);
-        uint8_t *src = rgba + (size_t)(app->height - 1 - y) *
-                              (size_t)app->width * 4;
+        uint32_t *src = (uint32_t *)(app->readback +
+                                     (size_t)(app->height - 1 - y) *
+                                     (size_t)app->width * 4);
+        if (app->read_format == GL_BGRA_EXT) {
+            memcpy(dst, src, (size_t)app->width * 4);
+            continue;
+        }
         for (int x = 0; x < app->width; x++) {
-            uint8_t r = src[x * 4 + 0];
-            uint8_t g = src[x * 4 + 1];
-            uint8_t b = src[x * 4 + 2];
-            dst[x] = 0xff000000u | ((uint32_t)r << 16) |
-                     ((uint32_t)g << 8) | b;
+            uint32_t rgba = src[x];
+
+            dst[x] = 0xff000000u | ((rgba & 0x000000ffu) << 16) |
+                     (rgba & 0x0000ff00u) |
+                     ((rgba & 0x00ff0000u) >> 16);
         }
     }
-    free(rgba);
     return 0;
 }
 
@@ -951,6 +1025,8 @@ static void toplevel_configure(void *data, struct xdg_toplevel *toplevel,
     (void)toplevel;
     (void)states;
 
+    if (app->fixed_size)
+        return;
     if (width > 0 && height > 0) {
         app->pending_width = width;
         app->pending_height = height;
@@ -1041,6 +1117,10 @@ static int init_wayland(struct app_state *app)
     xdg_surface_add_listener(app->xdg_surface, &xdg_surface_listener, app);
     app->toplevel = xdg_surface_get_toplevel(app->xdg_surface);
     xdg_toplevel_add_listener(app->toplevel, &toplevel_listener, app);
+    if (app->fixed_size) {
+        xdg_toplevel_set_min_size(app->toplevel, app->width, app->height);
+        xdg_toplevel_set_max_size(app->toplevel, app->width, app->height);
+    }
     xdg_toplevel_set_title(app->toplevel, "Mesa GL Smoke");
     xdg_toplevel_set_app_id(app->toplevel, "mesaglsmoke");
 
@@ -1072,6 +1152,9 @@ static void cleanup(struct app_state *app)
         eglTerminate(app->egl_display);
     }
     destroy_present_buffer(app);
+    free(app->readback);
+    app->readback = NULL;
+    app->readback_size = 0;
     if (app->toplevel)
         xdg_toplevel_destroy(app->toplevel);
     if (app->xdg_surface)
@@ -1104,10 +1187,24 @@ static int parse_positive_arg(const char *arg, const char *prefix,
     return value > 0 ? value : fallback;
 }
 
-static int run_client(int loop, int frames, int resize_every, int sphere_demo)
+static uint64_t monotonic_ns(void)
+{
+    struct timespec ts;
+
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) < 0)
+        return 0;
+    return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+}
+
+static int run_client(int loop, int frames, int resize_every, int sphere_demo,
+                      int width, int height, int sphere_quality,
+                      int fixed_size)
 {
     struct app_state app;
     int rc = 0;
+    uint64_t end_ns;
+    double elapsed_sec = 0.0;
+    double fps = 0.0;
 
     memset(&app, 0, sizeof(app));
     app.egl_display = EGL_NO_DISPLAY;
@@ -1118,23 +1215,32 @@ static int run_client(int loop, int frames, int resize_every, int sphere_demo)
     app.running = 1;
     app.max_frames = frames;
     app.resize_every = resize_every;
-    app.width = WINDOW_W;
-    app.height = WINDOW_H;
+    app.width = width;
+    app.height = height;
     app.loop = loop;
     app.sphere_demo = sphere_demo;
+    app.sphere_quality = sphere_quality;
+    app.fixed_size = fixed_size;
 
     if (init_wayland(&app) < 0) {
         cleanup(&app);
         return 1;
     }
 
+    app.start_ns = monotonic_ns();
     while (app.running && wl_display_dispatch(app.display) >= 0)
         ;
     if (app.running)
         rc = 1;
+    end_ns = monotonic_ns();
+    if (app.start_ns && end_ns > app.start_ns) {
+        elapsed_sec = (double)(end_ns - app.start_ns) / 1000000000.0;
+        fps = elapsed_sec > 0.0 ? (double)app.frame / elapsed_sec : 0.0;
+    }
     cleanup(&app);
-    fprintf(stderr, "mesaglsmoke[%d]: complete frames=%d status=%d\n",
-            loop, app.frame, rc);
+    fprintf(stderr,
+            "mesaglsmoke[%d]: complete frames=%d status=%d elapsed=%.3fs fps=%.1f\n",
+            loop, app.frame, rc, elapsed_sec, fps);
     return rc;
 }
 
@@ -1144,7 +1250,15 @@ int main(int argc, char **argv)
     int loops = 1;
     int resize_every = 0;
     int sphere_demo = 0;
+    int width = WINDOW_W;
+    int height = WINDOW_H;
+    int sphere_quality = DEFAULT_SPHERE_QUALITY;
+    int fixed_size = 0;
+    int allow_resize = 0;
     int frames_set = 0;
+    int width_set = 0;
+    int height_set = 0;
+    int quality_set = 0;
     int rc = 0;
 
     for (int i = 1; i < argc; i++) {
@@ -1156,13 +1270,34 @@ int main(int argc, char **argv)
         } else if (strncmp(argv[i], "--resize-every=", 15) == 0) {
             resize_every = parse_positive_arg(argv[i], "--resize-every=",
                                               resize_every);
+        } else if (strncmp(argv[i], "--width=", 8) == 0) {
+            width = parse_positive_arg(argv[i], "--width=", width);
+            width_set = 1;
+            fixed_size = 1;
+        } else if (strncmp(argv[i], "--height=", 9) == 0) {
+            height = parse_positive_arg(argv[i], "--height=", height);
+            height_set = 1;
+            fixed_size = 1;
+        } else if (strncmp(argv[i], "--quality=", 10) == 0) {
+            sphere_quality = parse_positive_arg(argv[i], "--quality=",
+                                                sphere_quality);
+            quality_set = 1;
+        } else if (strcmp(argv[i], "--allow-resize") == 0) {
+            allow_resize = 1;
         } else if (strcmp(argv[i], "--demo") == 0) {
             sphere_demo = 1;
             if (!frames_set)
                 frames = 3600;
+            fixed_size = 1;
+            if (!width_set)
+                width = DEMO_W;
+            if (!height_set)
+                height = DEMO_H;
+            if (!quality_set)
+                sphere_quality = DEMO_SPHERE_QUALITY;
         } else if (strcmp(argv[i], "--help") == 0) {
             fprintf(stderr,
-                    "usage: %s [--frames=N] [--loops=N] [--resize-every=N] [--demo]\n",
+                    "usage: %s [--frames=N] [--loops=N] [--resize-every=N] [--width=N] [--height=N] [--quality=N] [--allow-resize] [--demo]\n",
                     argv[0]);
             return 0;
         } else {
@@ -1170,9 +1305,20 @@ int main(int argc, char **argv)
             return 2;
         }
     }
+    if (width < 200)
+        width = 200;
+    if (height < 150)
+        height = 150;
+    if (sphere_quality < 1)
+        sphere_quality = 1;
+    if (sphere_quality > 8)
+        sphere_quality = 8;
+    if (resize_every > 0 || allow_resize)
+        fixed_size = 0;
 
     for (int loop = 1; loop <= loops; loop++) {
-        rc = run_client(loop, frames, resize_every, sphere_demo);
+        rc = run_client(loop, frames, resize_every, sphere_demo, width,
+                        height, sphere_quality, fixed_size);
         if (rc != 0)
             break;
     }

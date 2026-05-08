@@ -59,6 +59,8 @@ set(_egl_installed ${XV6_SYSROOT}/lib/libEGL.a)
 set(_gles_installed ${XV6_SYSROOT}/lib/libGLESv2.a)
 file(MAKE_DIRECTORY ${_wl_build} ${_wl_proto_dir} ${XV6_SYSROOT}/bin)
 
+set(_wayland_opt_cflags -O2 -g)
+
 add_custom_command(
     OUTPUT  ${_wl_src} ${_wl_font}
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
@@ -122,7 +124,7 @@ add_custom_command(
 
 add_custom_command(
     OUTPUT  ${_wl_bin}
-    COMMAND ${CMAKE_C_COMPILER} -O2 -g -Wall -Wno-unused-result -static
+    COMMAND ${CMAKE_C_COMPILER} ${_wayland_opt_cflags} -Wall -Wno-unused-result -static
                 -isystem ${XV6_SYSROOT}/include
                 -I ${_wl_build}
                 -I ${_wl_proto_dir}
@@ -140,7 +142,7 @@ add_custom_command(
 
 add_custom_command(
     OUTPUT  ${_desktop_bin}
-    COMMAND ${CMAKE_C_COMPILER} -O2 -g -Wall -static
+    COMMAND ${CMAKE_C_COMPILER} ${_wayland_opt_cflags} -Wall -static
                 -o ${_desktop_bin} ${WAYLAND_SRC_DIR}/desktop.c
     DEPENDS ${WAYLAND_SRC_DIR}/desktop.c
     COMMENT "Compiling desktop session manager from source"
@@ -148,7 +150,7 @@ add_custom_command(
 
 add_custom_command(
     OUTPUT  ${_xv6egl_obj}
-    COMMAND ${CMAKE_C_COMPILER} -O2 -g -Wall -fPIC
+    COMMAND ${CMAKE_C_COMPILER} ${_wayland_opt_cflags} -Wall -fPIC
                 -DWL_EGL_PLATFORM
                 -isystem ${XV6_SYSROOT}/include
                 -I ${XV6_SYSROOT}/include/wayland
@@ -170,7 +172,7 @@ add_custom_command(
 
 add_custom_command(
     OUTPUT  ${_glsmoke_bin}
-    COMMAND ${CMAKE_C_COMPILER} -O2 -g -Wall -static
+    COMMAND ${CMAKE_C_COMPILER} ${_wayland_opt_cflags} -Wall -static
                 -DWL_EGL_PLATFORM
                 -isystem ${XV6_SYSROOT}/include
                 -I ${_wl_proto_dir}
@@ -191,7 +193,7 @@ add_custom_command(
 
 add_custom_command(
     OUTPUT  ${_mesaeglinfo_bin}
-    COMMAND ${CMAKE_C_COMPILER} -O2 -g -Wall
+    COMMAND ${CMAKE_C_COMPILER} ${_wayland_opt_cflags} -Wall
                 -isystem ${XV6_SYSROOT}/include
                 -isystem ${XV6_SYSROOT}/include/libdrm
                 -L ${XV6_SYSROOT}/lib
@@ -205,7 +207,7 @@ add_custom_command(
 
 add_custom_command(
     OUTPUT  ${_mesaglsmoke_bin}
-    COMMAND ${CMAKE_C_COMPILER} -O2 -g -Wall
+    COMMAND ${CMAKE_C_COMPILER} ${_wayland_opt_cflags} -Wall
                 -isystem ${XV6_SYSROOT}/include
                 -I ${_wl_proto_dir}
                 -I ${XV6_SYSROOT}/include/wayland
@@ -222,7 +224,7 @@ add_custom_command(
 
 add_custom_command(
     OUTPUT  ${_mesawlegl_bin}
-    COMMAND ${CMAKE_C_COMPILER} -O2 -g -Wall
+    COMMAND ${CMAKE_C_COMPILER} ${_wayland_opt_cflags} -Wall
                 -isystem ${XV6_SYSROOT}/include
                 -I ${_wl_proto_dir}
                 -I ${XV6_SYSROOT}/include/wayland
@@ -239,7 +241,7 @@ add_custom_command(
 
 add_custom_command(
     OUTPUT  ${_dmabufsmoke_bin}
-    COMMAND ${CMAKE_C_COMPILER} -O2 -g -Wall
+    COMMAND ${CMAKE_C_COMPILER} ${_wayland_opt_cflags} -Wall
                 -isystem ${XV6_SYSROOT}/include
                 -I ${_wl_proto_dir}
                 -I ${XV6_SYSROOT}/include/wayland
@@ -258,7 +260,7 @@ add_custom_command(
 
 add_custom_command(
     OUTPUT  ${_webkitgpusmoke_bin}
-    COMMAND ${CMAKE_C_COMPILER} -O2 -g -Wall
+    COMMAND ${CMAKE_C_COMPILER} ${_wayland_opt_cflags} -Wall
                 -isystem ${XV6_SYSROOT}/include
                 -isystem ${XV6_SYSROOT}/include/gtk-3.0
                 -isystem ${XV6_SYSROOT}/include/glib-2.0
@@ -282,7 +284,7 @@ add_custom_command(
 
 add_custom_command(
     OUTPUT  ${_drmgpuprobe_bin}
-    COMMAND ${CMAKE_C_COMPILER} -O2 -g -Wall
+    COMMAND ${CMAKE_C_COMPILER} ${_wayland_opt_cflags} -Wall
                 -isystem ${XV6_SYSROOT}/include
                 -isystem ${XV6_SYSROOT}/include/libdrm
                 -L ${XV6_SYSROOT}/lib

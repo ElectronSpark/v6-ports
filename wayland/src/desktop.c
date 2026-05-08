@@ -67,7 +67,6 @@ static int webkit_compat_gate_smoke_enabled_by_cmdline(void);
 static int webkit_js_disabled_by_cmdline(void);
 static int webkit_reopen_count_from_cmdline(void);
 static int webkit_timeout_ms_from_cmdline(int fallback);
-static int glsmoke_accel_enabled_by_cmdline(void);
 static int desktop_disabled_by_cmdline(void);
 
 static int xv6_virgl_available(void)
@@ -959,7 +958,7 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
                          (virgl_available ? envp_minibrowser_accel :
                                             envp_minibrowser_accel_sw) :
                          envp_minibrowser) :
-                    (is_mesa_gl && glsmoke_accel_enabled_by_cmdline() ?
+                    (is_mesa_gl ?
                          (virgl_available ? envp_mesa_accel :
                                             envp_mesa_accel_sw) :
                          envp_default));
@@ -1377,16 +1376,6 @@ static int glsmoke_demo_by_cmdline(void)
         return 0;
 
     return token_is_enabled(buf, "glsmoke_demo");
-}
-
-static int glsmoke_accel_enabled_by_cmdline(void)
-{
-    char buf[512];
-
-    if (read_cmdline(buf, sizeof(buf)) < 0)
-        return 0;
-
-    return token_is_enabled(buf, "glsmoke_accel");
 }
 
 static void glsmoke_args_from_cmdline(char *frames_arg, size_t frames_size,

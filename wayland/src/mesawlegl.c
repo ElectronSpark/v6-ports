@@ -757,6 +757,15 @@ static void sleep_frame(void)
     nanosleep(&ts, NULL);
 }
 
+static double monotonic_seconds(void)
+{
+    struct timespec ts;
+
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0)
+        return 0.0;
+    return (double)ts.tv_sec + (double)ts.tv_nsec / 1000000000.0;
+}
+
 static int draw_and_swap(struct app_state *app)
 {
     if (app->sphere_demo)
@@ -955,6 +964,8 @@ static int run_client(int loop, int frames, int resize_every, int api_smoke,
 {
     struct app_state app;
     int rc = 0;
+    double start_sec;
+    double elapsed_sec;
 
     memset(&app, 0, sizeof(app));
     app.egl_display = EGL_NO_DISPLAY;
@@ -979,6 +990,7 @@ static int run_client(int loop, int frames, int resize_every, int api_smoke,
         ;
     if (app.configured && recreate_window_surface(&app) < 0)
         rc = 1;
+    start_sec = monotonic_seconds();
     for (app.frame = 0; rc == 0 && app.running && app.frame < app.max_frames;
          app.frame++) {
         if (app.resize_every > 0 && app.frame > 0 &&
@@ -1002,11 +1014,14 @@ static int run_client(int loop, int frames, int resize_every, int api_smoke,
         wl_display_dispatch_pending(app.display);
         sleep_frame();
     }
+    elapsed_sec = monotonic_seconds() - start_sec;
     if (!app.configured)
         rc = 1;
     cleanup(&app);
-    fprintf(stderr, "mesawlegl[%d]: complete frames=%d status=%d\n",
-            loop, app.frame, rc);
+    fprintf(stderr,
+            "mesawlegl[%d]: complete frames=%d status=%d elapsed=%.3fs fps=%.1f\n",
+            loop, app.frame, rc, elapsed_sec,
+            elapsed_sec > 0.0 ? (double)app.frame / elapsed_sec : 0.0);
     return rc;
 }
 
