@@ -157,6 +157,8 @@ prepare_host_gst_runtime_cache() {
         gstreamer1.0-plugins-good
         gstreamer1.0-tools
         libgstreamer-plugins-bad1.0-0
+        libblas3
+        liblapack3
     )
     local all_packages=()
     local chunk=()
