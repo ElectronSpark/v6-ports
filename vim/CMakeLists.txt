@@ -1,7 +1,6 @@
-# xv6-os vim port — from-source cross build of Vim 9.x.
+# xv6-os vim port — from-source host-glibc build of Vim 9.x.
 #
-# Builds Vim against the cross toolchain's built-in musl sysroot plus our
-# from-source ncurses (in ${XV6_SYSROOT}). Installs the binary, xxd, and
+# Builds Vim against our from-source ncurses in ${XV6_SYSROOT}. Installs the binary, xxd, and
 # a minimal runtime tree (syntax/colors/indent/autoload + a few core
 # .vim files) into ${XV6_SYSROOT}.
 #
@@ -18,7 +17,7 @@ if(NOT DEFINED XV6_SYSROOT OR XV6_SYSROOT STREQUAL "")
     message(FATAL_ERROR "ports/vim: -DXV6_SYSROOT=<path> required")
 endif()
 if(NOT DEFINED CMAKE_C_COMPILER OR CMAKE_C_COMPILER STREQUAL "")
-    message(FATAL_ERROR "ports/vim: -DCMAKE_C_COMPILER=<cross-gcc> required")
+    message(FATAL_ERROR "ports/vim: -DCMAKE_C_COMPILER=<host-cc> required")
 endif()
 
 get_filename_component(_default_repo_root "${CMAKE_CURRENT_SOURCE_DIR}/../.." ABSOLUTE)
@@ -37,26 +36,7 @@ if(NOT EXISTS "${_patch_script}")
     message(FATAL_ERROR "ports/vim: missing ${_patch_script}")
 endif()
 
-# Cross naming
-get_filename_component(_cc_realpath "${CMAKE_C_COMPILER}" REALPATH)
-get_filename_component(_cc_dir       "${_cc_realpath}"     DIRECTORY)
-get_filename_component(_cc_name      "${_cc_realpath}"     NAME)
-string(REGEX REPLACE "gcc$" ""  _xv6_prefix "${_cc_name}")
-set(_cross_cc      "${_cc_dir}/${_xv6_prefix}gcc")
-set(_cross_ar      "${_cc_dir}/${_xv6_prefix}ar")
-set(_cross_ranlib  "${_cc_dir}/${_xv6_prefix}ranlib")
-set(_cross_strip   "${_cc_dir}/${_xv6_prefix}strip")
-
-string(REGEX REPLACE "-$" "" _xv6_triple "${_xv6_prefix}")
-if(_xv6_triple MATCHES "^x86_64")
-    set(_vim_host  "x86_64-unknown-linux-musl")
-    set(_uname_m   "x86_64")
-elseif(_xv6_triple MATCHES "^riscv64")
-    set(_vim_host  "riscv64-unknown-linux-musl")
-    set(_uname_m   "riscv64")
-else()
-    message(FATAL_ERROR "ports/vim: unsupported triple ${_xv6_triple}")
-endif()
+set(_uname_m "x86_64")
 
 include(ProcessorCount)
 if(NOT DEFINED XV6_PARALLEL_JOBS OR XV6_PARALLEL_JOBS EQUAL 0)
@@ -88,17 +68,16 @@ set(_ldflags "-L${XV6_SYSROOT}/lib -Wl,-rpath,/lib")
 add_custom_command(
     OUTPUT  ${_config_status}
     WORKING_DIRECTORY ${_vim_src_build}
+    COMMAND ${CMAKE_COMMAND} -E rm -f auto/config.cache auto/config.status config.cache
     COMMAND ${CMAKE_COMMAND} -E env
-                CC=${_cross_cc}
-                AR=${_cross_ar}
-                RANLIB=${_cross_ranlib}
-                STRIP=${_cross_strip}
+                CC=${CMAKE_C_COMPILER}
+                AR=${CMAKE_AR}
+                RANLIB=${CMAKE_RANLIB}
                 "CFLAGS=${_cflags}"
                 "CPPFLAGS=${_cppflags}"
                 "LDFLAGS=${_ldflags}"
-                "LIBS=-lncurses"
+                "LIBS=-lncurses -ltinfo"
             ./configure
-                --host=${_vim_host}
                 --prefix=/
                 --with-features=normal
                 --with-tlib=ncurses
@@ -180,7 +159,7 @@ add_custom_command(
                 ac_cv_func_towupper=yes
                 ac_cv_func_usleep=yes
     DEPENDS ${_copy_stamp}
-    COMMENT "[vim] configure (cross, host=${_vim_host})"
+    COMMENT "[vim] configure (host glibc)"
     VERBATIM)
 
 # Build: generate osdef.h, scrub conflicting decls, patch mch_exit, then make.
@@ -209,7 +188,7 @@ add_custom_command(
 set(_xxd_bin "${_vim_src_build}/xxd/xxd")
 add_custom_command(
     OUTPUT  ${_xxd_bin}
-    COMMAND ${_cross_cc}
+    COMMAND ${CMAKE_C_COMPILER}
             -O2 -fPIC -DUNIX
             -L${XV6_SYSROOT}/lib -Wl,-rpath,/lib
             -o ${_xxd_bin}

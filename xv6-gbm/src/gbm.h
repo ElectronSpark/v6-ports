@@ -28,6 +28,7 @@ extern "C" {
 
 struct gbm_device;
 struct gbm_bo;
+struct gbm_surface;
 
 union gbm_bo_handle {
     void *ptr;
@@ -82,11 +83,29 @@ uint32_t gbm_bo_get_offset(struct gbm_bo *bo, int plane);
 union gbm_bo_handle gbm_bo_get_handle(struct gbm_bo *bo);
 union gbm_bo_handle gbm_bo_get_handle_for_plane(struct gbm_bo *bo, int plane);
 int gbm_bo_get_fd(struct gbm_bo *bo);
+void gbm_bo_set_user_data(struct gbm_bo *bo, void *data,
+                          void (*destroy_user_data)(struct gbm_bo *, void *));
+void *gbm_bo_get_user_data(struct gbm_bo *bo);
 int gbm_bo_write(struct gbm_bo *bo, const void *buf, size_t count);
 void *gbm_bo_map(struct gbm_bo *bo, uint32_t x, uint32_t y, uint32_t width,
                  uint32_t height, uint32_t flags, uint32_t *stride,
                  void **map_data);
 void gbm_bo_unmap(struct gbm_bo *bo, void *map_data);
+
+struct gbm_surface *gbm_surface_create(struct gbm_device *gbm,
+                                       uint32_t width, uint32_t height,
+                                       uint32_t format, uint32_t flags);
+struct gbm_surface *gbm_surface_create_with_modifiers(
+    struct gbm_device *gbm, uint32_t width, uint32_t height, uint32_t format,
+    const uint64_t *modifiers, uint32_t count);
+struct gbm_surface *gbm_surface_create_with_modifiers2(
+    struct gbm_device *gbm, uint32_t width, uint32_t height, uint32_t format,
+    const uint64_t *modifiers, uint32_t count, uint32_t flags);
+struct gbm_bo *gbm_surface_lock_front_buffer(struct gbm_surface *surface);
+void gbm_surface_release_buffer(struct gbm_surface *surface,
+                                struct gbm_bo *bo);
+int gbm_surface_has_free_buffers(struct gbm_surface *surface);
+void gbm_surface_destroy(struct gbm_surface *surface);
 
 #ifdef __cplusplus
 }

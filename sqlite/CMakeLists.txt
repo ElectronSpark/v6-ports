@@ -1,8 +1,7 @@
 # xv6-os sqlite port — standalone CMake project (autosetup upstream).
 #
-# Mirrors xv6-tmp/user/CMakeLists.txt:1090+ (sqlite section), simplified
-# because our cross toolchain ships a working musl sysroot — no manual
-# CRT/dynamic-linker LDFLAGS chains needed.
+# Mirrors xv6-tmp/user/CMakeLists.txt:1090+ (sqlite section), now built with
+# the host compiler/glibc.
 #
 # Outputs (installed into ${XV6_SYSROOT}):
 #   /lib/libsqlite3.a

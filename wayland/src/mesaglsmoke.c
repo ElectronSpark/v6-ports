@@ -203,9 +203,6 @@ static EGLDisplay get_surfaceless_display(void)
     if (get_platform_display != NULL && client_ext != NULL &&
         strstr(client_ext, "EGL_MESA_platform_surfaceless") != NULL)
         return get_platform_display(EGL_PLATFORM_SURFACELESS_MESA, NULL, NULL);
-    if (get_platform_display != NULL && client_ext != NULL &&
-        strstr(client_ext, "EGL_EXT_platform_base") != NULL)
-        return get_platform_display(EGL_PLATFORM_SURFACELESS_MESA, NULL, NULL);
     return eglGetDisplay(EGL_DEFAULT_DISPLAY);
 }
 
@@ -1187,6 +1184,18 @@ static int parse_positive_arg(const char *arg, const char *prefix,
     return value > 0 ? value : fallback;
 }
 
+static int parse_nonnegative_arg(const char *arg, const char *prefix,
+                                 int fallback)
+{
+    size_t len = strlen(prefix);
+    int value;
+
+    if (strncmp(arg, prefix, len) != 0)
+        return fallback;
+    value = atoi(arg + len);
+    return value >= 0 ? value : fallback;
+}
+
 static uint64_t monotonic_ns(void)
 {
     struct timespec ts;
@@ -1261,9 +1270,13 @@ int main(int argc, char **argv)
     int quality_set = 0;
     int rc = 0;
 
+    setenv("LIBGL_ALWAYS_SOFTWARE", "1", 0);
+    setenv("MESA_LOADER_DRIVER_OVERRIDE", "softpipe", 0);
+    setenv("LIBGL_DRIVERS_PATH", "/usr/lib/x86_64-linux-gnu/dri", 0);
+
     for (int i = 1; i < argc; i++) {
         if (strncmp(argv[i], "--frames=", 9) == 0) {
-            frames = parse_positive_arg(argv[i], "--frames=", frames);
+            frames = parse_nonnegative_arg(argv[i], "--frames=", frames);
             frames_set = 1;
         } else if (strncmp(argv[i], "--loops=", 8) == 0) {
             loops = parse_positive_arg(argv[i], "--loops=", loops);
@@ -1287,7 +1300,7 @@ int main(int argc, char **argv)
         } else if (strcmp(argv[i], "--demo") == 0) {
             sphere_demo = 1;
             if (!frames_set)
-                frames = 3600;
+                frames = 0;
             fixed_size = 1;
             if (!width_set)
                 width = DEMO_W;

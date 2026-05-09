@@ -12,8 +12,6 @@ xv6_port(
     BUILD_SYSTEM    meson
     C_ARGS          -DDETECT_OS_XV6=1
     CPP_ARGS        -DDETECT_OS_XV6=1
-                    -include
-                    ${CMAKE_CURRENT_LIST_DIR}/../../toolchain/musl-xv6/compat/cxx_mutex_compat.h
     DEPENDS         khronos-headers
                     libdrm
                     libexpat

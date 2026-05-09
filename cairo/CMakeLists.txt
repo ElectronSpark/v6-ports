@@ -6,9 +6,16 @@ xv6_port(
     NAME            cairo
     SOURCE_DIR      ${CMAKE_CURRENT_SOURCE_DIR}/src
     BUILD_SYSTEM    meson
+    MESON_DEFAULT_LIBRARY both
     DEPENDS         pixman freetype fontconfig libpng zlib glib bzip2-symlink
     OUTPUT_FILES    lib/libcairo.a
+                    lib/libcairo.so
+                    lib/libcairo.so.2
+                    lib/libcairo.so.2.11805.5
                     lib/libcairo-gobject.a
+                    lib/libcairo-gobject.so
+                    lib/libcairo-gobject.so.2
+                    lib/libcairo-gobject.so.2.11805.5
                     include/cairo/cairo.h
     CMAKE_ARGS
         -Dfreetype=enabled

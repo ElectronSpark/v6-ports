@@ -77,3 +77,17 @@ else()
         "ports/gtk3: ${GTK_CURSOR_THEME_DIR}/cursors/default not found; "
         "GTK/Wayland clients may fail to load cursor theme default.")
 endif()
+
+set(_gtk_schemas_dir ${XV6_SYSROOT}/share/glib-2.0/schemas)
+set(_gtk_schemas_compiled ${_gtk_schemas_dir}/gschemas.compiled)
+add_custom_command(
+    OUTPUT  ${_gtk_schemas_compiled}
+    COMMAND ${CMAKE_COMMAND} -E env
+                "PATH=${XV6_SYSROOT}/host-tools/bin:$ENV{PATH}"
+                ${XV6_SYSROOT}/host-tools/bin/glib-compile-schemas
+                ${_gtk_schemas_dir}
+    DEPENDS port-gtk3 port-glib-host
+    COMMENT "Compiling GTK GSettings schemas"
+    VERBATIM)
+add_custom_target(port-gtk3-schemas ALL
+    DEPENDS ${_gtk_schemas_compiled})

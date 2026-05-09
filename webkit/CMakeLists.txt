@@ -23,13 +23,13 @@ if(DEFINED ENV{XV6_WEBKIT_REF_SYSROOT})
     set(_webkit_default_ref_sysroot "$ENV{XV6_WEBKIT_REF_SYSROOT}")
     set(_webkit_force_ref_sysroot TRUE)
 else()
-    set(_webkit_default_ref_sysroot "${CMAKE_CURRENT_LIST_DIR}/sysroot")
+    set(_webkit_default_ref_sysroot "")
     set(_webkit_force_ref_sysroot FALSE)
 endif()
 
 set(XV6_WEBKIT_REF_SYSROOT "${_webkit_default_ref_sysroot}"
-    CACHE PATH "Optional sysroot containing a WebKitGTK xv6 runtime to stage")
-set(XV6_WEBKIT_STRICT_STAGE ON
+    CACHE PATH "Optional host-glibc sysroot containing a WebKitGTK runtime to stage")
+set(XV6_WEBKIT_STRICT_STAGE OFF
     CACHE BOOL "Fail port-webkit when the selected runtime sysroot is incomplete")
 if(_webkit_force_ref_sysroot
    AND NOT XV6_WEBKIT_REF_SYSROOT STREQUAL _webkit_default_ref_sysroot)
@@ -39,6 +39,15 @@ elseif(XV6_WEBKIT_REF_SYSROOT MATCHES "/xv6-tmp/build-x86/sysroot$"
    AND NOT DEFINED ENV{XV6_WEBKIT_REF_SYSROOT})
     set(XV6_WEBKIT_REF_SYSROOT "${_webkit_default_ref_sysroot}" CACHE PATH
         "Optional sysroot containing a WebKitGTK xv6 runtime to stage" FORCE)
+elseif(XV6_WEBKIT_REF_SYSROOT STREQUAL "${CMAKE_CURRENT_LIST_DIR}/sysroot"
+   AND NOT DEFINED ENV{XV6_WEBKIT_REF_SYSROOT})
+    set(XV6_WEBKIT_REF_SYSROOT "" CACHE PATH
+        "Optional host-glibc sysroot containing a WebKitGTK runtime to stage" FORCE)
+endif()
+if(NOT DEFINED ENV{XV6_WEBKIT_REF_SYSROOT}
+   AND XV6_WEBKIT_REF_SYSROOT STREQUAL "")
+    set(XV6_WEBKIT_STRICT_STAGE OFF CACHE BOOL
+        "Fail port-webkit when the selected runtime sysroot is incomplete" FORCE)
 endif()
 
 set(_webkit_stage_stamp
@@ -48,7 +57,8 @@ set(_webkit_stage_manifest
 set(_webkit_stage_script
     "${CMAKE_CURRENT_LIST_DIR}/stage-webkit-runtime.sh")
 set(_webkit_ref_runtime "")
-if(EXISTS "${XV6_WEBKIT_REF_SYSROOT}/libexec/webkit2gtk-4.1/MiniBrowser")
+if(NOT XV6_WEBKIT_REF_SYSROOT STREQUAL ""
+   AND EXISTS "${XV6_WEBKIT_REF_SYSROOT}/libexec/webkit2gtk-4.1/MiniBrowser")
     set(_webkit_ref_runtime
         "${XV6_WEBKIT_REF_SYSROOT}/libexec/webkit2gtk-4.1/MiniBrowser"
         "${XV6_WEBKIT_REF_SYSROOT}/libexec/webkit2gtk-4.1/WebKitNetworkProcess"
@@ -60,7 +70,7 @@ if(EXISTS "${XV6_WEBKIT_REF_SYSROOT}/libexec/webkit2gtk-4.1/MiniBrowser")
         "${XV6_WEBKIT_REF_SYSROOT}/lib/webkit2gtk-4.1/injected-bundle/libwebkit2gtkinjectedbundle.so")
 else()
     message(STATUS
-        "ports/webkit: no WebKitGTK runtime at ${XV6_WEBKIT_REF_SYSROOT}; "
+        "ports/webkit: no host-glibc WebKitGTK runtime selected; "
         "set -DXV6_WEBKIT_REF_SYSROOT=<sysroot> or env XV6_WEBKIT_REF_SYSROOT to stage one")
 endif()
 
@@ -72,6 +82,15 @@ foreach(_dep gtk3 glib gdk-pixbuf pango atk cairo fontconfig freetype
     endif()
 endforeach()
 
+set(_webkit_runtime_stack_files
+    "${XV6_SYSROOT}/lib/libgtk-3.so.0"
+    "${XV6_SYSROOT}/lib/libgdk-3.so.0"
+    "${XV6_SYSROOT}/lib/libharfbuzz.so.0"
+    "${XV6_SYSROOT}/lib/libpango-1.0.so.0"
+    "${XV6_SYSROOT}/lib/libpangocairo-1.0.so.0"
+    "${XV6_SYSROOT}/lib/libcairo.so.2"
+    "${XV6_SYSROOT}/lib/libcairo-gobject.so.2")
+
 add_custom_command(
     OUTPUT  ${_webkit_stage_stamp}
     COMMAND ${CMAKE_COMMAND} -E make_directory
@@ -81,6 +100,7 @@ add_custom_command(
             "${XV6_SYSROOT}"
             "$<IF:$<BOOL:${XV6_WEBKIT_STRICT_STAGE}>,1,0>"
     DEPENDS ${_webkit_stage_script} ${_webkit_ref_runtime} ${_webkit_deps}
+            ${_webkit_runtime_stack_files}
     BYPRODUCTS ${_webkit_stage_manifest}
     COMMENT "Staging optional WebKitGTK runtime from ${XV6_WEBKIT_REF_SYSROOT}"
     VERBATIM)

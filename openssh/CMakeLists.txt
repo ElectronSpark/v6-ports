@@ -13,10 +13,7 @@ endforeach()
 set(_src   ${CMAKE_CURRENT_SOURCE_DIR}/src)
 set(_build ${CMAKE_BINARY_DIR}/openssh-build)
 
-get_filename_component(_cc_name "${CMAKE_C_COMPILER}" NAME)
-get_filename_component(_cc_dir  "${CMAKE_C_COMPILER}" DIRECTORY)
-string(REGEX REPLACE "-gcc$" "" _triple "${_cc_name}")
-set(_strip "${_cc_dir}/${_triple}-strip")
+find_program(_strip NAMES strip REQUIRED)
 
 if(NOT EXISTS "${_src}/configure")
     message(FATAL_ERROR "Port openssh: missing source submodule at ${_src}")
@@ -67,8 +64,6 @@ add_custom_command(
                 "LDFLAGS=-L${XV6_SYSROOT}/lib"
                 "LIBS=-lcrypto"
             ./configure
-                --host=${_triple}
-                --build=x86_64-pc-linux-gnu
                 --prefix=/
                 --sbindir=/bin
                 --libexecdir=/libexec

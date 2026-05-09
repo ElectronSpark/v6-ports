@@ -32,6 +32,9 @@
 
 /* xv6-specific syscall numbers (not in musl headers) */
 #define XV6_SYS_poweroff  166
+#ifndef MFD_CLOEXEC
+#define MFD_CLOEXEC 0x0001U
+#endif
 #define XV6_DRM_RENDER_NODE "/dev/dri/renderD128"
 #define DRM_IOCTL_VIRTGPU_GETPARAM 0xc0106443UL
 #define VIRTGPU_PARAM_3D_FEATURES  1
@@ -3173,7 +3176,7 @@ static void seat_get_keyboard(struct wl_client *client,
                                   keyboard_destroy_handler);
     add_resource(g_keyboard_resources, MAX_INPUT_RES, res);
 
-    /* Send a full US-QWERTY XKB keymap via temp file fd.
+    /* Send a full US-QWERTY XKB keymap via anonymous memfd.
      * GTK3/libxkbcommon requires a real fd it can mmap.
      * Keycodes = PS/2 set1 scancode + 8 (evdev convention). */
     static const char us_keymap[] =
@@ -3306,17 +3309,19 @@ static void seat_get_keyboard(struct wl_client *client,
         "};\n";
     size_t keymap_size = sizeof(us_keymap);  /* includes NUL */
 
-    int km_fd = open("/tmp/.wlcomp_keymap", O_RDWR | O_CREAT | O_TRUNC, 0644);
+    int km_fd = (int)syscall(SYS_memfd_create, "wlcomp-keymap", MFD_CLOEXEC);
     if (km_fd >= 0) {
         write(km_fd, us_keymap, keymap_size);
         lseek(km_fd, 0, SEEK_SET);
         wl_keyboard_send_keymap(res, WL_KEYBOARD_KEYMAP_FORMAT_XKB_V1,
                                 km_fd, keymap_size);
         close(km_fd);
+    } else {
+        fprintf(stderr, "wlcomp: memfd keymap failed: %s\n", strerror(errno));
     }
 
-    /* Send repeat info: 25 keys/sec, 400ms delay */
-    wl_keyboard_send_repeat_info(res, 25, 400);
+    if (wl_resource_get_version(res) >= WL_KEYBOARD_REPEAT_INFO_SINCE_VERSION)
+        wl_keyboard_send_repeat_info(res, 25, 400);
 }
 
 static void seat_get_touch(struct wl_client *c, struct wl_resource *r,
@@ -3595,19 +3600,27 @@ static void signal_process_group(pid_t pid, int sig)
 static void destroy_surfaces_for_pid(pid_t pid)
 {
     struct wlcomp_surface *surf;
-    struct wlcomp_surface *tmp;
     struct wl_client *client = NULL;
 
     if (pid <= 0)
         return;
 
-    wl_list_for_each_safe(surf, tmp, &g_surfaces, link) {
-        if (surf->client_pid != pid || !surf->resource)
+    wl_list_for_each(surf, &g_surfaces, link) {
+        if (surf->client_pid != pid)
             continue;
-        client = wl_resource_get_client(surf->resource);
+
         damage_surface(surf);
-        break;
+        surf->mapped = 0;
+        surf->minimized = 0;
+        if (g_focused == surf)
+            g_focused = NULL;
+        if (g_kbd_focused == surf)
+            g_kbd_focused = NULL;
+        if (!client && surf->resource)
+            client = wl_resource_get_client(surf->resource);
     }
+
+    damage_taskbar();
 
     if (!client)
         return;
@@ -3819,6 +3832,7 @@ static void launch_desktop_app_arg(const char *path, const char *name,
         char *envp_minibrowser[] = {
             "HOME=/",
             "PATH=/bin:/usr/bin",
+            "LD_LIBRARY_PATH=/lib:/usr/lib:/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu",
             "XDG_RUNTIME_DIR=/tmp",
             "XDG_CACHE_HOME=/tmp/.cache",
             "XDG_DATA_DIRS=/share:/usr/share",
@@ -3866,6 +3880,7 @@ static void launch_desktop_app_arg(const char *path, const char *name,
         char *envp_minibrowser_accel[] = {
             "HOME=/",
             "PATH=/bin:/usr/bin",
+            "LD_LIBRARY_PATH=/lib:/usr/lib:/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu",
             "XDG_RUNTIME_DIR=/tmp",
             "XDG_CACHE_HOME=/tmp/.cache",
             "XDG_DATA_HOME=/tmp/.local/share",
@@ -3913,6 +3928,7 @@ static void launch_desktop_app_arg(const char *path, const char *name,
         char *envp_minibrowser_accel_sw[] = {
             "HOME=/",
             "PATH=/bin:/usr/bin",
+            "LD_LIBRARY_PATH=/lib:/usr/lib:/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu",
             "XDG_RUNTIME_DIR=/tmp",
             "XDG_CACHE_HOME=/tmp/.cache",
             "XDG_DATA_HOME=/tmp/.local/share",
@@ -3984,6 +4000,8 @@ static void launch_desktop_app_arg(const char *path, const char *name,
             "XCURSOR_THEME=Adwaita",
             "LIBGL_ALWAYS_SOFTWARE=1",
             "EGL_PLATFORM=wayland",
+            "MESA_LOADER_DRIVER_OVERRIDE=softpipe",
+            "LIBGL_DRIVERS_PATH=/usr/lib/x86_64-linux-gnu/dri",
             NULL
         };
         char **envp = envp_default;
@@ -4027,7 +4045,7 @@ static void launch_desktop_app(const char *path, const char *name)
 static void reap_children(void)
 {
     uint32_t now = get_time_ms();
-    int webkit_timeout_ms = cmdline_int_value("webkit_timeout_ms", 0);
+    int webkit_timeout_ms = -1;
 
     for (int i = 0; i < MAX_CHILDREN; i++) {
         if (g_children[i] > 0) {
@@ -4049,19 +4067,23 @@ static void reap_children(void)
                 g_children[i] = 0;
                 g_child_launch_ms[i] = 0;
                 g_child_name[i][0] = '\0';
-            } else if (r == 0 && webkit_timeout_ms > 0 &&
-                       strcmp(g_child_name[i], "MiniBrowser") == 0 &&
-                       now - g_child_launch_ms[i] >=
-                           (uint32_t)webkit_timeout_ms) {
-                fprintf(stderr,
-                        "wlcomp: MiniBrowser timeout reached, closing pid %d\n",
-                        g_children[i]);
-                terminate_client_pid(g_children[i]);
-                destroy_surfaces_for_pid(g_children[i]);
-                remember_pending_reap(g_children[i]);
-                g_children[i] = 0;
-                g_child_launch_ms[i] = 0;
-                g_child_name[i][0] = '\0';
+            } else if (r == 0 && strcmp(g_child_name[i], "MiniBrowser") == 0) {
+                if (webkit_timeout_ms < 0)
+                    webkit_timeout_ms =
+                        cmdline_int_value("webkit_timeout_ms", 0);
+                if (webkit_timeout_ms > 0 &&
+                    now - g_child_launch_ms[i] >=
+                        (uint32_t)webkit_timeout_ms) {
+                    fprintf(stderr,
+                            "wlcomp: MiniBrowser timeout reached, closing pid %d\n",
+                            g_children[i]);
+                    terminate_client_pid(g_children[i]);
+                    destroy_surfaces_for_pid(g_children[i]);
+                    remember_pending_reap(g_children[i]);
+                    g_children[i] = 0;
+                    g_child_launch_ms[i] = 0;
+                    g_child_name[i][0] = '\0';
+                }
             }
         }
     }
@@ -4500,7 +4522,7 @@ static int surface_is_foreground(const struct wlcomp_surface *surf)
 static int surface_has_taskbar_button(const struct wlcomp_surface *surf)
 {
     return surf && surf->xdg_toplevel && !surf->is_cursor &&
-           (surf->mapped || surf->title[0] || surf->app_id[0]);
+           (surf->mapped || surf->minimized);
 }
 
 static const char *surface_taskbar_label(const struct wlcomp_surface *surf)
@@ -7658,21 +7680,14 @@ static int init_input(void)
 
 static int cmdline_flag_enabled(const char *key)
 {
-    char buf[512];
-    int fd = open("/proc/cmdline", O_RDONLY);
-    int n;
+    const char *cmdline = getenv("XV6_KERNEL_CMDLINE");
     size_t key_len = strlen(key);
     const char *p;
 
-    if (fd < 0)
+    if (!cmdline)
         return 0;
-    n = read(fd, buf, sizeof(buf) - 1);
-    close(fd);
-    if (n <= 0)
-        return 0;
-    buf[n] = '\0';
 
-    p = buf;
+    p = cmdline;
     while (*p) {
         while (*p == ' ' || *p == '\t' || *p == '\n')
             p++;
@@ -7689,21 +7704,14 @@ static int cmdline_flag_enabled(const char *key)
 
 static int cmdline_int_value(const char *key, int fallback)
 {
-    char buf[512];
-    int fd = open("/proc/cmdline", O_RDONLY);
-    int n;
+    const char *cmdline = getenv("XV6_KERNEL_CMDLINE");
     size_t key_len = strlen(key);
     const char *p;
 
-    if (fd < 0)
+    if (!cmdline)
         return fallback;
-    n = read(fd, buf, sizeof(buf) - 1);
-    close(fd);
-    if (n <= 0)
-        return fallback;
-    buf[n] = '\0';
 
-    p = buf;
+    p = cmdline;
     while (*p) {
         while (*p == ' ' || *p == '\t' || *p == '\n')
             p++;
@@ -7770,7 +7778,7 @@ int main(int argc, char **argv)
     g_shm_global = wl_global_create(g_display, &wl_shm_interface,
                                     1, NULL, shm_bind);
     g_seat_global = wl_global_create(g_display, &wl_seat_interface,
-                                     5, NULL, seat_bind);
+                                     3, NULL, seat_bind);
     g_output_global = wl_global_create(g_display, &wl_output_interface,
                                        3, NULL, output_bind);
     g_xdg_wm_global = wl_global_create(g_display, &xdg_wm_base_interface,

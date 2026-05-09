@@ -1,15 +1,11 @@
 cmake_minimum_required(VERSION 3.16)
 project(xv6-port-netsurf LANGUAGES NONE)
 
-# NetSurf browser — GTK3 frontend, cross-compiled against the
-# from-source ports under ${XV6_SYSROOT}.
+# NetSurf browser — GTK3 frontend, built with the host compiler/glibc against
+# the from-source ports under ${XV6_SYSROOT}.
 #
 # Unlike the smaller NetSurf libraries this port cannot use
 # AddPort.cmake's BUILD_SYSTEM=netsurf mode because its build needs:
-#   - a cross-compiler wrapper that appends CRT/-lc/libgcc AFTER all
-#     other link flags (NetSurf's Makefile appends pkg-config libraries
-#     after env LDFLAGS, so the standard --sysroot lookup is too early
-#     to satisfy nostdlib + nostartfiles);
 #   - a pkg-config wrapper that rewrites -I/include and -L/lib coming
 #     from sysroot .pc files (which use prefix=/) to absolute sysroot
 #     paths, while leaving netsurf-prefix paths alone;
@@ -25,6 +21,7 @@ project(xv6-port-netsurf LANGUAGES NONE)
 set(NS_SRC          ${CMAKE_CURRENT_SOURCE_DIR}/src)
 set(NS_SHARED       ${CMAKE_CURRENT_SOURCE_DIR}/../netsurf-buildsystem/src)
 set(NS_BUILD        ${CMAKE_BINARY_DIR}/netsurf-build)
+set(NS_OBJROOT      ${NS_BUILD}/Linux-gtk3)
 set(NS_HOST_TOOLS   ${XV6_SYSROOT}/host-tools)
 set(NS_HOST_PNG_LIB ${NS_HOST_TOOLS}/lib)
 set(NS_HOST_PNG_INC ${NS_HOST_TOOLS}/include)
@@ -34,15 +31,9 @@ set(NS_RES          ${NS_SRC}/frontends/gtk/res)
 set(NS_BUNDLED_FONTS ${CMAKE_CURRENT_SOURCE_DIR}/../pango/src/tests/fonts)
 set(NS_GLYPH_DATA   ${NS_SRC}/frontends/framebuffer/res/fonts/glyph_data)
 
-set(NS_TRIPLE       ${XV6_TRIPLE})
 set(NS_CC           ${CMAKE_C_COMPILER})
 set(NS_AR           ${CMAKE_AR})
 set(NS_RANLIB       ${CMAKE_RANLIB})
-
-# Toolchain paths used for explicit CRT link ordering. PHASE2_LIB is
-# the cross sysroot's lib dir (crt1.o/crti.o/crtn.o/ld-musl-*.so.1).
-set(NS_PHASE2_LIB   ${PHASE2_LIB})
-set(NS_DYNLINKER    ${PHASE2_LIB}/ld-musl-x86_64.so.1)
 
 # libgcc.a — query the cross compiler.
 execute_process(
@@ -60,28 +51,26 @@ set -e
 NS_SRC=\"${NS_SRC}\"
 SYSROOT=\"${XV6_SYSROOT}\"
 NS_BUILD=\"${NS_BUILD}\"
+NS_OBJROOT=\"${NS_OBJROOT}\"
 NS_SHARED=\"${NS_SHARED}\"
 NS_HOST_TOOLS=\"${NS_HOST_TOOLS}\"
 NS_HOST_PNG_LIB=\"${NS_HOST_PNG_LIB}\"
 NS_HOST_PNG_INC=\"${NS_HOST_PNG_INC}\"
 NS_BUNDLED_FONTS=\"${NS_BUNDLED_FONTS}\"
 NS_GLYPH_DATA=\"${NS_GLYPH_DATA}\"
-NS_TRIPLE=\"${NS_TRIPLE}\"
-PHASE2_LIB=\"${NS_PHASE2_LIB}\"
-DYN_LINKER=\"${NS_DYNLINKER}\"
 LIBGCC=\"${NS_LIBGCC}\"
 REAL_CC=\"${NS_CC}\"
 
-mkdir -p \"\${NS_BUILD}\" \"\${NS_HOST_TOOLS}/bin\"
+mkdir -p \"\${NS_BUILD}\" \"\${NS_OBJROOT}\" \"\${NS_HOST_TOOLS}/bin\"
 
-# Cross CFLAGS — the toolchain is sysrooted, so we just add -isystem
-# pointing at the sysroot for inter-port headers (gtk/glib/cairo).
+# Host-glibc CFLAGS. Add sysroot include/lib paths for inter-port headers and
+# libraries (gtk/glib/cairo/etc.) while leaving libc as the native host glibc.
 export CC=\"\${NS_BUILD}/cc-wrapper\"
 export AR=\"${NS_AR}\"
 export RANLIB=\"${NS_RANLIB}\"
 export CFLAGS=\"-O2 -fPIC -DHAVE_CTIME_R=1 -isystem \${SYSROOT}/include\"
 export CXXFLAGS=\"\${CFLAGS}\"
-export LDFLAGS=\"-L\${SYSROOT}/lib -Wl,-rpath-link,\${SYSROOT}/lib\"
+export LDFLAGS=\"-L\${SYSROOT}/lib -Wl,-rpath,/lib -Wl,-rpath-link,\${SYSROOT}/lib\"
 
 # pkg-config wiring (talks to .pc files under sysroot)
 export PKG_CONFIG=\"\${NS_BUILD}/pkg-config-wrapper\"
@@ -90,18 +79,10 @@ export PKG_CONFIG_LIBDIR=\"\${SYSROOT}/lib/pkgconfig:\${SYSROOT}/share/pkgconfig
 export GDK_PIXBUF_PIXDATA=\"/usr/bin/gdk-pixbuf-pixdata\"
 export PATH=\"\${NS_HOST_TOOLS}/bin:\${PATH}\"
 
-# --- CC wrapper: append CRT + -lc + libgcc when LINKING (not compiling) ---
+# --- CC wrapper: keep one place for future link shims, but use normal glibc ---
 cat > \"\${CC}\" << CCEOF
 #!/bin/bash
-compiling=false
-for a in \"\\\$@\"; do
-  case \"\\\$a\" in -c|-S|-E|-M|-MM) compiling=true; break;; esac
-done
-if \\\$compiling; then
-  exec \"\${REAL_CC}\" \"\\\$@\"
-else
-  exec \"\${REAL_CC}\" \"\\\$@\" -lc \"\${LIBGCC}\" \"\${PHASE2_LIB}/crtn.o\"
-fi
+exec \"\${REAL_CC}\" \"\\\$@\"
 CCEOF
 chmod +x \"\${CC}\"
 
@@ -156,10 +137,13 @@ override NETSURF_USE_INLINE_PIXBUF := NO
 override NETSURF_GTK_MAJOR := 3
 EOF
 
-make clean TARGET=gtk3 NSSHARED=\"\${NS_SHARED}\" 2>/dev/null || true
+rm -rf \"\${NS_OBJROOT}\"
+mkdir -p \"\${NS_OBJROOT}\"
+make clean TARGET=gtk3 NSSHARED=\"\${NS_SHARED}\" OBJROOT=\"\${NS_OBJROOT}\" 2>/dev/null || true
 
 make -j\$(nproc) TARGET=gtk3 \\
     NSSHARED=\"\${NS_SHARED}\" \\
+    OBJROOT=\"\${NS_OBJROOT}\" \\
     PREFIX=/ \\
     PKGCONFIG=\"\${PKG_CONFIG}\" \\
     PKG_CONFIG=\"\${PKG_CONFIG}\" \\
@@ -173,7 +157,7 @@ make -j\$(nproc) TARGET=gtk3 \\
 
 # Locate output binary (varies between in-tree and build/<target>/ layouts)
 BIN=\"\"
-for c in build/Linux-gtk3/nsgtk3 nsgtk3 frontends/gtk/nsgtk3; do
+for c in \"\${NS_OBJROOT}/nsgtk3\" build/Linux-gtk3/nsgtk3 nsgtk3 frontends/gtk/nsgtk3; do
   [ -f \"\$c\" ] && BIN=\"\$c\" && break
 done
 [ -n \"\$BIN\" ] || { echo 'ERROR: nsgtk3 binary not found'; find . -name 'nsgtk*' -type f; exit 1; }

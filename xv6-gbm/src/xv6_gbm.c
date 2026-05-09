@@ -51,6 +51,18 @@ struct gbm_bo {
     uint64_t size;
     void *addr;
     int imported_fd;
+    void *user_data;
+    void (*destroy_user_data)(struct gbm_bo *, void *);
+};
+
+struct gbm_surface {
+    struct gbm_device *dev;
+    uint32_t width;
+    uint32_t height;
+    uint32_t format;
+    uint32_t flags;
+    struct gbm_bo *front;
+    int locked;
 };
 
 static int gbm_format_ok(uint32_t format)
@@ -264,6 +276,8 @@ void gbm_bo_destroy(struct gbm_bo *bo)
 {
     if (!bo)
         return;
+    if (bo->destroy_user_data)
+        bo->destroy_user_data(bo, bo->user_data);
     if (bo->handle != 0) {
         struct fb_gpu_bo_destroy destroy;
 
@@ -363,6 +377,22 @@ int gbm_bo_get_fd_for_plane(struct gbm_bo *bo, int plane)
     return gbm_bo_get_fd(bo);
 }
 
+void gbm_bo_set_user_data(struct gbm_bo *bo, void *data,
+                          void (*destroy_user_data)(struct gbm_bo *, void *))
+{
+    if (!bo)
+        return;
+    if (bo->destroy_user_data)
+        bo->destroy_user_data(bo, bo->user_data);
+    bo->user_data = data;
+    bo->destroy_user_data = destroy_user_data;
+}
+
+void *gbm_bo_get_user_data(struct gbm_bo *bo)
+{
+    return bo ? bo->user_data : NULL;
+}
+
 uint32_t gbm_bo_get_offset(struct gbm_bo *bo, int plane)
 {
     return bo && plane == 0 ? 0 : 0;
@@ -408,4 +438,92 @@ void gbm_bo_unmap(struct gbm_bo *bo, void *map_data)
 {
     (void)bo;
     (void)map_data;
+}
+
+struct gbm_surface *gbm_surface_create(struct gbm_device *gbm,
+                                       uint32_t width, uint32_t height,
+                                       uint32_t format, uint32_t flags)
+{
+    struct gbm_surface *surface;
+
+    if (width == 0 || height == 0 ||
+        !gbm_device_is_format_supported(gbm, format, flags)) {
+        errno = EINVAL;
+        return NULL;
+    }
+
+    surface = calloc(1, sizeof(*surface));
+    if (!surface)
+        return NULL;
+    surface->dev = gbm;
+    surface->width = width;
+    surface->height = height;
+    surface->format = format;
+    surface->flags = flags;
+    return surface;
+}
+
+struct gbm_surface *gbm_surface_create_with_modifiers(
+    struct gbm_device *gbm, uint32_t width, uint32_t height, uint32_t format,
+    const uint64_t *modifiers, uint32_t count)
+{
+    if (!gbm_modifier_ok(modifiers, count)) {
+        errno = EINVAL;
+        return NULL;
+    }
+    return gbm_surface_create(gbm, width, height, format,
+                              GBM_BO_USE_RENDERING | GBM_BO_USE_LINEAR);
+}
+
+struct gbm_surface *gbm_surface_create_with_modifiers2(
+    struct gbm_device *gbm, uint32_t width, uint32_t height, uint32_t format,
+    const uint64_t *modifiers, uint32_t count, uint32_t flags)
+{
+    if (!gbm_modifier_ok(modifiers, count)) {
+        errno = EINVAL;
+        return NULL;
+    }
+    return gbm_surface_create(gbm, width, height, format,
+                              flags | GBM_BO_USE_RENDERING |
+                                  GBM_BO_USE_LINEAR);
+}
+
+struct gbm_bo *gbm_surface_lock_front_buffer(struct gbm_surface *surface)
+{
+    if (!surface) {
+        errno = EINVAL;
+        return NULL;
+    }
+
+    if (!surface->front) {
+        surface->front = gbm_bo_create(surface->dev, surface->width,
+                                       surface->height, surface->format,
+                                       surface->flags | GBM_BO_USE_RENDERING |
+                                           GBM_BO_USE_LINEAR);
+        if (!surface->front)
+            return NULL;
+    }
+
+    surface->locked = 1;
+    return surface->front;
+}
+
+void gbm_surface_release_buffer(struct gbm_surface *surface, struct gbm_bo *bo)
+{
+    if (!surface || (bo && bo != surface->front))
+        return;
+    surface->locked = 0;
+}
+
+int gbm_surface_has_free_buffers(struct gbm_surface *surface)
+{
+    return surface ? !surface->locked : 0;
+}
+
+void gbm_surface_destroy(struct gbm_surface *surface)
+{
+    if (!surface)
+        return;
+    gbm_bo_destroy(surface->front);
+    free(surface);
 }

@@ -1,9 +1,8 @@
-# xv6-os cpython port — from-source CPython 3.12 cross build.
+# xv6-os cpython port — from-source CPython 3.12 host-glibc build.
 #
 # Builds CPython 3.12 (from `src/` submodule, branch v6-3.12) against the
 # from-source ports already installed in ${XV6_SYSROOT}: openssl, sqlite,
-# ncurses, readline, libffi, zlib, bzip2, xz. The cross toolchain
-# (x86_64-xv6-linux-musl-gcc) provides musl libc + sysroot.
+# ncurses, readline, libffi, zlib, bzip2, xz.
 #
 # Outputs into ${XV6_SYSROOT}:
 #   bin/python3.12, bin/python3 (symlink), bin/python (symlink)
@@ -14,9 +13,7 @@
 #
 # Standalone usage:
 #   cmake -S . -B build \
-#       -DCMAKE_C_COMPILER=/path/to/x86_64-xv6-linux-musl-gcc \
 #       -DXV6_SYSROOT=/path/to/sysroot \
-#       -DPHASE2_LIB=/path/to/toolchain/x86_64-xv6-linux-musl/lib \
 #       -DXV6_REPO_ROOT=/path/to/xv6-os
 #   cmake --build build
 
@@ -30,19 +27,7 @@ if(NOT DEFINED XV6_SYSROOT OR XV6_SYSROOT STREQUAL "")
     message(FATAL_ERROR "ports/cpython: -DXV6_SYSROOT=<path> required")
 endif()
 if(NOT DEFINED CMAKE_C_COMPILER OR CMAKE_C_COMPILER STREQUAL "")
-    message(FATAL_ERROR "ports/cpython: -DCMAKE_C_COMPILER=<cross-gcc> required")
-endif()
-
-# Repo root — for finding toolchain/musl-xv6/compat (kqueue, etc).
-# Default: ports/cpython/../.. = repo root.
-get_filename_component(_default_repo_root "${CMAKE_CURRENT_SOURCE_DIR}/../.." ABSOLUTE)
-set(XV6_REPO_ROOT "${_default_repo_root}"
-    CACHE PATH "xv6-os repo root (for musl-xv6/compat sources)")
-
-set(_compat_dir "${XV6_REPO_ROOT}/toolchain/musl-xv6/compat")
-if(NOT EXISTS "${_compat_dir}/kqueue.c")
-    message(FATAL_ERROR
-        "ports/cpython: musl-xv6/compat sources missing at ${_compat_dir}")
+    message(FATAL_ERROR "ports/cpython: -DCMAKE_C_COMPILER=<host-cc> required")
 endif()
 
 # Source dir (submodule).
@@ -51,29 +36,6 @@ if(NOT EXISTS "${_src}/configure")
     message(FATAL_ERROR
         "ports/cpython: src/configure missing — run\n"
         "  git submodule update --init --recursive ports/cpython/src")
-endif()
-
-# Cross toolchain + naming
-get_filename_component(_cc_realpath "${CMAKE_C_COMPILER}" REALPATH)
-get_filename_component(_cc_dir       "${_cc_realpath}"     DIRECTORY)
-get_filename_component(_cc_name      "${_cc_realpath}"     NAME)
-string(REGEX REPLACE "gcc$" ""  _xv6_prefix "${_cc_name}")  # e.g. x86_64-xv6-linux-musl-
-set(_cross_cc      "${_cc_dir}/${_xv6_prefix}gcc")
-set(_cross_ar      "${_cc_dir}/${_xv6_prefix}ar")
-set(_cross_ranlib  "${_cc_dir}/${_xv6_prefix}ranlib")
-set(_cross_readelf "${_cc_dir}/${_xv6_prefix}readelf")
-
-# Host triple: derived from prefix (strip trailing dash).
-string(REGEX REPLACE "-$" "" _xv6_triple "${_xv6_prefix}")
-# CPython config.sub doesn't know "*-xv6-linux-musl"; use a triple it accepts.
-if(_xv6_triple MATCHES "^x86_64")
-    set(_cpy_host    "x86_64-unknown-linux-musl")
-    set(_cpy_dynld   "/lib/ld-musl-x86_64.so.1")
-elseif(_xv6_triple MATCHES "^riscv64")
-    set(_cpy_host    "riscv64-unknown-linux-musl")
-    set(_cpy_dynld   "/lib/ld-musl-riscv64.so.1")
-else()
-    message(FATAL_ERROR "ports/cpython: unsupported triple ${_xv6_triple}")
 endif()
 
 include(ProcessorCount)
@@ -92,25 +54,9 @@ file(MAKE_DIRECTORY "${_build}")
 file(MAKE_DIRECTORY "${_build}/Modules")
 
 # ---------------------------------------------------------------------
-# kqueue_compat.o — provides kqueue/kevent for musl on xv6.
-# ---------------------------------------------------------------------
-set(_kqueue_obj "${CMAKE_CURRENT_BINARY_DIR}/kqueue_compat.o")
-add_custom_command(
-    OUTPUT  ${_kqueue_obj}
-    COMMAND ${_cross_cc}
-            -O2 -fPIC
-            -isystem ${XV6_SYSROOT}/include
-            -isystem ${_compat_dir}
-            -c -o ${_kqueue_obj}
-            ${_compat_dir}/kqueue.c
-    DEPENDS ${_compat_dir}/kqueue.c
-    COMMENT "[cpython] kqueue_compat.o"
-    VERBATIM)
-
-# ---------------------------------------------------------------------
-# Setup.local — link-time hints for cross-build extension modules.
+# Setup.local — link-time hints for extension modules.
 # We set explicit -l flags for modules whose autoprobe doesn't reliably
-# detect cross-compiled libs.
+# detect staged libs.
 # ---------------------------------------------------------------------
 set(_setup_local "${_build}/Modules/Setup.local")
 set(_setup_local_content
@@ -132,13 +78,11 @@ add_custom_command(
 add_custom_target(cpython-setup-local DEPENDS ${_setup_local})
 
 # ---------------------------------------------------------------------
-# CFLAGS / LDFLAGS / LIBS for cross configure.
-# We rely on the cross toolchain's built-in musl sysroot for libc; only
-# add explicit -I/-L for ports installed under XV6_SYSROOT.
+# CFLAGS / LDFLAGS / LIBS for host-glibc configure. libc comes from the host;
+# libraries from other ports are found under XV6_SYSROOT.
 # ---------------------------------------------------------------------
 set(_cppflags
     "-I${XV6_SYSROOT}/include"
-    "-isystem ${_compat_dir}"
     "-D_POSIX_C_SOURCE=200809L")
 string(REPLACE ";" " " _cppflags "${_cppflags}")
 
@@ -146,8 +90,7 @@ set(_cflags "${_cppflags} -O2 -fPIC")
 
 set(_ldflags
     "-L${XV6_SYSROOT}/lib"
-    "-Wl,-rpath,/lib"
-    "-Wl,--dynamic-linker=${_cpy_dynld}")
+    "-Wl,-rpath,/lib")
 string(REPLACE ";" " " _ldflags "${_ldflags}")
 
 # Modules linked into libpython require these for the curses+readline
@@ -162,10 +105,9 @@ add_custom_command(
     OUTPUT  ${_makefile}
     WORKING_DIRECTORY ${_build}
     COMMAND ${CMAKE_COMMAND} -E env
-                CC=${_cross_cc}
-                AR=${_cross_ar}
-                RANLIB=${_cross_ranlib}
-                READELF=${_cross_readelf}
+                CC=${CMAKE_C_COMPILER}
+                AR=${CMAKE_AR}
+                RANLIB=${CMAKE_RANLIB}
                 PKG_CONFIG=false
                 "CPPFLAGS=${_cppflags}"
                 "CFLAGS=${_cflags}"
@@ -174,15 +116,11 @@ add_custom_command(
                 "LIBFFI_CFLAGS=-I${XV6_SYSROOT}/include"
                 "LIBFFI_LIBS=-L${XV6_SYSROOT}/lib -lffi"
             ${_src}/configure
-                --host=${_cpy_host}
-                --build=x86_64-pc-linux-gnu
                 --prefix=/
                 --enable-shared
                 --without-static-libpython
                 --without-ensurepip
                 --disable-test-modules
-                --disable-ipv6
-                --with-build-python=${Python3_EXECUTABLE}
                 --with-system-ffi
                 --with-openssl=${XV6_SYSROOT}
                 ac_cv_file__dev_ptmx=no
@@ -194,25 +132,22 @@ add_custom_command(
                 ac_cv_readline_rl_completion_matches=yes
                 ac_cv_readline_rl_pre_input_hook=yes
                 ac_cv_readline_rl_resize_terminal=yes
-                ac_cv_header_sys_event_h=yes
-                ac_cv_func_kqueue=yes
                 ac_cv_func_select=yes
                 ac_cv_func_pselect=yes
                 ac_cv_search_dlopen=none\ required
     DEPENDS ${_src}/configure ${_setup_local}
-    COMMENT "[cpython] configure (cross, host=${_cpy_host})"
+    COMMENT "[cpython] configure (host glibc)"
     VERBATIM)
 add_custom_target(cpython-configure DEPENDS ${_makefile})
 
 # ---------------------------------------------------------------------
-# Build CPython (the python binary + sharedmods, with kqueue_compat.o
-# linked into SYSLIBS so the kqueue extension module resolves).
+# Build CPython (the python binary + sharedmods).
 # ---------------------------------------------------------------------
 set(_python_bin   "${_build}/python")
 set(_libpython_so "${_build}/libpython3.12.so.1.0")
 set(_build_stamp  "${CMAKE_CURRENT_BINARY_DIR}/.cpython_built")
 
-set(_syslibs "${_kqueue_obj} -lreadline -lncurses -lm -lpthread")
+set(_syslibs "-lreadline -lncurses -lm -lpthread")
 
 add_custom_command(
     OUTPUT  ${_python_bin} ${_libpython_so} ${_build_stamp}
@@ -220,7 +155,7 @@ add_custom_command(
     COMMAND make -j${XV6_PARALLEL_JOBS} python "SYSLIBS=${_syslibs}"
     COMMAND make -j${XV6_PARALLEL_JOBS} sharedmods "SYSLIBS=${_syslibs}"
     COMMAND ${CMAKE_COMMAND} -E touch ${_build_stamp}
-    DEPENDS ${_makefile} ${_kqueue_obj}
+    DEPENDS ${_makefile}
     COMMENT "[cpython] build (j=${XV6_PARALLEL_JOBS})"
     VERBATIM)
 
@@ -272,7 +207,6 @@ add_custom_target(port-cpython-clean
     COMMAND ${CMAKE_COMMAND} -E rm -f
                 ${_build_stamp}
                 ${_install_stamp}
-                ${_kqueue_obj}
                 ${XV6_SYSROOT}/bin/python3.12
                 ${XV6_SYSROOT}/bin/python3
                 ${XV6_SYSROOT}/bin/python

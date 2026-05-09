@@ -11,14 +11,16 @@ set(_src    ${CMAKE_CURRENT_SOURCE_DIR}/src)
 set(_shared ${CMAKE_CURRENT_SOURCE_DIR}/../netsurf-buildsystem/src)
 set(_prefix ${XV6_SYSROOT}/host-tools)
 set(_marker ${_prefix}/bin/nsgenbind)
+set(_builddir ${CMAKE_CURRENT_BINARY_DIR}/build)
 
 add_custom_command(
     OUTPUT  ${_marker}
     COMMAND ${CMAKE_COMMAND} -E make_directory ${_prefix}/bin
+    COMMAND ${CMAKE_COMMAND} -E make_directory ${_builddir}
     COMMAND make -C ${_src} clean
-                NSSHARED=${_shared} PREFIX=${_prefix} Q=
+                NSSHARED=${_shared} PREFIX=${_prefix} BUILDDIR=${_builddir} Q=
     COMMAND make -C ${_src}
-                NSSHARED=${_shared} PREFIX=${_prefix} Q=
+                NSSHARED=${_shared} PREFIX=${_prefix} BUILDDIR=${_builddir} Q=
                 install
     COMMENT "Building host nsgenbind"
     VERBATIM)
@@ -27,5 +29,6 @@ add_custom_target(port-netsurf-nsgenbind ALL DEPENDS ${_marker})
 add_dependencies(port-netsurf-nsgenbind port-netsurf-buildsystem)
 
 add_custom_target(port-netsurf-nsgenbind-clean
-    COMMAND make -C ${_src} clean NSSHARED=${_shared} || true
+    COMMAND make -C ${_src} clean NSSHARED=${_shared} BUILDDIR=${_builddir} || true
+    COMMAND ${CMAKE_COMMAND} -E rm -rf ${_builddir}
     COMMAND ${CMAKE_COMMAND} -E rm -f ${_marker})

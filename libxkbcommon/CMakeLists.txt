@@ -24,12 +24,15 @@ set(XKEYBOARD_CONFIG_DIR "/usr/share/X11/xkb"
 
 if(EXISTS "${XKEYBOARD_CONFIG_DIR}/rules/evdev")
     set(_xkb_data_stamp ${CMAKE_CURRENT_BINARY_DIR}/xkeyboard-config.stamp)
+    set(_xkb_runtime_dir ${XV6_SYSROOT}/share/X11/xkb)
     add_custom_command(
         OUTPUT  ${_xkb_data_stamp}
+        BYPRODUCTS ${_xkb_runtime_dir}/rules/evdev
+        COMMAND ${CMAKE_COMMAND} -E rm -rf ${_xkb_runtime_dir}
         COMMAND ${CMAKE_COMMAND} -E make_directory ${XV6_SYSROOT}/share/X11
         COMMAND ${CMAKE_COMMAND} -E copy_directory
                     ${XKEYBOARD_CONFIG_DIR}
-                    ${XV6_SYSROOT}/share/X11/xkb
+                    ${_xkb_runtime_dir}
         COMMAND ${CMAKE_COMMAND} -E touch ${_xkb_data_stamp}
         COMMENT "Staging xkeyboard-config data for libxkbcommon"
         VERBATIM)

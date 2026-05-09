@@ -6,8 +6,12 @@ xv6_port(
     NAME            harfbuzz
     SOURCE_DIR      ${CMAKE_CURRENT_SOURCE_DIR}/src
     BUILD_SYSTEM    meson
+    MESON_DEFAULT_LIBRARY both
     DEPENDS         freetype
     OUTPUT_FILES    lib/libharfbuzz.a
+                    lib/libharfbuzz.so
+                    lib/libharfbuzz.so.0
+                    lib/libharfbuzz.so.0.61420.0
                     include/harfbuzz/hb.h
     CMAKE_ARGS
         -Dfreetype=enabled

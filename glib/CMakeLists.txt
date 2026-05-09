@@ -6,10 +6,23 @@ xv6_port(
     NAME            glib
     SOURCE_DIR      ${CMAKE_CURRENT_SOURCE_DIR}/src
     BUILD_SYSTEM    meson
+    MESON_DEFAULT_LIBRARY both
     DEPENDS         pcre2 libffi zlib
     OUTPUT_FILES    lib/libglib-2.0.a
+                    lib/libglib-2.0.so
+                    lib/libglib-2.0.so.0
+                    lib/libglib-2.0.so.0.8900.0
                     lib/libgobject-2.0.a
+                    lib/libgobject-2.0.so
+                    lib/libgobject-2.0.so.0
+                    lib/libgobject-2.0.so.0.8900.0
                     lib/libgio-2.0.a
+                    lib/libgio-2.0.so
+                    lib/libgio-2.0.so.0
+                    lib/libgio-2.0.so.0.8900.0
+                    lib/libgmodule-2.0.so
+                    lib/libgmodule-2.0.so.0
+                    lib/libgmodule-2.0.so.0.8900.0
                     include/glib-2.0/glib.h
     CMAKE_ARGS
         -Dselinux=disabled

@@ -68,6 +68,7 @@ static int webkit_js_disabled_by_cmdline(void);
 static int webkit_reopen_count_from_cmdline(void);
 static int webkit_timeout_ms_from_cmdline(int fallback);
 static int desktop_disabled_by_cmdline(void);
+static int read_cmdline(char *buf, size_t buf_size);
 
 static int xv6_virgl_available(void)
 {
@@ -130,17 +131,31 @@ static int webkit_youtube_compat_url(const char *url)
 
 static pid_t launch_wlcomp(void)
 {
+    char cmdline_buf[512] = "";
+    char cmdline_env[sizeof("XV6_KERNEL_CMDLINE=") + sizeof(cmdline_buf)];
+    int have_cmdline = read_cmdline(cmdline_buf, sizeof(cmdline_buf)) == 0;
     pid_t pid = fork();
     if (pid == 0) {
         char *argv[] = { "wlcomp", NULL };
-        char *envp[] = {
+        char *envp_base[] = {
             "HOME=/",
             "PATH=/bin:/usr/bin",
             "XDG_RUNTIME_DIR=/tmp",
             "XV6_GUI_SESSION=1",
             NULL
         };
-        execve("/bin/wlcomp", argv, envp);
+        char *envp_cmdline[] = {
+            "HOME=/",
+            "PATH=/bin:/usr/bin",
+            "XDG_RUNTIME_DIR=/tmp",
+            "XV6_GUI_SESSION=1",
+            cmdline_env,
+            NULL
+        };
+        if (have_cmdline)
+            snprintf(cmdline_env, sizeof(cmdline_env), "XV6_KERNEL_CMDLINE=%s",
+                     cmdline_buf);
+        execve("/bin/wlcomp", argv, have_cmdline ? envp_cmdline : envp_base);
         _exit(127);
     }
     return pid;
@@ -789,6 +804,8 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
         char *envp_minibrowser[] = {
             "HOME=/",
             "PATH=/bin:/usr/bin",
+            "LD_LIBRARY_PATH=/lib:/usr/lib:/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu",
+            "LD_PRELOAD=/lib/libxv6memshim.so",
             "XDG_RUNTIME_DIR=/tmp",
             "XDG_CACHE_HOME=/tmp/.cache",
             "XDG_DATA_DIRS=/share:/usr/share",
@@ -821,6 +838,8 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
         char *envp_minibrowser_accel[] = {
             "HOME=/",
             "PATH=/bin:/usr/bin",
+            "LD_LIBRARY_PATH=/lib:/usr/lib:/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu",
+            "LD_PRELOAD=/lib/libxv6memshim.so",
             "XDG_RUNTIME_DIR=/tmp",
             "XDG_CACHE_HOME=/tmp/.cache",
             "XDG_DATA_HOME=/tmp/.local/share",
@@ -853,6 +872,8 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
         char *envp_minibrowser_accel_sw[] = {
             "HOME=/",
             "PATH=/bin:/usr/bin",
+            "LD_LIBRARY_PATH=/lib:/usr/lib:/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu",
+            "LD_PRELOAD=/lib/libxv6memshim.so",
             "XDG_RUNTIME_DIR=/tmp",
             "XDG_CACHE_HOME=/tmp/.cache",
             "XDG_DATA_HOME=/tmp/.local/share",
@@ -910,6 +931,8 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             "XCURSOR_THEME=Adwaita",
             "LIBGL_ALWAYS_SOFTWARE=1",
             "EGL_PLATFORM=wayland",
+            "MESA_LOADER_DRIVER_OVERRIDE=softpipe",
+            "LIBGL_DRIVERS_PATH=/usr/lib/x86_64-linux-gnu/dri",
             NULL
         };
         int minibrowser_accel =
@@ -1449,8 +1472,7 @@ int main(void)
                                   sizeof(loops_arg), resize_arg,
                                   sizeof(resize_arg));
         client_pid = demo ?
-            launch_client(client_path, client_name, "--demo", frames_arg,
-                          loops_arg) :
+            launch_client(client_path, client_name, "--demo", NULL, NULL) :
             launch_client(client_path, client_name, frames_arg, loops_arg,
                           resize_arg[0] ? resize_arg : NULL);
         if (client_pid < 0) {
@@ -1459,7 +1481,8 @@ int main(void)
             return 1;
         }
         fprintf(stderr, "[desktop] %s pid=%d %s %s %s\n", client_name,
-                client_pid, demo ? "--demo" : frames_arg, loops_arg,
+                client_pid, demo ? "--demo" : frames_arg,
+                demo ? "" : loops_arg,
                 demo ? "" : resize_arg);
         if (webkit_enabled_by_cmdline()) {
             while (g_running && client_pid > 0) {

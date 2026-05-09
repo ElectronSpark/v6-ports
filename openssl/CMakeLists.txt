@@ -1,9 +1,8 @@
 # xv6-os openssl port — standalone CMake project (perl Configure upstream).
 #
 # Builds static libcrypto.a + libssl.a into ${XV6_SYSROOT}.
-# Mirrors xv6-tmp/user/CMakeLists.txt:720+ (openssl section), simplified
-# because the toolchain ships its own working musl sysroot — no manual
-# CRT/dynamic-linker LDFLAGS needed.
+# Mirrors xv6-tmp/user/CMakeLists.txt:720+ (openssl section), now built with
+# the host compiler/glibc.
 #
 # OpenSSL's build system is not autoconf/cmake — we drive its perl
 # Configure script directly via add_custom_command (xv6_port doesn't
@@ -31,23 +30,8 @@ find_program(PERL_PROG perl REQUIRED)
 set(_src   ${CMAKE_CURRENT_SOURCE_DIR}/src)
 set(_build ${CMAKE_BINARY_DIR}/openssl-build)
 
-# Strip the trailing 'gcc' off CMAKE_C_COMPILER to derive CROSS_COMPILE.
-get_filename_component(_cc_path "${CMAKE_C_COMPILER}" REALPATH)
-get_filename_component(_cc_dir  "${_cc_path}" DIRECTORY)
-get_filename_component(_cc_name "${_cc_path}" NAME)
-string(REGEX REPLACE "gcc$" "" _cc_stem "${_cc_name}")
-set(_cross_prefix "${_cc_dir}/${_cc_stem}")
-
-# Detect arch from compiler name (x86_64-... or riscv64-...).
-if(_cc_name MATCHES "^x86_64")
-    set(_openssl_target "linux-x86_64")
-    set(_openssl_asm_opt "")
-elseif(_cc_name MATCHES "^riscv64")
-    set(_openssl_target "linux64-riscv64")
-    set(_openssl_asm_opt "no-asm")
-else()
-    message(FATAL_ERROR "Port openssl: unknown target arch in ${_cc_name}")
-endif()
+set(_openssl_target "linux-x86_64")
+set(_openssl_asm_opt "")
 
 set(_libcrypto ${XV6_SYSROOT}/lib/libcrypto.a)
 set(_libssl    ${XV6_SYSROOT}/lib/libssl.a)
@@ -69,11 +53,12 @@ add_custom_command(
     COMMAND ${CMAKE_COMMAND} -E make_directory ${_build}
     COMMAND ${CMAKE_COMMAND} -E chdir ${_build}
             ${CMAKE_COMMAND} -E env
-                CROSS_COMPILE=${_cross_prefix}
+                CC=${CMAKE_C_COMPILER}
+                AR=${CMAKE_AR}
+                RANLIB=${CMAKE_RANLIB}
                 "CFLAGS=-O2 -fPIC"
             ${PERL_PROG} ${_src}/Configure
                 ${_openssl_target}
-                --cross-compile-prefix=${_cross_prefix}
                 --prefix=/
                 --openssldir=/etc/ssl
                 --libdir=lib

@@ -12,6 +12,7 @@
 
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #ifndef EGL_PLATFORM_SURFACELESS_MESA
@@ -22,15 +23,18 @@ static EGLDisplay get_surfaceless_display(void)
 {
     typedef EGLDisplay (*get_platform_display_fn)(EGLenum, void *,
                                                   const EGLAttrib *);
+    const char *client_ext = eglQueryString(EGL_NO_DISPLAY, EGL_EXTENSIONS);
     get_platform_display_fn get_platform_display =
         (get_platform_display_fn)eglGetProcAddress("eglGetPlatformDisplay");
 
-    if (get_platform_display)
+    if (get_platform_display && client_ext &&
+        strstr(client_ext, "EGL_MESA_platform_surfaceless"))
         return get_platform_display(EGL_PLATFORM_SURFACELESS_MESA, NULL, NULL);
 
     get_platform_display =
         (get_platform_display_fn)eglGetProcAddress("eglGetPlatformDisplayEXT");
-    if (get_platform_display)
+    if (get_platform_display && client_ext &&
+        strstr(client_ext, "EGL_MESA_platform_surfaceless"))
         return get_platform_display(EGL_PLATFORM_SURFACELESS_MESA, NULL, NULL);
 
     return eglGetDisplay(EGL_DEFAULT_DISPLAY);
@@ -158,6 +162,10 @@ int main(int argc, char **argv)
     int run_gles = 1;
     int run_gl = 0;
     int status = 0;
+
+    setenv("LIBGL_ALWAYS_SOFTWARE", "1", 0);
+    setenv("MESA_LOADER_DRIVER_OVERRIDE", "softpipe", 0);
+    setenv("LIBGL_DRIVERS_PATH", "/usr/lib/x86_64-linux-gnu/dri", 0);
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--api=gl") == 0) {

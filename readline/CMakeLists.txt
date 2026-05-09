@@ -19,9 +19,8 @@ foreach(v CMAKE_C_COMPILER CMAKE_AR CMAKE_RANLIB)
     endif()
 endforeach()
 
-# readline's configure probes _POSIX_VERSION which musl sets to a value
-# its old config layout doesn't recognise, plus needs explicit hints
-# for ncurses-based termcap and a few sigsetjmp/strcoll quirks.
+# readline needs explicit hints for ncurses-based termcap and a few
+# sigsetjmp/strcoll quirks.
 xv6_port(
     NAME            readline
     SOURCE_DIR      ${CMAKE_CURRENT_SOURCE_DIR}/src

@@ -1,9 +1,8 @@
 # xv6-os bzip2 port — standalone CMake project.
 #
 # Wraps the vendored bzip2 source tree (src/) in an xv6_port() call.
-# Mirrors xv6-tmp/user/CMakeLists.txt:1330+ (bzip2 section), simplified
-# because our cross toolchain (build-toolchain-x86_64) ships its own
-# musl sysroot — no manual --sysroot/-isystem chains needed.
+# Mirrors xv6-tmp/user/CMakeLists.txt:1330+ (bzip2 section), now built with
+# the host compiler/glibc.
 #
 # Outputs (installed into ${XV6_SYSROOT}):
 #   /lib/libbz2_static.a   (alias of libbz2.a, see install rename below)
@@ -17,7 +16,7 @@ include(${CMAKE_CURRENT_LIST_DIR}/../cmake/AddPort.cmake)
 foreach(v CMAKE_C_COMPILER CMAKE_AR CMAKE_RANLIB)
     if(NOT ${v} OR ${v} STREQUAL "")
         message(FATAL_ERROR
-            "Port bzip2: ${v} is not set. Pass the cross toolchain on "
+            "Port bzip2: ${v} is not set. Pass compiler tools on "
             "the cmake command line (or via the umbrella).")
     endif()
 endforeach()

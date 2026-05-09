@@ -92,8 +92,8 @@ Tier 6 (browser):
 
 ## WebKitGTK roadmap
 
-The `webkit` port is intentionally self-contained for now: it stages the
-committed `ports/webkit/sysroot` runtime into `${XV6_SYSROOT}` and applies no
+The `webkit` port is intentionally self-contained for now: it stages an
+explicitly selected host-glibc runtime into `${XV6_SYSROOT}` and applies no
 network fetches or host package installs. The previous repo-carried WebKitGTK
 2.42.5 source overrides have been retired; `apply-xv6-overrides.sh` now exits
 successfully when there are no overrides to apply.
@@ -102,12 +102,10 @@ Current behavior:
 
 - `port-webkit` validates that the selected runtime has MiniBrowser, the WebKit
   subprocesses, JavaScriptCore/WebKit shared libraries, and the injected bundle.
-- The default runtime source is the repo-local `ports/webkit/sysroot`; an
-  explicit `XV6_WEBKIT_REF_SYSROOT` or `-DXV6_WEBKIT_REF_SYSROOT=...` can still
-  be used for local experiments.
-- `XV6_WEBKIT_STRICT_STAGE=ON` is the default, so container builds fail early if
-  the runtime payload is incomplete instead of silently producing a blank
-  WebKit desktop entry.
+- There is no default repo-local WebKit runtime. Set `XV6_WEBKIT_REF_SYSROOT` or
+  `-DXV6_WEBKIT_REF_SYSROOT=...` to stage a known host-glibc runtime.
+- `XV6_WEBKIT_STRICT_STAGE=OFF` is the default. When no runtime is selected, the
+  port logs a skip instead of staging stale musl-linked artifacts.
 - A `.webkit-stage-manifest` is emitted next to the staged executables for
   quick inspection of what landed in the sysroot.
 
@@ -129,8 +127,8 @@ readline, libffi, zlib, bzip2, xz). It produces `bin/python3.12`,
 `zlib`, `readline`, `select`), and the pure-Python stdlib under
 `lib/python3.12/`.
 
-`scripts/stage-cpython.sh` and `CPYTHON_REF_SYSROOT` are no longer used by
-this port and can be removed once nothing else references them.
+The old CPython staging helper and reference-sysroot fallback have been
+removed; CPython is installed by `port-cpython`.
 
 ## Replacing the stage step with from-source ports
 
@@ -169,24 +167,10 @@ For each port:
    and translate the relevant `add_custom_command` block into an `xv6_port()`
    call (see `ports/zlib/CMakeLists.txt` for the pattern).
 
-3. **Cross-compile env.** xv6-tmp's recipes reference variables like
-   `MUSL_CRT1_O`, `MUSL_DYNAMIC_LINKER_PATH`, `MUSL_INCLUDE_DIR`,
-   `GCC_INCLUDE_DIR_MUSL`, `MUSL_COMPAT_DIR`, `LIBGCC_PATH`,
-   `USER_ARCH_CFLAGS`. These are NOT defined in xv6-os yet. Either:
-
-   - **Option A (recommended):** create `cmake/CrossEnv.cmake` that
-     derives all of these from `XV6_SYSROOT`, `XV6_TOOLCHAIN_PREFIX`,
-     and `XV6_TRIPLE`, then `include()` it from
-     `ports/cmake/AddPort.cmake` so every port sees them as plain
-     CMake vars.
-   - **Option B:** pass each one as `-D` from `cmake/BuildPorts.cmake`
-     into the ports sub-cmake invocation.
-
-   Approximate values:
-   - `MUSL_DYNAMIC_LINKER_PATH = /lib/ld-musl-x86_64.so.1` (runtime path)
-   - `MUSL_CRT1_O              = ${PHASE2_LIB}/crt1.o`
-   - `MUSL_INCLUDE_DIR         = ${PHASE2_LIB}/../include`
-   - `LIBGCC_PATH              = $(${CMAKE_C_COMPILER} -print-libgcc-file-name)`
+3. **Host-glibc env.** x86_64 ports are same-architecture host builds. Recipes
+   should use `cc`, `c++`, `ar`, and `ranlib`, put third-party headers and
+   libraries under `${XV6_SYSROOT}`, and leave libc, CRT objects, and the
+   dynamic loader to the host glibc toolchain.
 
 4. **CPython specifics.** The cpython recipe is the longest (~300 lines in
    xv6-tmp). Key wrinkles:
@@ -195,7 +179,7 @@ For each port:
    - `configure --host=x86_64-unknown-xv6 --enable-shared --disable-test-modules
      --without-ensurepip --with-system-ffi --with-openssl=${XV6_SYSROOT}`.
    - Post-install: drop `*-312d-*.so` debug variants, install pure-python
-     stdlib (`Lib/`), copy musl loader + libc + libgcc_s into sysroot.
+     stdlib (`Lib/`), and keep the binary on the host glibc interpreter path.
    - **pip-installed packages** (flask, sqlalchemy, ...) must be added by
      a separate post-install step using host pip with `--target` and
      `--no-binary=:all:`. Recommend `ports/cpython/requirements.txt`.
@@ -206,9 +190,7 @@ For each port:
 
 ## Once all ports build from source
 
-- Delete `scripts/stage-cpython.sh` and the `CPYTHON_REF_SYSROOT`
-  fallback in `ports/cpython/CMakeLists.txt`.
-- Remove `BUILD_ALWAYS 1` in `cmake/BuildPorts.cmake` so ports get
-  incremental rebuilds.
+- Keep `port-webkit` pointed at an explicit host-glibc runtime until a
+  from-source WebKitGTK recipe is available.
 - Remove the legacy `initrd` / `image` targets in
   `cmake/BuildImage.cmake`.

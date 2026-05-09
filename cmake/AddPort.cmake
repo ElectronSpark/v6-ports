@@ -20,9 +20,9 @@
 #   )
 #
 # Required configuration vars (set by caller or umbrella):
-#   CMAKE_C_COMPILER, CMAKE_AR, CMAKE_RANLIB — cross toolchain
-#   XV6_SYSROOT          — install destination (= musl sysroot)
-#   XV6_PORT_CFLAGS      — common compile flags for ports (sysroot, isystem...)
+#   CMAKE_C_COMPILER, CMAKE_AR, CMAKE_RANLIB — host compiler tools
+#   XV6_SYSROOT          — install destination
+#   XV6_PORT_CFLAGS      — common compile flags for ports
 #
 # Targets created per port:
 #   port-<name>          — aggregate (default ALL target)
@@ -44,9 +44,14 @@ function(_xv6_port_resolve_config)
     file(MAKE_DIRECTORY "${_resolved_sysroot}/include")
 
     if(NOT DEFINED XV6_PORT_CFLAGS OR XV6_PORT_CFLAGS STREQUAL "")
-        # Minimal default — caller usually overrides with the full
-        # musl --sysroot=... -isystem... incantation.
         set(XV6_PORT_CFLAGS "-O2 -fPIC" PARENT_SCOPE)
+    endif()
+    if(NOT DEFINED XV6_PORT_CROSS OR XV6_PORT_CROSS STREQUAL "")
+        set(XV6_PORT_CROSS OFF PARENT_SCOPE)
+    endif()
+    if(NOT DEFINED CMAKE_CXX_COMPILER OR CMAKE_CXX_COMPILER STREQUAL "")
+        find_program(_xv6_host_cxx NAMES c++ g++ clang++ REQUIRED)
+        set(CMAKE_CXX_COMPILER "${_xv6_host_cxx}" PARENT_SCOPE)
     endif()
 endfunction()
 
@@ -125,15 +130,23 @@ function(xv6_port)
     # ------------------------------------------------------------------
     if(P_BUILD_SYSTEM STREQUAL "cmake")
         set(_cmake_configure
-            ${CMAKE_COMMAND}
+            ${CMAKE_COMMAND} -E rm -rf ${_build}
+            COMMAND ${CMAKE_COMMAND}
                 -S ${_src}
                 -B ${_build}
                 -DCMAKE_SYSTEM_NAME=Linux
                 -DCMAKE_BUILD_TYPE=Release
                 -DCMAKE_C_COMPILER=${CMAKE_C_COMPILER}
+                -DCMAKE_CXX_COMPILER=${CMAKE_CXX_COMPILER}
                 -DCMAKE_AR=${CMAKE_AR}
                 -DCMAKE_RANLIB=${CMAKE_RANLIB}
                 -DCMAKE_C_FLAGS=${XV6_PORT_CFLAGS}
+                -DCMAKE_PREFIX_PATH=${XV6_SYSROOT}
+                -DCMAKE_FIND_ROOT_PATH=${XV6_SYSROOT}
+                -DCMAKE_FIND_ROOT_PATH_MODE_PROGRAM=NEVER
+                -DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=ONLY
+                -DCMAKE_FIND_ROOT_PATH_MODE_INCLUDE=ONLY
+                -DCMAKE_FIND_ROOT_PATH_MODE_PACKAGE=ONLY
                 -DCMAKE_INSTALL_PREFIX=/
                 -DCMAKE_INSTALL_LIBDIR=/lib
                 -DCMAKE_INSTALL_INCLUDEDIR=/include
@@ -149,14 +162,19 @@ function(xv6_port)
     elseif(P_BUILD_SYSTEM STREQUAL "autoconf")
         # autoconf in-tree builds: copy src -> build first to keep
         # source tree clean.
-        get_filename_component(_cc_name "${CMAKE_C_COMPILER}" NAME)
-        string(REGEX REPLACE "-gcc$" "" _triple "${_cc_name}")
+        set(_host_arg "")
+        if(XV6_PORT_CROSS)
+            get_filename_component(_cc_name "${CMAKE_C_COMPILER}" NAME)
+            string(REGEX REPLACE "-gcc$" "" _triple "${_cc_name}")
+            set(_host_arg --host=${_triple})
+        endif()
         set(_cmake_configure
             ${CMAKE_COMMAND} -E make_directory ${_build}
             COMMAND ${CMAKE_COMMAND} -E copy_directory ${_src} ${_build}
             COMMAND ${CMAKE_COMMAND} -E chdir ${_build}
                 ${CMAKE_COMMAND} -E env
                     CC=${CMAKE_C_COMPILER}
+                    CXX=${CMAKE_CXX_COMPILER}
                     AR=${CMAKE_AR}
                     RANLIB=${CMAKE_RANLIB}
                     "CFLAGS=${XV6_PORT_CFLAGS}"
@@ -164,7 +182,7 @@ function(xv6_port)
                     --prefix=/
                     --libdir=/lib
                     --includedir=/include
-                    --host=${_triple}
+                    ${_host_arg}
                     ${P_CONFIGURE_ARGS})
         set(_build_cmd
             ${CMAKE_COMMAND} -E chdir ${_build} make -j${P_JOBS} ${P_MAKE_ARGS})
@@ -173,19 +191,16 @@ function(xv6_port)
             make DESTDIR=${XV6_SYSROOT} install ${P_INSTALL_ARGS})
 
     elseif(P_BUILD_SYSTEM STREQUAL "meson")
-        # Meson cross-build. We synthesize a cross-file at CMake
-        # configure time from the toolchain we already know about,
-        # then drive `meson setup / compile / install`.
+        # Meson build. For host-glibc ports this is a same-architecture build,
+        # but we still synthesize a machine file so the install prefix,
+        # pkg-config paths, and generated host tools are stable.
         get_filename_component(_cc_name "${CMAKE_C_COMPILER}" NAME)
         get_filename_component(_cc_dir  "${CMAKE_C_COMPILER}" DIRECTORY)
         string(REGEX REPLACE "-gcc$" "" _triple "${_cc_name}")
         set(_strip "${_cc_dir}/${_triple}-strip")
-        set(_cxx   "${_cc_dir}/${_triple}-g++")
+        set(_cxx "${CMAKE_CXX_COMPILER}")
         if(NOT EXISTS "${_strip}")
             set(_strip "strip")
-        endif()
-        if(NOT EXISTS "${_cxx}")
-            set(_cxx "${CMAKE_C_COMPILER}")
         endif()
 
         # Split XV6_PORT_CFLAGS plus optional per-port flags into Meson list
@@ -232,7 +247,7 @@ function(xv6_port)
 "[properties]\n"
 "sys_root          = '${XV6_SYSROOT}'\n"
 "pkg_config_libdir = '${XV6_SYSROOT}/lib/pkgconfig:${XV6_SYSROOT}/share/pkgconfig'\n"
-"needs_exe_wrapper = true\n"
+"needs_exe_wrapper = false\n"
 "\n"
 "[built-in options]\n"
 "c_args      = [${_c_args_meson}]\n"
@@ -284,6 +299,7 @@ function(xv6_port)
         set(_build_cmd
             make -C ${_src}
                 CC=${CMAKE_C_COMPILER}
+                CXX=${CMAKE_CXX_COMPILER}
                 AR=${CMAKE_AR}
                 RANLIB=${CMAKE_RANLIB}
                 "CFLAGS=${XV6_PORT_CFLAGS}"
@@ -307,6 +323,7 @@ function(xv6_port)
                 "PKG_CONFIG_LIBDIR=${XV6_SYSROOT}/lib/pkgconfig:${XV6_SYSROOT}/share/pkgconfig"
                 "PKG_CONFIG_PATH=${XV6_SYSROOT}/lib/pkgconfig:${XV6_SYSROOT}/share/pkgconfig"
                 "CC=${CMAKE_C_COMPILER}"
+                "CXX=${CMAKE_CXX_COMPILER}"
                 "AR=${CMAKE_AR}"
                 "RANLIB=${CMAKE_RANLIB}"
                 "CFLAGS=${XV6_PORT_CFLAGS}"

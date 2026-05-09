@@ -7,11 +7,12 @@
 #
 # Standalone usage:
 #   cmake -S . -B build \
-#       -DCMAKE_C_COMPILER=$XV6_TOOLCHAIN_BIN/riscv64-xv6-linux-musl-gcc \
-#       -DCMAKE_AR=$XV6_TOOLCHAIN_BIN/riscv64-xv6-linux-musl-ar \
-#       -DCMAKE_RANLIB=$XV6_TOOLCHAIN_BIN/riscv64-xv6-linux-musl-ranlib \
+#       -DCMAKE_C_COMPILER=cc \
+#       -DCMAKE_CXX_COMPILER=c++ \
+#       -DCMAKE_AR=ar \
+#       -DCMAKE_RANLIB=ranlib \
 #       -DXV6_SYSROOT=$XV6_SYSROOT \
-#       -DXV6_PORT_CFLAGS="--sysroot=$XV6_SYSROOT -O2 ..."
+#       -DXV6_PORT_CFLAGS="-O2 -fPIC -isystem $XV6_SYSROOT/include"
 #   cmake --build build -j
 #
 # Each port can also be built independently — its CMakeLists.txt is
@@ -23,9 +24,12 @@ project(xv6_ports LANGUAGES NONE)
 # Sanity checks.
 foreach(req CMAKE_C_COMPILER CMAKE_AR CMAKE_RANLIB)
     if(NOT ${req} OR ${req} STREQUAL "")
-        message(FATAL_ERROR "ports/: ${req} is required (cross toolchain).")
+        message(FATAL_ERROR "ports/: ${req} is required.")
     endif()
 endforeach()
+if(NOT CMAKE_CXX_COMPILER OR CMAKE_CXX_COMPILER STREQUAL "")
+    find_program(CMAKE_CXX_COMPILER NAMES c++ g++ clang++ REQUIRED)
+endif()
 if(NOT DEFINED XV6_SYSROOT OR XV6_SYSROOT STREQUAL "")
     message(FATAL_ERROR "ports/: -DXV6_SYSROOT=<path> is required.")
 endif()
