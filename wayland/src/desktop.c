@@ -1422,6 +1422,16 @@ static void normalize_webkit_url(const char *in, char *out, size_t out_size)
 
     if (tmp[0] == '\0') {
         snprintf(out, out_size, WEBKIT_DEFAULT_URL);
+    } else if (strncmp(tmp, "http//", 6) == 0) {
+        copy_prefixed_url(out, out_size, "http://", tmp + 6);
+    } else if (strncmp(tmp, "https//", 7) == 0) {
+        copy_prefixed_url(out, out_size, "https://", tmp + 7);
+    } else if (strncmp(tmp, "http:/", 6) == 0 &&
+               strncmp(tmp, "http://", 7) != 0) {
+        copy_prefixed_url(out, out_size, "http://", tmp + 6);
+    } else if (strncmp(tmp, "https:/", 7) == 0 &&
+               strncmp(tmp, "https://", 8) != 0) {
+        copy_prefixed_url(out, out_size, "https://", tmp + 7);
     } else if (webkit_url_has_scheme(tmp)) {
         snprintf(out, out_size, "%s", tmp);
     } else if (tmp[0] == '/') {

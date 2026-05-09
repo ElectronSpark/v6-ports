@@ -233,6 +233,7 @@ add_custom_command(
                 -Wl,-soname,libxv6memshim.so
                 -o ${_memshim_lib}
                 ${WAYLAND_SRC_DIR}/xv6memshim.c
+                -ldl
     DEPENDS ${WAYLAND_SRC_DIR}/xv6memshim.c
     COMMENT "Compiling xv6 WebKit memory-function shim"
     VERBATIM)

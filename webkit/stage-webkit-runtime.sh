@@ -5,7 +5,6 @@ ref="${1:-}"
 dst="${2:?destination sysroot required}"
 strict="${3:-auto}"
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-bundled_runtime="${script_dir}/sysroot"
 host_gst_plugin_dir="/usr/lib/x86_64-linux-gnu/gstreamer-1.0"
 host_gst_exec_dir="/usr/lib/x86_64-linux-gnu/gstreamer1.0/gstreamer-1.0"
 host_gst_plugins=(
@@ -35,13 +34,29 @@ host_gst_plugins=(
     libgstvpx.so
 )
 host_gst_plugin_dirs=()
+host_gst_exec_dirs=()
+host_gst_bin_dirs=()
 if [[ -n "${HOST_GST_PLUGIN_DIRS:-}" ]]; then
     IFS=: read -r -a host_gst_plugin_dirs <<< "${HOST_GST_PLUGIN_DIRS}"
+fi
+if [[ -n "${HOST_GST_EXEC_DIRS:-}" ]]; then
+    IFS=: read -r -a host_gst_exec_dirs <<< "${HOST_GST_EXEC_DIRS}"
+fi
+if [[ -n "${HOST_GST_BIN_DIRS:-}" ]]; then
+    IFS=: read -r -a host_gst_bin_dirs <<< "${HOST_GST_BIN_DIRS}"
 fi
 if [[ -n "${HOST_GST_PLUGIN_DIR:-}" ]]; then
     host_gst_plugin_dirs+=("${HOST_GST_PLUGIN_DIR}")
 fi
+if [[ -n "${HOST_GST_EXEC_DIR:-}" ]]; then
+    host_gst_exec_dirs+=("${HOST_GST_EXEC_DIR}")
+fi
+if [[ -n "${HOST_GST_BIN_DIR:-}" ]]; then
+    host_gst_bin_dirs+=("${HOST_GST_BIN_DIR}")
+fi
 host_gst_plugin_dirs+=("${host_gst_plugin_dir}")
+host_gst_exec_dirs+=("${host_gst_exec_dir}")
+host_gst_bin_dirs+=("/usr/bin")
 host_library_dirs=()
 if [[ -n "${HOST_LIBRARY_DIRS:-}" ]]; then
     IFS=: read -r -a host_library_dirs <<< "${HOST_LIBRARY_DIRS}"
@@ -90,6 +105,30 @@ host_gst_plugin_path() {
     return 1
 }
 
+host_gst_exec_path() {
+    local name="$1"
+    local dir
+    for dir in "${host_gst_exec_dirs[@]}"; do
+        if [[ -x "${dir}/${name}" ]]; then
+            printf '%s\n' "${dir}/${name}"
+            return 0
+        fi
+    done
+    return 1
+}
+
+host_gst_tool_path() {
+    local name="$1"
+    local dir
+    for dir in "${host_gst_bin_dirs[@]}"; do
+        if [[ -x "${dir}/${name}" ]]; then
+            printf '%s\n' "${dir}/${name}"
+            return 0
+        fi
+    done
+    return 1
+}
+
 download_deb_chunk() {
     local deb_dir="$1"
     shift
@@ -114,6 +153,9 @@ prepare_host_gst_runtime_cache() {
     local packages=(
         gstreamer1.0-libav
         gstreamer1.0-plugins-bad
+        gstreamer1.0-plugins-base
+        gstreamer1.0-plugins-good
+        gstreamer1.0-tools
         libgstreamer-plugins-bad1.0-0
     )
     local all_packages=()
@@ -178,6 +220,18 @@ prepare_host_gst_runtime_cache() {
         host_gst_plugin_dirs=(
             "${root}/usr/lib/x86_64-linux-gnu/gstreamer-1.0"
             "${host_gst_plugin_dirs[@]}"
+        )
+    fi
+    if [[ -d "${root}/usr/lib/x86_64-linux-gnu/gstreamer1.0/gstreamer-1.0" ]]; then
+        host_gst_exec_dirs=(
+            "${root}/usr/lib/x86_64-linux-gnu/gstreamer1.0/gstreamer-1.0"
+            "${host_gst_exec_dirs[@]}"
+        )
+    fi
+    if [[ -d "${root}/usr/bin" ]]; then
+        host_gst_bin_dirs=(
+            "${root}/usr/bin"
+            "${host_gst_bin_dirs[@]}"
         )
     fi
     if [[ -d "${root}/usr/lib/x86_64-linux-gnu" ]]; then
@@ -747,6 +801,7 @@ stage_host_needed_closure() {
         "${dst}/lib/webkit2gtk-4.1/injected-bundle/libwebkit2gtkinjectedbundle.so"
         "${dst}/lib/gio/modules/libgiognutls.so"
         "${dst}/lib/gio/modules/libgioopenssl.so"
+        "${dst}/libexec/gstreamer-1.0/gst-plugin-scanner"
     )
     declare -A seen_elf=()
 
@@ -1056,12 +1111,8 @@ if [[ ! -d "${gst_plugin_ref}/lib/gstreamer-1.0" &&
     echo "ports/webkit: warning: ${ref} has no GStreamer plugins; using host glibc plugin runtime" >&2
     gst_plugin_source="host"
 elif [[ ! -d "${gst_plugin_ref}/lib/gstreamer-1.0" &&
-        ! -d "${gst_plugin_ref}/usr/lib/gstreamer-1.0" &&
-        ( -d "${bundled_runtime}/lib/gstreamer-1.0" ||
-        -d "${bundled_runtime}/usr/lib/gstreamer-1.0" ) ]]; then
-    echo "ports/webkit: warning: ${ref} has no GStreamer plugins; using bundled plugin runtime" >&2
-    gst_plugin_ref="${bundled_runtime}"
-    gst_plugin_source="sysroot"
+        ! -d "${gst_plugin_ref}/usr/lib/gstreamer-1.0" ]]; then
+    echo "ports/webkit: warning: ${ref} has no GStreamer plugins and no host plugin runtime was found" >&2
 fi
 if [[ "${gst_plugin_source}" == "host" ]]; then
     for pattern in \
@@ -1148,20 +1199,23 @@ if [[ -d "/usr/share/X11/xkb" ]]; then
     rm -rf "${dst}/usr/share/X11/xkb"
     cp -a "/usr/share/X11/xkb" "${dst}/usr/share/X11/"
 fi
-if [[ "${gst_plugin_source}" == "host" && -x "${host_gst_exec_dir}/gst-plugin-scanner" ]]; then
-    mkdir -p "${dst}/libexec/gstreamer-1.0"
-    cp -a "${host_gst_exec_dir}/gst-plugin-scanner" \
-          "${dst}/libexec/gstreamer-1.0/"
-elif [[ -x "${gst_plugin_ref}/libexec/gstreamer-1.0/gst-plugin-scanner" ]]; then
+if [[ -x "${gst_plugin_ref}/libexec/gstreamer-1.0/gst-plugin-scanner" ]]; then
     mkdir -p "${dst}/libexec/gstreamer-1.0"
     cp -a "${gst_plugin_ref}/libexec/gstreamer-1.0/gst-plugin-scanner" \
           "${dst}/libexec/gstreamer-1.0/"
+elif plugin_path="$(host_gst_exec_path gst-plugin-scanner)"; then
+    mkdir -p "${dst}/libexec/gstreamer-1.0"
+    cp -a "${plugin_path}" "${dst}/libexec/gstreamer-1.0/"
+else
+    echo "ports/webkit: warning: gst-plugin-scanner not found; WebKit media plugin discovery may fail" >&2
 fi
 for gst_tool in gst-inspect-1.0 gst-launch-1.0 gst-typefind-1.0; do
-    if [[ "${gst_plugin_source}" == "host" && -x "/usr/bin/${gst_tool}" ]]; then
-        cp -a "/usr/bin/${gst_tool}" "${dst}/bin/"
-    elif [[ -x "${gst_plugin_ref}/bin/${gst_tool}" ]]; then
+    if [[ -x "${gst_plugin_ref}/bin/${gst_tool}" ]]; then
         cp -a "${gst_plugin_ref}/bin/${gst_tool}" "${dst}/bin/"
+    elif plugin_path="$(host_gst_tool_path "${gst_tool}")"; then
+        cp -a "${plugin_path}" "${dst}/bin/"
+    else
+        echo "ports/webkit: warning: ${gst_tool} not found in ref or host package runtime" >&2
     fi
 done
 
