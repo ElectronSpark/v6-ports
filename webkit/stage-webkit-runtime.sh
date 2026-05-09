@@ -188,6 +188,81 @@ prepare_host_gst_runtime_cache() {
     fi
 }
 
+prepare_host_gio_tls_runtime_cache() {
+    local cache
+    local root
+    local debs
+    local stamp
+    local pkg
+    local deb
+    local packages=(
+        glib-networking
+    )
+    local all_packages=()
+    local chunk=()
+
+    [[ "${WEBKIT_DOWNLOAD_HOST_GIO_TLS_RUNTIME:-1}" != "0" ]] || return 0
+    command -v apt-cache >/dev/null 2>&1 || return 0
+    command -v apt-get >/dev/null 2>&1 || return 0
+    command -v dpkg-deb >/dev/null 2>&1 || return 0
+
+    if ! apt-cache show "${packages[0]}" >/dev/null 2>&1; then
+        echo "ports/webkit: refreshing apt metadata for cached GIO TLS runtime" >&2
+        if ! apt-get update >/dev/null 2>&1; then
+            echo "ports/webkit: warning: apt metadata refresh failed; using installed host GIO TLS runtime only" >&2
+            return 0
+        fi
+    fi
+
+    cache="${WEBKIT_HOST_GIO_TLS_RUNTIME_CACHE:-${dst}/../webkit-gio-tls-runtime-cache}"
+    root="${cache}/root"
+    debs="${cache}/debs"
+    stamp="${cache}/.extract.stamp"
+
+    mkdir -p "${debs}" "${root}"
+
+    if [[ ! -e "${stamp}" ]]; then
+        echo "ports/webkit: preparing cached host GIO TLS runtime in ${cache}" >&2
+        mapfile -t all_packages < <(
+            {
+                printf '%s\n' "${packages[@]}"
+                apt-cache depends --recurse \
+                    --no-recommends --no-suggests --no-conflicts \
+                    --no-breaks --no-replaces --no-enhances \
+                    "${packages[@]}" 2>/dev/null |
+                    awk '/^[[:space:]]*(Pre)?Depends:/ { print $2 }'
+            } |
+            awk '/^[[:alnum:]][[:alnum:].+:-]*$/ { print }' |
+            LC_ALL=C sort -u
+        )
+        for pkg in "${all_packages[@]}"; do
+            chunk+=("${pkg}")
+            if ((${#chunk[@]} >= 48)); then
+                download_deb_chunk "${debs}" "${chunk[@]}"
+                chunk=()
+            fi
+        done
+        if ((${#chunk[@]})); then
+            download_deb_chunk "${debs}" "${chunk[@]}"
+        fi
+        rm -rf "${root}"
+        mkdir -p "${root}"
+        shopt -s nullglob
+        for deb in "${debs}"/*.deb; do
+            dpkg-deb -x "${deb}" "${root}"
+        done
+        shopt -u nullglob
+        touch "${stamp}"
+    fi
+
+    if [[ -d "${root}/usr/lib/x86_64-linux-gnu" ]]; then
+        host_library_dirs=(
+            "${root}/usr/lib/x86_64-linux-gnu"
+            "${host_library_dirs[@]}"
+        )
+    fi
+}
+
 remove_legacy_libc_glob() {
     local pattern="$1"
     local matches=()
@@ -800,11 +875,21 @@ stage_host_gio_tls_backend() {
         return 0
     fi
 
+    prepare_host_gio_tls_runtime_cache
+
+    for candidate in "${host_library_dirs[@]}"; do
+        if [[ -e "${candidate}/gio/modules/libgiognutls.so" ]]; then
+            host_module="${candidate}/gio/modules/libgiognutls.so"
+            break
+        fi
+    done
+
     for candidate in \
         /usr/lib/x86_64-linux-gnu/gio/modules/libgiognutls.so \
         /lib/x86_64-linux-gnu/gio/modules/libgiognutls.so \
         /usr/lib/gio/modules/libgiognutls.so \
         /lib/gio/modules/libgiognutls.so; do
+        [[ -z "${host_module}" ]] || break
         if [[ -e "${candidate}" ]]; then
             host_module="${candidate}"
             break
