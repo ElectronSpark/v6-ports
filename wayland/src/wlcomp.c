@@ -19,6 +19,7 @@
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <sys/syscall.h>
+#include <sys/resource.h>
 #include <poll.h>
 #include <time.h>
 #include <dirent.h>
@@ -43,6 +44,12 @@ struct drm_virtgpu_getparam_compat {
     uint64_t param;
     uint64_t value;
 };
+
+static void disable_child_coredumps(void)
+{
+    struct rlimit lim = {0, 0};
+    (void)setrlimit(RLIMIT_CORE, &lim);
+}
 
 /* PTY/TTY ioctls used by the built-in terminal. */
 #define XV6_TIOCGPGRP  0x540F
@@ -738,6 +745,15 @@ static int32_t g_grab_start_w, g_grab_start_h;    /* surface size at grab start 
 #define WAYLAND_DEMO_BORDER  2
 #define WAYLAND_DEMO_SHADOW  3
 
+static void cancel_surface_grab(struct wlcomp_surface *surf)
+{
+    if (g_grab_surface == surf) {
+        g_grab_surface = NULL;
+        g_grab_mode = 0;
+        g_grab_edges = 0;
+    }
+}
+
 static int surface_is_demo_window(const struct wlcomp_surface *surf)
 {
     return surf && strcmp(surf->app_id, "mesaglsmoke") == 0;
@@ -749,9 +765,46 @@ static int surface_is_webkit_window(const struct wlcomp_surface *surf)
                     strcmp(surf->app_id, "webkitgpusmoke") == 0);
 }
 
+static int frame_callback_interval_ms(void)
+{
+    static int initialized;
+    static int interval_ms = 16;
+    const char *env;
+
+    if (initialized)
+        return interval_ms;
+    initialized = 1;
+    env = getenv("XV6_WLCOMP_FRAME_MS");
+    if (env && *env) {
+        interval_ms = atoi(env);
+        if (interval_ms < 0)
+            interval_ms = 0;
+        if (interval_ms > 1000)
+            interval_ms = 1000;
+    }
+    return interval_ms;
+}
+
+static int frame_callbacks_due(uint32_t now)
+{
+    static uint32_t next_frame_ms;
+    int interval_ms = frame_callback_interval_ms();
+
+    if (interval_ms <= 0)
+        return 1;
+    if (next_frame_ms == 0 || now >= next_frame_ms) {
+        next_frame_ms = now + (uint32_t)interval_ms;
+        return 1;
+    }
+    return 0;
+}
+
 static void damage_all_frame_callbacks(uint32_t now)
 {
     struct wlcomp_surface *cb_surf;
+
+    if (!frame_callbacks_due(now))
+        return;
 
     wl_list_for_each(cb_surf, &g_surfaces, link) {
         struct wlcomp_frame_callback *cb;
@@ -2534,7 +2587,40 @@ static void toplevel_move(struct wl_client *c, struct wl_resource *r,
 {
     (void)c; (void)seat; (void)serial;
     struct wlcomp_surface *surf = wl_resource_get_user_data(r);
-    if (!surf || surf->maximized) return;
+    if (!surf) return;
+
+    if (surf->maximized && surf->xdg_surface && surf->xdg_toplevel) {
+        int32_t rw = surf->saved_w > 0 ? surf->saved_w :
+                     (int32_t)g_fb_w * 4 / 5;
+        int32_t rh = surf->saved_h > 0 ? surf->saved_h :
+                     ((int32_t)g_fb_h - TASKBAR_H) * 4 / 5;
+        int32_t max_x = (int32_t)g_fb_w - 60;
+        int32_t max_y = (int32_t)g_fb_h - TASKBAR_H - 1;
+        struct wl_array states;
+        uint32_t *st;
+
+        damage_surface(surf);
+        surf->maximized = 0;
+        surf->x = g_cursor_x - rw / 2;
+        surf->y = g_cursor_y - 16;
+        if (surf->x < -(rw - 60))
+            surf->x = -(rw - 60);
+        if (surf->x > max_x)
+            surf->x = max_x;
+        if (surf->y < 0)
+            surf->y = 0;
+        if (surf->y > max_y)
+            surf->y = max_y;
+
+        wl_array_init(&states);
+        st = wl_array_add(&states, sizeof(uint32_t));
+        *st = XDG_TOPLEVEL_STATE_ACTIVATED;
+        xdg_toplevel_send_configure(surf->xdg_toplevel, rw, rh, &states);
+        wl_array_release(&states);
+        xdg_surface_send_configure(surf->xdg_surface, ++g_serial);
+        damage_surface(surf);
+    }
+
     damage_surface(surf);
     g_grab_surface = surf;
     g_grab_mode = 1; /* move */
@@ -2550,7 +2636,11 @@ static void toplevel_resize(struct wl_client *c, struct wl_resource *r,
 {
     (void)c; (void)seat; (void)serial;
     struct wlcomp_surface *surf = wl_resource_get_user_data(r);
+    int32_t gx, gy, gw, gh;
     if (!surf || surf->maximized) return;
+    surface_window_geometry(surf, &gx, &gy, &gw, &gh);
+    (void)gx;
+    (void)gy;
     damage_surface(surf);
     g_grab_surface = surf;
     g_grab_mode = 2; /* resize */
@@ -2559,8 +2649,8 @@ static void toplevel_resize(struct wl_client *c, struct wl_resource *r,
     g_grab_start_my = g_cursor_y;
     g_grab_start_x = surf->x;
     g_grab_start_y = surf->y;
-    g_grab_start_w = surf->committed_buf ? surf->committed_buf->width : 200;
-    g_grab_start_h = surf->committed_buf ? surf->committed_buf->height : 200;
+    g_grab_start_w = gw > 0 ? gw : 200;
+    g_grab_start_h = gh > 0 ? gh : 200;
 }
 
 static void toplevel_set_max_size(struct wl_client *c, struct wl_resource *r,
@@ -2579,15 +2669,20 @@ static void toplevel_set_maximized(struct wl_client *c, struct wl_resource *r)
 {
     (void)c;
     struct wlcomp_surface *surf = wl_resource_get_user_data(r);
+    int32_t gx, gy, gw, gh;
     if (!surf || !surf->xdg_surface || !surf->xdg_toplevel) return;
     if (surf->maximized) return;  /* already maximized */
 
+    surface_window_geometry(surf, &gx, &gy, &gw, &gh);
+    (void)gx;
+    (void)gy;
+    cancel_surface_grab(surf);
     damage_surface(surf);
     /* Save current geometry for restore */
     surf->saved_x = surf->x;
     surf->saved_y = surf->y;
-    surf->saved_w = surf->committed_buf ? surf->committed_buf->width : 400;
-    surf->saved_h = surf->committed_buf ? surf->committed_buf->height : 300;
+    surf->saved_w = gw > 0 ? gw : 400;
+    surf->saved_h = gh > 0 ? gh : 300;
     surf->maximized = 1;
 
     /* Send configure with MAXIMIZED + ACTIVATED, full screen minus taskbar */
@@ -2598,7 +2693,11 @@ static void toplevel_set_maximized(struct wl_client *c, struct wl_resource *r)
     *s = XDG_TOPLEVEL_STATE_MAXIMIZED;
     s = wl_array_add(&states, sizeof(uint32_t));
     *s = XDG_TOPLEVEL_STATE_ACTIVATED;
-    int32_t max_h = (int32_t)g_fb_h - 36;
+    int32_t max_h = (int32_t)g_fb_h - TASKBAR_H;
+    fprintf(stderr,
+            "wlcomp: xdg set_maximized pid=%d serial=%u size=%dx%d restore=%dx%d\n",
+            surf->client_pid, g_serial + 1, (int32_t)g_fb_w, max_h,
+            surf->saved_w, surf->saved_h);
     xdg_toplevel_send_configure(surf->xdg_toplevel, (int32_t)g_fb_w, max_h, &states);
     wl_array_release(&states);
     xdg_surface_send_configure(surf->xdg_surface, ++g_serial);
@@ -2616,6 +2715,7 @@ static void toplevel_unset_maximized(struct wl_client *c, struct wl_resource *r)
     if (!surf || !surf->xdg_surface || !surf->xdg_toplevel) return;
     if (!surf->maximized) return;  /* not maximized */
 
+    cancel_surface_grab(surf);
     damage_surface(surf);
     surf->maximized = 0;
 
@@ -3394,6 +3494,8 @@ static void output_bind(struct wl_client *client, void *data,
     wl_output_send_mode(res, WL_OUTPUT_MODE_CURRENT | WL_OUTPUT_MODE_PREFERRED,
                         (int32_t)g_fb_w, (int32_t)g_fb_h, 60000);
     if (version >= 2)
+        wl_output_send_scale(res, 1);
+    if (version >= 2)
         wl_output_send_done(res);
 }
 
@@ -3719,6 +3821,9 @@ static void launch_desktop_app_arg(const char *path, const char *name,
                          strcmp(name, "mesaglsmoke") == 0 ||
                          strcmp(name, "mesaeglinfo") == 0;
 
+        if (is_webkit)
+            disable_child_coredumps();
+
         if (!is_webkitgpusmoke) {
             int logfd = open("/tmp/app_log.txt",
                              O_WRONLY | O_CREAT | O_TRUNC, 0644);
@@ -3823,7 +3928,7 @@ static void launch_desktop_app_arg(const char *path, const char *name,
             "XDG_DATA_DIRS=/share:/usr/share",
             "WAYLAND_DISPLAY=wayland-0",
             "GDK_BACKEND=wayland",
-            "GDK_DPI_SCALE=1.55",
+            "GDK_DPI_SCALE=1.0",
             "XCURSOR_PATH=/share/icons",
             "XCURSOR_THEME=Adwaita",
             "SSL_CERT_FILE=/share/netsurf/ca-bundle",
@@ -3833,17 +3938,18 @@ static void launch_desktop_app_arg(const char *path, const char *name,
             "HOME=/",
             "PATH=/bin:/usr/bin",
             "LD_LIBRARY_PATH=/lib:/usr/lib:/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu",
+            "LD_PRELOAD=/lib/libpng16.so.16",
             "XDG_RUNTIME_DIR=/tmp",
             "XDG_CACHE_HOME=/tmp/.cache",
             "XDG_DATA_DIRS=/share:/usr/share",
             "WAYLAND_DISPLAY=wayland-0",
             "GDK_BACKEND=wayland",
-            "GDK_DPI_SCALE=1.55",
+            "GDK_DPI_SCALE=1.0",
             "XCURSOR_PATH=/share/icons",
             "XCURSOR_THEME=Adwaita",
             "SSL_CERT_FILE=/share/netsurf/ca-bundle",
             "GIO_MODULE_DIR=/lib/gio/modules",
-            "GIO_USE_TLS=openssl",
+            "GIO_USE_TLS=gnutls",
             "GST_PLUGIN_SYSTEM_PATH_1_0=/lib/gstreamer-1.0:/usr/lib/gstreamer-1.0",
             "GST_PLUGIN_PATH_1_0=/lib/gstreamer-1.0:/usr/lib/gstreamer-1.0",
             "GST_PLUGIN_SCANNER_1_0=/libexec/gstreamer-1.0/gst-plugin-scanner",
@@ -3881,18 +3987,19 @@ static void launch_desktop_app_arg(const char *path, const char *name,
             "HOME=/",
             "PATH=/bin:/usr/bin",
             "LD_LIBRARY_PATH=/lib:/usr/lib:/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu",
+            "LD_PRELOAD=/lib/libpng16.so.16",
             "XDG_RUNTIME_DIR=/tmp",
             "XDG_CACHE_HOME=/tmp/.cache",
             "XDG_DATA_HOME=/tmp/.local/share",
             "XDG_DATA_DIRS=/share:/usr/share",
             "WAYLAND_DISPLAY=wayland-0",
             "GDK_BACKEND=wayland",
-            "GDK_DPI_SCALE=1.55",
+            "GDK_DPI_SCALE=1.0",
             "XCURSOR_PATH=/share/icons",
             "XCURSOR_THEME=Adwaita",
             "SSL_CERT_FILE=/share/netsurf/ca-bundle",
             "GIO_MODULE_DIR=/lib/gio/modules",
-            "GIO_USE_TLS=openssl",
+            "GIO_USE_TLS=gnutls",
             "GST_PLUGIN_SYSTEM_PATH_1_0=/lib/gstreamer-1.0:/usr/lib/gstreamer-1.0",
             "GST_PLUGIN_PATH_1_0=/lib/gstreamer-1.0:/usr/lib/gstreamer-1.0",
             "GST_PLUGIN_SCANNER_1_0=/libexec/gstreamer-1.0/gst-plugin-scanner",
@@ -3929,18 +4036,19 @@ static void launch_desktop_app_arg(const char *path, const char *name,
             "HOME=/",
             "PATH=/bin:/usr/bin",
             "LD_LIBRARY_PATH=/lib:/usr/lib:/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu",
+            "LD_PRELOAD=/lib/libpng16.so.16",
             "XDG_RUNTIME_DIR=/tmp",
             "XDG_CACHE_HOME=/tmp/.cache",
             "XDG_DATA_HOME=/tmp/.local/share",
             "XDG_DATA_DIRS=/share:/usr/share",
             "WAYLAND_DISPLAY=wayland-0",
             "GDK_BACKEND=wayland",
-            "GDK_DPI_SCALE=1.55",
+            "GDK_DPI_SCALE=1.0",
             "XCURSOR_PATH=/share/icons",
             "XCURSOR_THEME=Adwaita",
             "SSL_CERT_FILE=/share/netsurf/ca-bundle",
             "GIO_MODULE_DIR=/lib/gio/modules",
-            "GIO_USE_TLS=openssl",
+            "GIO_USE_TLS=gnutls",
             "GST_PLUGIN_SYSTEM_PATH_1_0=/lib/gstreamer-1.0:/usr/lib/gstreamer-1.0",
             "GST_PLUGIN_PATH_1_0=/lib/gstreamer-1.0:/usr/lib/gstreamer-1.0",
             "GST_PLUGIN_SCANNER_1_0=/libexec/gstreamer-1.0/gst-plugin-scanner",
@@ -7159,6 +7267,7 @@ static void composite_and_flip(void)
      * buffer_released flag keeps replacement commits from sending duplicate
      * releases for the same wl_buffer. */
     int present_ready = framebuffer_present_fence_ready();
+    int callbacks_due = frame_callbacks_due(now);
     wl_list_for_each(surf, &g_surfaces, link) {
         int ready = !surf->committed_buf ||
                     (present_ready &&
@@ -7166,7 +7275,7 @@ static void composite_and_flip(void)
 
         if (ready)
             surface_release_committed_buffer(surf);
-        if (ready) {
+        if (ready && callbacks_due) {
             struct wlcomp_frame_callback *cb;
             struct wlcomp_frame_callback *tmp;
 

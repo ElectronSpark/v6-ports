@@ -17,6 +17,7 @@
 #include <sys/stat.h>
 #include <sys/socket.h>
 #include <sys/ioctl.h>
+#include <sys/resource.h>
 #include <netinet/in.h>
 #include <fcntl.h>
 #include <errno.h>
@@ -28,6 +29,7 @@
 #define SOCKET_WAIT_US       20000
 #define WEBKIT_NET_WAIT_US   35000000 /* DHCP fallback/network daemons need ~30s */
 #define WEBKIT_DEFAULT_URL   "https://www.google.com/search?q=xv6&gbv=1"
+#define WEBKIT_URL_MAX       768
 #define XV6_DRM_RENDER_NODE  "/dev/dri/renderD128"
 #define DRM_IOCTL_VIRTGPU_GETPARAM 0xc0106443UL
 #define VIRTGPU_PARAM_3D_FEATURES  1
@@ -59,6 +61,7 @@ static int webkit_coop_smoke_enabled_by_cmdline(void);
 static int webkit_js_smoke_enabled_by_cmdline(void);
 static int webkit_youtube_boot_smoke_enabled_by_cmdline(void);
 static int webkit_youtube_waterfall_smoke_enabled_by_cmdline(void);
+static int webkit_youtube_compat_enabled_by_cmdline(void);
 static int webkit_youtube_compat_disabled_by_cmdline(void);
 static int webkit_request_idle_disabled_by_cmdline(void);
 static int webkit_feature_gate_smoke_enabled_by_cmdline(void);
@@ -85,6 +88,12 @@ static int xv6_virgl_available(void)
     ok = ioctl(fd, DRM_IOCTL_VIRTGPU_GETPARAM, &req) == 0 && value != 0;
     close(fd);
     return ok;
+}
+
+static void disable_child_coredumps(void)
+{
+    struct rlimit lim = {0, 0};
+    (void)setrlimit(RLIMIT_CORE, &lim);
 }
 
 static long long monotonic_ms(void)
@@ -122,7 +131,8 @@ static int url_needs_network_wait(const char *url)
 
 static int webkit_youtube_compat_url(const char *url)
 {
-    if (!url || webkit_youtube_compat_disabled_by_cmdline())
+    if (!url || !webkit_youtube_compat_enabled_by_cmdline() ||
+        webkit_youtube_compat_disabled_by_cmdline())
         return 0;
     return strstr(url, "youtube.com") != NULL ||
            strstr(url, "youtube-nocookie.com") != NULL ||
@@ -584,6 +594,9 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
 
     pid_t pid = fork();
     if (pid == 0) {
+        if (is_webkit)
+            disable_child_coredumps();
+
         if (is_netsurf) {
             int logfd = open("/tmp/app_log.txt",
                              O_WRONLY | O_CREAT | O_TRUNC, 0644);
@@ -795,7 +808,7 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             "XDG_DATA_DIRS=/share:/usr/share",
             "WAYLAND_DISPLAY=wayland-0",
             "GDK_BACKEND=wayland",
-            "GDK_DPI_SCALE=1.55",
+            "GDK_DPI_SCALE=1.0",
             "XCURSOR_PATH=/share/icons",
             "XCURSOR_THEME=Adwaita",
             "SSL_CERT_FILE=/share/netsurf/ca-bundle",
@@ -805,18 +818,18 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             "HOME=/",
             "PATH=/bin:/usr/bin",
             "LD_LIBRARY_PATH=/lib:/usr/lib:/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu",
-            "LD_PRELOAD=/lib/libxv6memshim.so",
+            "LD_PRELOAD=/lib/libpng16.so.16:/lib/libxv6memshim.so",
             "XDG_RUNTIME_DIR=/tmp",
             "XDG_CACHE_HOME=/tmp/.cache",
             "XDG_DATA_DIRS=/share:/usr/share",
             "WAYLAND_DISPLAY=wayland-0",
             "GDK_BACKEND=wayland",
-            "GDK_DPI_SCALE=1.55",
+            "GDK_DPI_SCALE=1.0",
             "XCURSOR_PATH=/share/icons",
             "XCURSOR_THEME=Adwaita",
             "SSL_CERT_FILE=/share/netsurf/ca-bundle",
             "GIO_MODULE_DIR=/lib/gio/modules",
-            "GIO_USE_TLS=openssl",
+            "GIO_USE_TLS=gnutls",
             "GST_PLUGIN_SYSTEM_PATH_1_0=/lib/gstreamer-1.0:/usr/lib/gstreamer-1.0",
             "GST_PLUGIN_PATH_1_0=/lib/gstreamer-1.0:/usr/lib/gstreamer-1.0",
             "GST_PLUGIN_SCANNER_1_0=/libexec/gstreamer-1.0/gst-plugin-scanner",
@@ -839,19 +852,19 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             "HOME=/",
             "PATH=/bin:/usr/bin",
             "LD_LIBRARY_PATH=/lib:/usr/lib:/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu",
-            "LD_PRELOAD=/lib/libxv6memshim.so",
+            "LD_PRELOAD=/lib/libpng16.so.16:/lib/libxv6memshim.so",
             "XDG_RUNTIME_DIR=/tmp",
             "XDG_CACHE_HOME=/tmp/.cache",
             "XDG_DATA_HOME=/tmp/.local/share",
             "XDG_DATA_DIRS=/share:/usr/share",
             "WAYLAND_DISPLAY=wayland-0",
             "GDK_BACKEND=wayland",
-            "GDK_DPI_SCALE=1.55",
+            "GDK_DPI_SCALE=1.0",
             "XCURSOR_PATH=/share/icons",
             "XCURSOR_THEME=Adwaita",
             "SSL_CERT_FILE=/share/netsurf/ca-bundle",
             "GIO_MODULE_DIR=/lib/gio/modules",
-            "GIO_USE_TLS=openssl",
+            "GIO_USE_TLS=gnutls",
             "GST_PLUGIN_SYSTEM_PATH_1_0=/lib/gstreamer-1.0:/usr/lib/gstreamer-1.0",
             "GST_PLUGIN_PATH_1_0=/lib/gstreamer-1.0:/usr/lib/gstreamer-1.0",
             "GST_PLUGIN_SCANNER_1_0=/libexec/gstreamer-1.0/gst-plugin-scanner",
@@ -873,19 +886,19 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             "HOME=/",
             "PATH=/bin:/usr/bin",
             "LD_LIBRARY_PATH=/lib:/usr/lib:/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu",
-            "LD_PRELOAD=/lib/libxv6memshim.so",
+            "LD_PRELOAD=/lib/libpng16.so.16:/lib/libxv6memshim.so",
             "XDG_RUNTIME_DIR=/tmp",
             "XDG_CACHE_HOME=/tmp/.cache",
             "XDG_DATA_HOME=/tmp/.local/share",
             "XDG_DATA_DIRS=/share:/usr/share",
             "WAYLAND_DISPLAY=wayland-0",
             "GDK_BACKEND=wayland",
-            "GDK_DPI_SCALE=1.55",
+            "GDK_DPI_SCALE=1.0",
             "XCURSOR_PATH=/share/icons",
             "XCURSOR_THEME=Adwaita",
             "SSL_CERT_FILE=/share/netsurf/ca-bundle",
             "GIO_MODULE_DIR=/lib/gio/modules",
-            "GIO_USE_TLS=openssl",
+            "GIO_USE_TLS=gnutls",
             "GST_PLUGIN_SYSTEM_PATH_1_0=/lib/gstreamer-1.0:/usr/lib/gstreamer-1.0",
             "GST_PLUGIN_PATH_1_0=/lib/gstreamer-1.0:/usr/lib/gstreamer-1.0",
             "GST_PLUGIN_SCANNER_1_0=/libexec/gstreamer-1.0/gst-plugin-scanner",
@@ -1052,18 +1065,32 @@ static int token_is_enabled(const char *cmdline, const char *key)
 static int read_cmdline(char *buf, size_t buf_size)
 {
     int fd = open("/proc/cmdline", O_RDONLY);
+    size_t total = 0;
     if (fd < 0) {
         fprintf(stderr, "[desktop] /proc/cmdline unavailable\n");
         return -1;
     }
 
-    int n = read(fd, buf, buf_size - 1);
+    while (total + 1 < buf_size) {
+        ssize_t n = read(fd, buf + total, buf_size - total - 1);
+        if (n < 0) {
+            if (errno == EINTR)
+                continue;
+            close(fd);
+            fprintf(stderr, "[desktop] /proc/cmdline read failed: %s\n",
+                    strerror(errno));
+            return -1;
+        }
+        if (n == 0)
+            break;
+        total += (size_t)n;
+    }
     close(fd);
-    if (n <= 0) {
+    if (total == 0) {
         fprintf(stderr, "[desktop] /proc/cmdline empty\n");
         return -1;
     }
-    buf[n] = '\0';
+    buf[total] = '\0';
     return 0;
 }
 
@@ -1216,6 +1243,16 @@ static int webkit_youtube_compat_disabled_by_cmdline(void)
     return token_is_disabled(buf, "webkit_youtube_compat");
 }
 
+static int webkit_youtube_compat_enabled_by_cmdline(void)
+{
+    char buf[512];
+
+    if (read_cmdline(buf, sizeof(buf)) < 0)
+        return 0;
+
+    return token_is_enabled(buf, "webkit_youtube_compat");
+}
+
 static int webkit_request_idle_disabled_by_cmdline(void)
 {
     char buf[512];
@@ -1308,9 +1345,97 @@ static int webkit_timeout_ms_from_cmdline(int fallback)
     return timeout_ms;
 }
 
+static int webkit_url_has_scheme(const char *s)
+{
+    size_t i;
+
+    if (!s || !((s[0] >= 'A' && s[0] <= 'Z') ||
+                (s[0] >= 'a' && s[0] <= 'z')))
+        return 0;
+    for (i = 1; s[i]; i++) {
+        if (s[i] == ':')
+            return 1;
+        if (s[i] == '/' || s[i] == '?' || s[i] == '#')
+            return 0;
+        if (!((s[i] >= 'A' && s[i] <= 'Z') ||
+              (s[i] >= 'a' && s[i] <= 'z') ||
+              (s[i] >= '0' && s[i] <= '9') ||
+              s[i] == '+' || s[i] == '-' || s[i] == '.'))
+            return 0;
+    }
+    return 0;
+}
+
+static int webkit_url_looks_like_host(const char *s)
+{
+    int saw_dot = 0;
+    size_t i;
+
+    if (!s || !s[0])
+        return 0;
+    for (i = 0; s[i] && s[i] != '/' && s[i] != '?' && s[i] != '#'; i++) {
+        if (s[i] == '.')
+            saw_dot = 1;
+        if (!(s[i] == '.' || s[i] == '-' ||
+              (s[i] >= '0' && s[i] <= '9') ||
+              (s[i] >= 'A' && s[i] <= 'Z') ||
+              (s[i] >= 'a' && s[i] <= 'z')))
+            return 0;
+    }
+    return saw_dot || strncmp(s, "localhost", 9) == 0;
+}
+
+static void copy_prefixed_url(char *out, size_t out_size, const char *prefix, const char *value)
+{
+    size_t prefix_len = strlen(prefix);
+    size_t value_len = strlen(value);
+
+    if (out_size == 0)
+        return;
+    if (prefix_len > out_size - 1)
+        prefix_len = out_size - 1;
+    if (value_len > out_size - prefix_len - 1)
+        value_len = out_size - prefix_len - 1;
+    memcpy(out, prefix, prefix_len);
+    memcpy(out + prefix_len, value, value_len);
+    out[prefix_len + value_len] = '\0';
+}
+
+static void normalize_webkit_url(const char *in, char *out, size_t out_size)
+{
+    char tmp[WEBKIT_URL_MAX];
+    size_t len = 0;
+
+    if (out_size == 0)
+        return;
+    if (!in)
+        in = "";
+    while (*in == ' ' || *in == '\t' || *in == '\n')
+        in++;
+    while (in[len] && in[len] != ' ' && in[len] != '\t' &&
+           in[len] != '\n' && len + 1 < sizeof(tmp)) {
+        tmp[len] = in[len];
+        len++;
+    }
+    tmp[len] = '\0';
+    out[0] = '\0';
+
+    if (tmp[0] == '\0') {
+        snprintf(out, out_size, WEBKIT_DEFAULT_URL);
+    } else if (webkit_url_has_scheme(tmp)) {
+        snprintf(out, out_size, "%s", tmp);
+    } else if (tmp[0] == '/') {
+        copy_prefixed_url(out, out_size, "file://", tmp);
+    } else if (webkit_url_looks_like_host(tmp)) {
+        copy_prefixed_url(out, out_size, "https://", tmp);
+    } else {
+        snprintf(out, out_size, "%s", tmp);
+    }
+}
+
 static void webkit_url_from_cmdline(char *out, size_t out_size)
 {
-    char buf[512];
+    char buf[2048];
     const char *key = "webkit_url=";
     size_t key_len = strlen(key);
     const char *p;
@@ -1332,7 +1457,7 @@ static void webkit_url_from_cmdline(char *out, size_t out_size)
     }
 
     if (read_cmdline(buf, sizeof(buf)) < 0) {
-        snprintf(out, out_size, WEBKIT_DEFAULT_URL);
+        normalize_webkit_url(WEBKIT_DEFAULT_URL, out, out_size);
         return;
     }
 
@@ -1349,15 +1474,17 @@ static void webkit_url_from_cmdline(char *out, size_t out_size)
                 i++;
             }
             out[i] = '\0';
-            if (out[0])
+            if (out[0]) {
+                normalize_webkit_url(out, out, out_size);
                 return;
+            }
             break;
         }
         while (*p && *p != ' ' && *p != '\t' && *p != '\n')
             p++;
     }
 
-    snprintf(out, out_size, WEBKIT_DEFAULT_URL);
+    normalize_webkit_url(WEBKIT_DEFAULT_URL, out, out_size);
 }
 
 static int glsmoke_enabled_by_cmdline(void)
@@ -1523,7 +1650,7 @@ int main(void)
             "webkitgpusmoke" : "MiniBrowser";
         char webkit_timeout_arg[24];
         const char *webkit_timeout = NULL;
-        char webkit_url[192];
+        char webkit_url[WEBKIT_URL_MAX];
 
         if (webkit_http_smoke_enabled_by_cmdline()) {
             httpd_pid = launch_http_smoke_server();
