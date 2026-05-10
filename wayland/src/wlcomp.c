@@ -70,6 +70,8 @@ static void disable_child_coredumps(void)
 #define FB_GPU_BO_IMPORT     0x4617
 #define FB_GPU_BO_FENCE      0x4618
 #define FB_GPU_BO_IMPORT_FD  0x4623
+#define FB_GPU_SCANOUT_MAP   0x4629
+#define FB_GPU_SCANOUT_FLUSH 0x462A
 
 #ifndef DRM_FORMAT_MOD_LINEAR
 #define DRM_FORMAT_MOD_LINEAR 0
@@ -102,6 +104,15 @@ struct fb_gpu_bo_present {
     uint64_t pixels;
     uint32_t handle, flags;
     uint64_t fence;
+};
+
+struct fb_gpu_scanout_map {
+    uint32_t width, height, pitch, reserved;
+    uint64_t size, addr;
+};
+
+struct fb_gpu_scanout_flush {
+    uint32_t x, y, w, h;
 };
 
 struct fb_gpu_bo_destroy {
@@ -189,6 +200,7 @@ static uint32_t *g_fb_buf;  /* compositing buffer */
 static uint64_t g_fb_bo_size;
 static uint32_t g_fb_bo_handle;
 static int      g_fb_bo_backed;
+static int      g_fb_direct_scanout;
 static uint64_t g_fb_bo_last_present_fence;
 static uint64_t g_fb_bo_last_signaled_fence;
 struct damage_rect {
@@ -437,7 +449,8 @@ static void damage_stats_maybe_log(uint32_t now)
                 last.full_damage[FULL_DAMAGE_CLIENT],
             cur.full_damage[FULL_DAMAGE_IWIN] -
                 last.full_damage[FULL_DAMAGE_IWIN],
-            g_fb_bo_backed ? "bo-present" : "user-blit");
+            g_fb_direct_scanout ? "direct-scanout" :
+                (g_fb_bo_backed ? "bo-present" : "user-blit"));
     last = cur;
     next_log_ms = now + (uint32_t)interval_ms;
 }
@@ -446,7 +459,9 @@ static void release_framebuffer_backing(void)
 {
     if (!g_fb_buf)
         return;
-    if (g_fb_bo_backed) {
+    if (g_fb_direct_scanout) {
+        munmap(g_fb_buf, g_fb_bo_size);
+    } else if (g_fb_bo_backed) {
         if (g_fb_bo_handle) {
             struct fb_gpu_bo_destroy destroy;
 
@@ -462,13 +477,32 @@ static void release_framebuffer_backing(void)
     g_fb_bo_size = 0;
     g_fb_bo_handle = 0;
     g_fb_bo_backed = 0;
+    g_fb_direct_scanout = 0;
 }
 
 static int alloc_framebuffer_backing(void)
 {
     struct fb_gpu_bo_create bo;
+    struct fb_gpu_scanout_map scanout;
     size_t bytes = (size_t)g_fb_w * g_fb_h * 4;
+    const char *use_direct = getenv("XV6_WLCOMP_FB_DIRECT");
     const char *use_bo = getenv("XV6_WLCOMP_FB_BO");
+
+    if (use_direct && strcmp(use_direct, "1") == 0) {
+        memset(&scanout, 0, sizeof(scanout));
+        if (ioctl(g_fb_fd, FB_GPU_SCANOUT_MAP, &scanout) == 0 &&
+            scanout.addr && scanout.size && scanout.pitch) {
+            g_fb_buf = (uint32_t *)(uintptr_t)scanout.addr;
+            g_fb_pitch = scanout.pitch;
+            g_fb_bo_size = scanout.size;
+            g_fb_direct_scanout = 1;
+            memset(g_fb_buf, 0, (size_t)scanout.size);
+            fprintf(stderr,
+                    "wlcomp: using direct scanout addr=0x%lx size=%lu pitch=%u\n",
+                    scanout.addr, scanout.size, scanout.pitch);
+            return 0;
+        }
+    }
 
     if (use_bo && strcmp(use_bo, "1") == 0) {
         memset(&bo, 0, sizeof(bo));
@@ -513,7 +547,15 @@ static void present_damage_rects(int fb_w)
         if (r->x1 == 0 && r->y1 == 0 &&
             r->x2 == (int32_t)g_fb_w && r->y2 == (int32_t)g_fb_h)
             full_frame = 1;
-        if (g_fb_bo_backed) {
+        if (g_fb_direct_scanout) {
+            struct fb_gpu_scanout_flush cmd;
+
+            cmd.x = (uint32_t)r->x1;
+            cmd.y = (uint32_t)r->y1;
+            cmd.w = w;
+            cmd.h = h;
+            ioctl(g_fb_fd, FB_GPU_SCANOUT_FLUSH, &cmd);
+        } else if (g_fb_bo_backed) {
             struct fb_gpu_bo_present cmd;
 
             cmd.x = (uint32_t)r->x1;
@@ -3887,6 +3929,7 @@ static void launch_desktop_app_arg(const char *path, const char *name,
         char *argv_minibrowser[] = {
             (char *)name,
             "--autoplay-policy=allow",
+            "--private",
             (char *)webkit_youtube_compat_user_agent,
             "--enable-javascript=false",
             "--enable-sandbox=false",
@@ -3904,6 +3947,7 @@ static void launch_desktop_app_arg(const char *path, const char *name,
         char *argv_minibrowser_js[] = {
             (char *)name,
             "--autoplay-policy=allow",
+            "--private",
             (char *)webkit_youtube_compat_user_agent,
             "--enable-sandbox=false",
             "--enable-webgl=false",
@@ -3920,6 +3964,7 @@ static void launch_desktop_app_arg(const char *path, const char *name,
         char *argv_minibrowser_accel[] = {
             (char *)name,
             "--autoplay-policy=allow",
+            "--private",
             (char *)webkit_youtube_compat_user_agent,
             "--enable-javascript=false",
             "--enable-sandbox=false",
@@ -3937,6 +3982,7 @@ static void launch_desktop_app_arg(const char *path, const char *name,
         char *argv_minibrowser_accel_js[] = {
             (char *)name,
             "--autoplay-policy=allow",
+            "--private",
             (char *)webkit_youtube_compat_user_agent,
             "--enable-sandbox=false",
             "--enable-webgl=true",
@@ -3992,6 +4038,10 @@ static void launch_desktop_app_arg(const char *path, const char *name,
             "WEBKIT_INJECTED_BUNDLE_PATH=/lib/webkit2gtk-4.1/injected-bundle",
             "WEBKIT_DISABLE_NETWORK_CACHE=1",
             "WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS=1",
+            "WEBKIT_GST_DISABLE_GL_SINK=1",
+            "WEBKIT_GST_DMABUF_SINK_DISABLED=1",
+            "WEBKIT_GST_USE_VIDEOCONVERT_SCALE=1",
+            "WEBKIT_GST_MAX_AVC1_RESOLUTION=720P",
             "WEBKIT_DISABLE_COMPOSITING_MODE=1",
             "WEBKIT_XV6_DISABLE_COMPOSITING_UPDATE=1",
             "EPOXY_XV6_ALLOW_MISSING=1",
@@ -4042,7 +4092,12 @@ static void launch_desktop_app_arg(const char *path, const char *name,
             "WEBKIT_INJECTED_BUNDLE_PATH=/lib/webkit2gtk-4.1/injected-bundle",
             "WEBKIT_DISABLE_NETWORK_CACHE=1",
             "WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS=1",
+            "WEBKIT_GST_DISABLE_GL_SINK=1",
+            "WEBKIT_GST_DMABUF_SINK_DISABLED=1",
+            "WEBKIT_GST_USE_VIDEOCONVERT_SCALE=1",
+            "WEBKIT_GST_MAX_AVC1_RESOLUTION=720P",
             "LIBGL_ALWAYS_SOFTWARE=0",
+            "GALLIUM_DRIVER=virgl",
             "EGL_PLATFORM=wayland",
             "ANGLE_DEFAULT_PLATFORM=gl",
             "SOUP_FORCE_HTTP1=1",
@@ -4091,6 +4146,10 @@ static void launch_desktop_app_arg(const char *path, const char *name,
             "WEBKIT_INJECTED_BUNDLE_PATH=/lib/webkit2gtk-4.1/injected-bundle",
             "WEBKIT_DISABLE_NETWORK_CACHE=1",
             "WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS=1",
+            "WEBKIT_GST_DISABLE_GL_SINK=1",
+            "WEBKIT_GST_DMABUF_SINK_DISABLED=1",
+            "WEBKIT_GST_USE_VIDEOCONVERT_SCALE=1",
+            "WEBKIT_GST_MAX_AVC1_RESOLUTION=720P",
             "LIBGL_ALWAYS_SOFTWARE=1",
             "EGL_PLATFORM=wayland",
             "ANGLE_DEFAULT_PLATFORM=gl",
@@ -4125,6 +4184,7 @@ static void launch_desktop_app_arg(const char *path, const char *name,
             "XCURSOR_PATH=/share/icons",
             "XCURSOR_THEME=Adwaita",
             "LIBGL_ALWAYS_SOFTWARE=0",
+            "GALLIUM_DRIVER=virgl",
             "EGL_PLATFORM=wayland",
             NULL
         };
