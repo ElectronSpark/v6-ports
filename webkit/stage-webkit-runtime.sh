@@ -21,6 +21,7 @@ host_gst_plugins=(
     libgstlibav.so
     libgstmatroska.so
     libgstogg.so
+    libgstopengl.so
     libgstopus.so
     libgstossaudio.so
     libgstplayback.so
@@ -187,10 +188,12 @@ prepare_host_gst_runtime_cache() {
     local deb
     local packages=(
         gstreamer1.0-libav
+        gstreamer1.0-gl
         gstreamer1.0-plugins-bad
         gstreamer1.0-plugins-base
         gstreamer1.0-plugins-good
         gstreamer1.0-tools
+        libgstreamer-gl1.0-0
         libgstreamer-plugins-bad1.0-0
         libblas3
         liblapack3
