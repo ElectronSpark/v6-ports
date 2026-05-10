@@ -21,7 +21,6 @@ host_gst_plugins=(
     libgstlibav.so
     libgstmatroska.so
     libgstogg.so
-    libgstopengl.so
     libgstopus.so
     libgstossaudio.so
     libgstplayback.so
@@ -188,12 +187,10 @@ prepare_host_gst_runtime_cache() {
     local deb
     local packages=(
         gstreamer1.0-libav
-        gstreamer1.0-gl
         gstreamer1.0-plugins-bad
         gstreamer1.0-plugins-base
         gstreamer1.0-plugins-good
         gstreamer1.0-tools
-        libgstreamer-gl1.0-0
         libgstreamer-plugins-bad1.0-0
         libblas3
         liblapack3
@@ -1240,6 +1237,10 @@ if [[ -d "${gst_plugin_ref}/usr/lib/gstreamer-1.0" ]]; then
     mkdir -p "${dst}/lib/gstreamer-1.0"
     cp -a "${gst_plugin_ref}/usr/lib/gstreamer-1.0"/. "${dst}/lib/gstreamer-1.0/"
 fi
+# WebKitGTK's GStreamer-GL path currently aborts inside gstglbasememory on xv6.
+# Keep codec/demux plugins staged, but force the stable non-GL video path.
+rm -f "${dst}/lib/gstreamer-1.0/libgstopengl.so" \
+      "${dst}/usr/lib/gstreamer-1.0/libgstopengl.so"
 if [[ -d "/usr/share/X11/xkb" ]]; then
     mkdir -p "${dst}/usr/share/X11"
     rm -rf "${dst}/usr/share/X11/xkb"
