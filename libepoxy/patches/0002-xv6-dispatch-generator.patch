@@ -106,6 +106,29 @@ index 3ba9b0f..c5c418b 100644
      }
  }
  
+@@ -834,12 +876,14 @@ epoxy_get_bootstrap_proc_address(const char *name)
+             return epoxy_gl_dlsym(name);
+         case EGL_OPENGL_ES_API:
+             if (eglQueryContext(eglGetCurrentDisplay(),
+                                 eglGetCurrentContext(),
+                                 EGL_CONTEXT_CLIENT_VERSION,
+-                                &version)) {
+-                if (version >= 2)
+-                    return epoxy_gles2_dlsym(name);
+-                else
+-                    return epoxy_gles1_dlsym(name);
++                                &version) == EGL_FALSE) {
++                (void)eglGetError();
++                version = 2;
+             }
++            if (version >= 2)
++                return epoxy_gles2_dlsym(name);
++            else
++                return epoxy_gles1_dlsym(name);
+         }
+     }
+ #endif /* PLATFORM_HAS_EGL */
+ 
 diff --git a/src/dispatch_common.h b/src/dispatch_common.h
 index 55388a8..e32c056 100644
 --- a/src/dispatch_common.h
@@ -137,4 +160,3 @@ index 3daad84..a37b166 100755
          # something useful for the poor application developer before
 -- 
 2.43.0
-

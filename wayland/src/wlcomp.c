@@ -164,6 +164,7 @@ struct kbd_event {
 static struct wl_display *g_display;
 
 static int cmdline_flag_enabled(const char *key);
+static int cmdline_int_value(const char *key, int fallback);
 
 static int xv6_virgl_available(void)
 {
@@ -385,6 +386,7 @@ static int damage_repair_interval_ms(void)
         if (interval_ms < 0)
             interval_ms = 0;
     }
+    interval_ms = cmdline_int_value("wlcomp_repair_ms", interval_ms);
     return interval_ms;
 }
 
@@ -403,6 +405,7 @@ static int damage_stats_interval_ms(void)
         if (interval_ms < 0)
             interval_ms = 0;
     }
+    interval_ms = cmdline_int_value("wlcomp_stats_ms", interval_ms);
     return interval_ms;
 }
 
@@ -639,6 +642,7 @@ static struct wl_global *g_subcompositor_global;
  * ══════════════════════════════════════════════════════════════════════ */
 
 #define MAX_SURFACES 32
+#define MAX_SURFACE_DAMAGE_RECTS 16
 #define WAYLAND_CLIENT_BUFFER_LIMIT (1024 * 1024)
 
 struct wlcomp_shm_pool;
@@ -691,6 +695,8 @@ struct wlcomp_surface {
     int32_t window_x, window_y, window_w, window_h;
     /* Saved geometry for restore from maximize */
     int32_t saved_x, saved_y, saved_w, saved_h;
+    struct damage_rect pending_damage[MAX_SURFACE_DAMAGE_RECTS];
+    int     pending_damage_count;
     char    title[64];
     char    app_id[64];
     uint32_t log_events;
@@ -1005,6 +1011,107 @@ static void damage_surface(const struct wlcomp_surface *s)
         if (child->parent == s)
             damage_surface(child);
     }
+}
+
+static void surface_pending_damage_clear(struct wlcomp_surface *surf)
+{
+    if (surf)
+        surf->pending_damage_count = 0;
+}
+
+static void surface_pending_damage_add(struct wlcomp_surface *surf,
+                                       int32_t x, int32_t y,
+                                       int32_t w, int32_t h)
+{
+    struct damage_rect r;
+    int64_t x2;
+    int64_t y2;
+
+    if (!surf || w <= 0 || h <= 0)
+        return;
+
+    x2 = (int64_t)x + w;
+    y2 = (int64_t)y + h;
+    if (x2 <= x || y2 <= y)
+        return;
+
+    if (x < INT32_MIN) x = INT32_MIN;
+    if (y < INT32_MIN) y = INT32_MIN;
+    if (x2 > INT32_MAX) x2 = INT32_MAX;
+    if (y2 > INT32_MAX) y2 = INT32_MAX;
+
+    r.x1 = x;
+    r.y1 = y;
+    r.x2 = (int32_t)x2;
+    r.y2 = (int32_t)y2;
+
+    for (int i = 0; i < surf->pending_damage_count; i++) {
+        if (rects_touch_or_overlap(&surf->pending_damage[i], &r)) {
+            rect_merge(&surf->pending_damage[i], &r);
+            for (int j = 0; j < surf->pending_damage_count; j++) {
+                if (j != i &&
+                    rects_touch_or_overlap(&surf->pending_damage[i],
+                                           &surf->pending_damage[j])) {
+                    rect_merge(&surf->pending_damage[i],
+                               &surf->pending_damage[j]);
+                    surf->pending_damage[j] =
+                        surf->pending_damage[surf->pending_damage_count - 1];
+                    surf->pending_damage_count--;
+                    j--;
+                }
+            }
+            return;
+        }
+    }
+
+    if (surf->pending_damage_count < MAX_SURFACE_DAMAGE_RECTS) {
+        surf->pending_damage[surf->pending_damage_count++] = r;
+    } else {
+        surf->pending_damage[surf->pending_damage_count - 1] = r;
+        for (int i = 1; i < surf->pending_damage_count; i++)
+            rect_merge(&surf->pending_damage[0], &surf->pending_damage[i]);
+        surf->pending_damage_count = 1;
+    }
+}
+
+static int damage_surface_pending(struct wlcomp_surface *surf)
+{
+    int32_t gx, gy, gw, gh;
+    int32_t ax, ay;
+    int32_t draw_x, draw_y;
+    int damaged = 0;
+
+    if (!surf || surf->pending_damage_count <= 0 ||
+        !surface_tree_visible(surf) || !surf->committed_buf)
+        return 0;
+
+    surface_window_geometry(surf, &gx, &gy, &gw, &gh);
+    surface_absolute_position(surf, &ax, &ay);
+    draw_x = ax - gx;
+    draw_y = ay - gy;
+
+    for (int i = 0; i < surf->pending_damage_count; i++) {
+        int32_t x1 = surf->pending_damage[i].x1;
+        int32_t y1 = surf->pending_damage[i].y1;
+        int32_t x2 = surf->pending_damage[i].x2;
+        int32_t y2 = surf->pending_damage[i].y2;
+
+        if (x1 < gx) x1 = gx;
+        if (y1 < gy) y1 = gy;
+        if (x2 > gx + gw) x2 = gx + gw;
+        if (y2 > gy + gh) y2 = gy + gh;
+        if (x1 < 0) x1 = 0;
+        if (y1 < 0) y1 = 0;
+        if (x2 > surf->committed_buf->width) x2 = surf->committed_buf->width;
+        if (y2 > surf->committed_buf->height) y2 = surf->committed_buf->height;
+        if (x1 >= x2 || y1 >= y2)
+            continue;
+
+        damage_rect(draw_x + x1, draw_y + y1, x2 - x1, y2 - y1);
+        damaged = 1;
+    }
+
+    return damaged;
 }
 
 static void cursor_bounds_at(int32_t cx, int32_t cy,
@@ -2099,8 +2206,8 @@ static void surface_attach(struct wl_client *client, struct wl_resource *resourc
 static void surface_damage(struct wl_client *client, struct wl_resource *resource,
                            int32_t x, int32_t y, int32_t w, int32_t h)
 {
-    (void)client; (void)x; (void)y; (void)w; (void)h;
-    damage_surface(surface_from_resource(resource));
+    (void)client;
+    surface_pending_damage_add(surface_from_resource(resource), x, y, w, h);
 }
 
 static void surface_frame(struct wl_client *client, struct wl_resource *resource,
@@ -2151,8 +2258,11 @@ static void surface_commit(struct wl_client *client, struct wl_resource *resourc
     int old_w = 0, old_h = 0;
     int buffer_size_changed = 0;
     int first_map = 0;
+    int had_pending_buffer;
+    int buffer_changed = 0;
     if (!surf) return;
 
+    had_pending_buffer = surf->has_pending_buffer;
     if (surf->has_pending_buffer) {
         surface_log_limited(surf, "commit-pending", surf->pending_buf);
         old_committed = surf->committed_buf;
@@ -2161,11 +2271,12 @@ static void surface_commit(struct wl_client *client, struct wl_resource *resourc
             old_w = old_committed->width;
             old_h = old_committed->height;
         }
-        if (old_committed)
+        if (old_committed && !surf->pending_buf)
             damage_surface(surf);
         surf->committed_buf = surf->pending_buf;
         surf->pending_buf = NULL;
         surf->has_pending_buffer = 0;
+        buffer_changed = old_committed != surf->committed_buf;
         if (old_committed && surf->committed_buf &&
             (old_w != surf->committed_buf->width ||
              old_h != surf->committed_buf->height))
@@ -2228,8 +2339,12 @@ static void surface_commit(struct wl_client *client, struct wl_resource *resourc
 
     if (first_map || buffer_size_changed)
         damage_full_reason(FULL_DAMAGE_CLIENT);
-    else
+    else if (damage_surface_pending(surf)) {
+        /* The pending Wayland damage was enough to repaint this commit. */
+    } else if (had_pending_buffer && buffer_changed && surf->committed_buf) {
         damage_surface(surf);
+    }
+    surface_pending_damage_clear(surf);
 }
 
 static void surface_set_buffer_transform(struct wl_client *client,
@@ -2250,8 +2365,8 @@ static void surface_damage_buffer(struct wl_client *client,
                                   struct wl_resource *resource,
                                   int32_t x, int32_t y, int32_t w, int32_t h)
 {
-    (void)client; (void)x; (void)y; (void)w; (void)h;
-    damage_surface(surface_from_resource(resource));
+    (void)client;
+    surface_pending_damage_add(surface_from_resource(resource), x, y, w, h);
 }
 
 static void surface_offset(struct wl_client *client,
@@ -4006,6 +4121,7 @@ static void launch_desktop_app_arg(const char *path, const char *name,
             "XDG_DATA_DIRS=/share:/usr/share",
             "WAYLAND_DISPLAY=wayland-0",
             "GDK_BACKEND=wayland",
+            "GDK_GL=gles",
             "GDK_DPI_SCALE=1.0",
             "XCURSOR_PATH=/share/icons",
             "XCURSOR_THEME=Adwaita",
@@ -4022,6 +4138,7 @@ static void launch_desktop_app_arg(const char *path, const char *name,
             "XDG_DATA_DIRS=/share:/usr/share",
             "WAYLAND_DISPLAY=wayland-0",
             "GDK_BACKEND=wayland",
+            "GDK_GL=gles",
             "GDK_DPI_SCALE=1.0",
             "XCURSOR_PATH=/share/icons",
             "XCURSOR_THEME=Adwaita",
@@ -4061,6 +4178,7 @@ static void launch_desktop_app_arg(const char *path, const char *name,
             "XDG_DATA_DIRS=/share:/usr/share",
             "WAYLAND_DISPLAY=wayland-0",
             "GDK_BACKEND=wayland",
+            "GDK_GL=gles",
             "GDK_DPI_SCALE=1.0",
             "XCURSOR_PATH=/share/icons",
             "XCURSOR_THEME=Adwaita",
@@ -4077,10 +4195,6 @@ static void launch_desktop_app_arg(const char *path, const char *name,
             "WEBKIT_INJECTED_BUNDLE_PATH=/lib/webkit2gtk-4.1/injected-bundle",
             "WEBKIT_DISABLE_NETWORK_CACHE=1",
             "WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS=1",
-            "WEBKIT_GST_DISABLE_GL_SINK=1",
-            "WEBKIT_GST_DMABUF_SINK_DISABLED=1",
-            "WEBKIT_GST_USE_VIDEOCONVERT_SCALE=1",
-            "WEBKIT_GST_MAX_AVC1_RESOLUTION=720P",
             "LIBGL_ALWAYS_SOFTWARE=0",
             "GALLIUM_DRIVER=virgl",
             "EGL_PLATFORM=wayland",
@@ -4100,6 +4214,7 @@ static void launch_desktop_app_arg(const char *path, const char *name,
             "XDG_DATA_DIRS=/share:/usr/share",
             "WAYLAND_DISPLAY=wayland-0",
             "GDK_BACKEND=wayland",
+            "GDK_GL=gles",
             "GDK_DPI_SCALE=1.0",
             "XCURSOR_PATH=/share/icons",
             "XCURSOR_THEME=Adwaita",
