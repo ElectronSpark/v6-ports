@@ -105,6 +105,41 @@ host_gst_plugin_path() {
     return 1
 }
 
+gst_ref_has_plugin_dirs() {
+    local gst_ref="$1"
+
+    [[ -d "${gst_ref}/lib/gstreamer-1.0" ||
+       -d "${gst_ref}/usr/lib/gstreamer-1.0" ]]
+}
+
+gst_ref_plugin_path() {
+    local gst_ref="$1"
+    local plugin="$2"
+    local dir
+
+    for dir in \
+        "${gst_ref}/lib/gstreamer-1.0" \
+        "${gst_ref}/usr/lib/gstreamer-1.0"; do
+        if [[ -e "${dir}/${plugin}" ]]; then
+            printf '%s\n' "${dir}/${plugin}"
+            return 0
+        fi
+    done
+    return 1
+}
+
+gst_ref_plugins_complete() {
+    local gst_ref="$1"
+    local plugin
+
+    for plugin in "${host_gst_plugins[@]}"; do
+        if ! gst_ref_plugin_path "${gst_ref}" "${plugin}" >/dev/null; then
+            return 1
+        fi
+    done
+    return 0
+}
+
 host_gst_exec_path() {
     local name="$1"
     local dir
@@ -1107,14 +1142,18 @@ done
 
 gst_plugin_ref="${ref}"
 gst_plugin_source="ref"
-if [[ ! -d "${gst_plugin_ref}/lib/gstreamer-1.0" &&
-      ! -d "${gst_plugin_ref}/usr/lib/gstreamer-1.0" &&
-      host_gst_plugins_available ]]; then
+if ! gst_ref_has_plugin_dirs "${gst_plugin_ref}" && host_gst_plugins_complete; then
     echo "ports/webkit: warning: ${ref} has no GStreamer plugins; using host glibc plugin runtime" >&2
     gst_plugin_source="host"
-elif [[ ! -d "${gst_plugin_ref}/lib/gstreamer-1.0" &&
-        ! -d "${gst_plugin_ref}/usr/lib/gstreamer-1.0" ]]; then
+elif gst_ref_has_plugin_dirs "${gst_plugin_ref}" &&
+     ! gst_ref_plugins_complete "${gst_plugin_ref}" &&
+     host_gst_plugins_complete; then
+    echo "ports/webkit: warning: ${ref} has incomplete GStreamer plugins; using host glibc plugin runtime" >&2
+    gst_plugin_source="host"
+elif ! gst_ref_has_plugin_dirs "${gst_plugin_ref}"; then
     echo "ports/webkit: warning: ${ref} has no GStreamer plugins and no host plugin runtime was found" >&2
+elif ! gst_ref_plugins_complete "${gst_plugin_ref}"; then
+    echo "ports/webkit: warning: ${ref} has incomplete GStreamer plugins and no complete host plugin runtime was found" >&2
 fi
 if [[ "${gst_plugin_source}" == "host" ]]; then
     for pattern in \
@@ -1195,11 +1234,24 @@ if [[ -d "${gst_plugin_ref}/usr/lib/gstreamer-1.0" ]]; then
     mkdir -p "${dst}/usr/lib"
     mkdir -p "${dst}/usr/lib/gstreamer-1.0"
     cp -a "${gst_plugin_ref}/usr/lib/gstreamer-1.0"/. "${dst}/usr/lib/gstreamer-1.0/"
+    mkdir -p "${dst}/lib/gstreamer-1.0"
+    cp -a "${gst_plugin_ref}/usr/lib/gstreamer-1.0"/. "${dst}/lib/gstreamer-1.0/"
 fi
 if [[ -d "/usr/share/X11/xkb" ]]; then
     mkdir -p "${dst}/usr/share/X11"
     rm -rf "${dst}/usr/share/X11/xkb"
     cp -a "/usr/share/X11/xkb" "${dst}/usr/share/X11/"
+fi
+if [[ -e "${ref}/share/glib-2.0/schemas/gschemas.compiled" ]]; then
+    mkdir -p "${dst}/share/glib-2.0"
+    rm -rf "${dst}/share/glib-2.0/schemas"
+    cp -a "${ref}/share/glib-2.0/schemas" "${dst}/share/glib-2.0/"
+elif [[ -e "/usr/share/glib-2.0/schemas/gschemas.compiled" ]]; then
+    mkdir -p "${dst}/share/glib-2.0"
+    rm -rf "${dst}/share/glib-2.0/schemas"
+    cp -a "/usr/share/glib-2.0/schemas" "${dst}/share/glib-2.0/"
+else
+    echo "ports/webkit: warning: GLib compiled schemas not found; WebKit runtime settings may be unavailable" >&2
 fi
 if [[ -x "${gst_plugin_ref}/libexec/gstreamer-1.0/gst-plugin-scanner" ]]; then
     mkdir -p "${dst}/libexec/gstreamer-1.0"
@@ -1224,6 +1276,40 @@ done
 stage_host_needed_closure
 stage_host_png_symbol_isolation
 stage_host_needed_closure
+
+require_staged_path() {
+    local rel="$1"
+    local -n missing_ref="$2"
+
+    if [[ ! -e "${dst}/${rel}" && ! -L "${dst}/${rel}" ]]; then
+        missing_ref+=("${rel}")
+    fi
+}
+
+check_staged_gstreamer_runtime() {
+    local missing=()
+    local plugin
+
+    require_staged_path "libexec/gstreamer-1.0/gst-plugin-scanner" missing
+    require_staged_path "bin/gst-inspect-1.0" missing
+    require_staged_path "bin/gst-launch-1.0" missing
+    require_staged_path "bin/gst-typefind-1.0" missing
+
+    for plugin in "${host_gst_plugins[@]}"; do
+        require_staged_path "lib/gstreamer-1.0/${plugin}" missing
+    done
+
+    if ((${#missing[@]})); then
+        printf 'ports/webkit: incomplete staged GStreamer runtime at %s\n' "${dst}" >&2
+        printf '  missing: %s\n' "${missing[@]}" >&2
+        if [[ "${strict}" == "1" || "${strict}" == "ON" || "${strict}" == "TRUE" ]]; then
+            return 1
+        fi
+    fi
+    return 0
+}
+
+check_staged_gstreamer_runtime
 
 manifest_roots=("${dst}/lib" "${dst}/libexec/webkit2gtk-4.1")
 [[ -d "${dst}/usr/lib" ]] && manifest_roots+=("${dst}/usr/lib")

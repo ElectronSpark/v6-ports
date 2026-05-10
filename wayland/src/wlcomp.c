@@ -2243,6 +2243,11 @@ static void surface_destroy_handler(struct wl_resource *resource)
         struct wlcomp_frame_callback *cb;
         struct wlcomp_frame_callback *tmp;
 
+        if (surf->mapped || surf->title[0] || surf->app_id[0])
+            fprintf(stderr,
+                    "wlcomp: surface destroy pid=%d mapped=%d title='%s' app_id='%s'\n",
+                    surf->client_pid, surf->mapped, surf->title,
+                    surf->app_id);
         damage_surface(surf);
         wl_list_for_each_safe(cb, tmp, &surf->frame_callbacks, link) {
             wl_resource_destroy(cb->resource);
@@ -2785,8 +2790,13 @@ static void toplevel_destroy_handler(struct wl_resource *resource)
 {
     struct wlcomp_surface *surf = wl_resource_get_user_data(resource);
     if (surf) {
+        fprintf(stderr,
+                "wlcomp: xdg toplevel destroy pid=%d mapped=%d title='%s' app_id='%s'\n",
+                surf->client_pid, surf->mapped, surf->title, surf->app_id);
         surf->xdg_toplevel = NULL;
-        surf->mapped = 0;
+        if (!surf->committed_buf)
+            surf->mapped = 0;
+        damage_full_reason(FULL_DAMAGE_CLIENT);
     }
 }
 
@@ -2930,8 +2940,13 @@ static const struct xdg_surface_interface xdg_surface_impl = {
 static void xdg_surface_destroy_handler(struct wl_resource *resource)
 {
     struct wlcomp_surface *surf = wl_resource_get_user_data(resource);
-    if (surf)
+    if (surf) {
+        fprintf(stderr,
+                "wlcomp: xdg surface destroy pid=%d mapped=%d title='%s' app_id='%s'\n",
+                surf->client_pid, surf->mapped, surf->title, surf->app_id);
         surf->xdg_surface = NULL;
+        damage_full_reason(FULL_DAMAGE_CLIENT);
+    }
 }
 
 /* xdg_wm_base */
@@ -3652,6 +3667,11 @@ static int g_selected_icon = -1;       /* currently selected desktop icon */
 #define MAX_CHILDREN 16
 #define WEBKIT_NET_WAIT_US 35000000
 #define WEBKIT_DEFAULT_URL "https://www.google.com/search?q=xv6&gbv=1"
+static const char *webkit_feature_flags_no_idle =
+    "--features=+OffscreenCanvas,+OffscreenCanvasInWorkers,-requestIdleCallback";
+static const char *webkit_youtube_compat_user_agent =
+    "--user-agent=Mozilla/5.0 (X11; xv6 x86_64) AppleWebKit/605.1.15 "
+    "(KHTML, like Gecko) Version/17.0 Safari/605.1.15";
 static pid_t g_children[MAX_CHILDREN];
 static pid_t g_pending_reap[MAX_CHILDREN];
 static uint32_t g_child_launch_ms[MAX_CHILDREN];
@@ -3866,6 +3886,8 @@ static void launch_desktop_app_arg(const char *path, const char *name,
         char *argv_noarg[] = { (char *)name, NULL };
         char *argv_minibrowser[] = {
             (char *)name,
+            "--autoplay-policy=allow",
+            (char *)webkit_youtube_compat_user_agent,
             "--enable-javascript=false",
             "--enable-sandbox=false",
             "--enable-webgl=false",
@@ -3875,11 +3897,14 @@ static void launch_desktop_app_arg(const char *path, const char *name,
             "--enable-page-cache=false",
             "--enable-dns-prefetching=false",
             "--enable-offline-web-application-cache=false",
+            (char *)webkit_feature_flags_no_idle,
             (char *)(arg ? arg : "https://www.google.com/"),
             NULL,
         };
         char *argv_minibrowser_js[] = {
             (char *)name,
+            "--autoplay-policy=allow",
+            (char *)webkit_youtube_compat_user_agent,
             "--enable-sandbox=false",
             "--enable-webgl=false",
             "--enable-webaudio=true",
@@ -3888,11 +3913,14 @@ static void launch_desktop_app_arg(const char *path, const char *name,
             "--enable-page-cache=false",
             "--enable-dns-prefetching=false",
             "--enable-offline-web-application-cache=false",
+            (char *)webkit_feature_flags_no_idle,
             (char *)(arg ? arg : "https://www.google.com/"),
             NULL,
         };
         char *argv_minibrowser_accel[] = {
             (char *)name,
+            "--autoplay-policy=allow",
+            (char *)webkit_youtube_compat_user_agent,
             "--enable-javascript=false",
             "--enable-sandbox=false",
             "--enable-webgl=false",
@@ -3902,11 +3930,14 @@ static void launch_desktop_app_arg(const char *path, const char *name,
             "--enable-page-cache=false",
             "--enable-dns-prefetching=false",
             "--enable-offline-web-application-cache=false",
+            (char *)webkit_feature_flags_no_idle,
             (char *)(arg ? arg : "https://www.google.com/"),
             NULL,
         };
         char *argv_minibrowser_accel_js[] = {
             (char *)name,
+            "--autoplay-policy=allow",
+            (char *)webkit_youtube_compat_user_agent,
             "--enable-sandbox=false",
             "--enable-webgl=true",
             "--enable-webaudio=true",
@@ -3915,6 +3946,7 @@ static void launch_desktop_app_arg(const char *path, const char *name,
             "--enable-page-cache=false",
             "--enable-dns-prefetching=false",
             "--enable-offline-web-application-cache=false",
+            (char *)webkit_feature_flags_no_idle,
             (char *)(arg ? arg : "https://www.google.com/"),
             NULL,
         };
@@ -4629,7 +4661,14 @@ static int surface_is_foreground(const struct wlcomp_surface *surf)
 
 static int surface_has_taskbar_button(const struct wlcomp_surface *surf)
 {
-    return surf && surf->xdg_toplevel && !surf->is_cursor &&
+    /*
+     * GTK/WebKit can briefly tear down an xdg_toplevel while the wl_surface
+     * and client process remain alive during complex window-state changes.
+     * Keep such surfaces visible and taskbar-addressable until the wl_surface
+     * itself is destroyed; otherwise a live browser can appear to vanish.
+     */
+    return surf && !surf->is_cursor && !surf->is_subsurface &&
+           (surf->xdg_toplevel || surf->title[0] || surf->app_id[0]) &&
            (surf->mapped || surf->minimized);
 }
 
@@ -4670,14 +4709,12 @@ static int surface_close_hit(const struct wlcomp_surface *surf, int mx, int my)
                my >= close_y && my < close_y + WAYLAND_CLOSE_SZ;
     }
     if (surface_is_webkit_window(surf)) {
-        int close_w = 64;
-        int close_h = 42;
-
-        surface_window_geometry(surf, &gx, &gy, &gw, &gh);
-        return mx >= surf->x + gx + gw - close_w &&
-               mx < surf->x + gx + gw &&
-               my >= surf->y + gy &&
-               my < surf->y + gy + close_h;
+        /*
+         * WebKit/GTK uses client-side decorations.  Let GTK receive clicks on
+         * its headerbar buttons; a compositor-side approximate close rectangle
+         * can misclassify maximize/drag gestures and SIGKILL the browser.
+         */
+        return 0;
     }
     return 0;
 }

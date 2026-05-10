@@ -61,7 +61,6 @@ static int webkit_coop_smoke_enabled_by_cmdline(void);
 static int webkit_js_smoke_enabled_by_cmdline(void);
 static int webkit_youtube_boot_smoke_enabled_by_cmdline(void);
 static int webkit_youtube_waterfall_smoke_enabled_by_cmdline(void);
-static int webkit_youtube_compat_enabled_by_cmdline(void);
 static int webkit_youtube_compat_disabled_by_cmdline(void);
 static int webkit_request_idle_disabled_by_cmdline(void);
 static int webkit_feature_gate_smoke_enabled_by_cmdline(void);
@@ -131,8 +130,7 @@ static int url_needs_network_wait(const char *url)
 
 static int webkit_youtube_compat_url(const char *url)
 {
-    if (!url || !webkit_youtube_compat_enabled_by_cmdline() ||
-        webkit_youtube_compat_disabled_by_cmdline())
+    if (!url || webkit_youtube_compat_disabled_by_cmdline())
         return 0;
     return strstr(url, "youtube.com") != NULL ||
            strstr(url, "youtube-nocookie.com") != NULL ||
@@ -1241,16 +1239,6 @@ static int webkit_youtube_compat_disabled_by_cmdline(void)
         return 0;
 
     return token_is_disabled(buf, "webkit_youtube_compat");
-}
-
-static int webkit_youtube_compat_enabled_by_cmdline(void)
-{
-    char buf[512];
-
-    if (read_cmdline(buf, sizeof(buf)) < 0)
-        return 0;
-
-    return token_is_enabled(buf, "webkit_youtube_compat");
 }
 
 static int webkit_request_idle_disabled_by_cmdline(void)
