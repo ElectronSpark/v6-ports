@@ -639,8 +639,7 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
         int minibrowser_youtube_compat =
             is_minibrowser && webkit_youtube_compat_url(minibrowser_url);
         const char *minibrowser_feature_flags =
-            (minibrowser_youtube_compat ||
-             webkit_request_idle_disabled_by_cmdline()) ?
+            webkit_request_idle_disabled_by_cmdline() ?
             webkit_feature_flags_no_idle : webkit_feature_flags;
         char *argv_minibrowser[] = {
             (char *)name,

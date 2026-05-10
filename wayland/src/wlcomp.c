@@ -3709,8 +3709,8 @@ static int g_selected_icon = -1;       /* currently selected desktop icon */
 #define MAX_CHILDREN 16
 #define WEBKIT_NET_WAIT_US 35000000
 #define WEBKIT_DEFAULT_URL "https://www.google.com/search?q=xv6&gbv=1"
-static const char *webkit_feature_flags_no_idle =
-    "--features=+OffscreenCanvas,+OffscreenCanvasInWorkers,-requestIdleCallback";
+static const char *webkit_feature_flags =
+    "--features=+OffscreenCanvas,+OffscreenCanvasInWorkers,+requestIdleCallback";
 static const char *webkit_youtube_compat_user_agent =
     "--user-agent=Mozilla/5.0 (X11; xv6 x86_64) AppleWebKit/605.1.15 "
     "(KHTML, like Gecko) Version/17.0 Safari/605.1.15";
@@ -3940,7 +3940,7 @@ static void launch_desktop_app_arg(const char *path, const char *name,
             "--enable-page-cache=false",
             "--enable-dns-prefetching=false",
             "--enable-offline-web-application-cache=false",
-            (char *)webkit_feature_flags_no_idle,
+            (char *)webkit_feature_flags,
             (char *)(arg ? arg : "https://www.google.com/"),
             NULL,
         };
@@ -3957,7 +3957,7 @@ static void launch_desktop_app_arg(const char *path, const char *name,
             "--enable-page-cache=false",
             "--enable-dns-prefetching=false",
             "--enable-offline-web-application-cache=false",
-            (char *)webkit_feature_flags_no_idle,
+            (char *)webkit_feature_flags,
             (char *)(arg ? arg : "https://www.google.com/"),
             NULL,
         };
@@ -3975,7 +3975,7 @@ static void launch_desktop_app_arg(const char *path, const char *name,
             "--enable-page-cache=false",
             "--enable-dns-prefetching=false",
             "--enable-offline-web-application-cache=false",
-            (char *)webkit_feature_flags_no_idle,
+            (char *)webkit_feature_flags,
             (char *)(arg ? arg : "https://www.google.com/"),
             NULL,
         };
@@ -3992,7 +3992,7 @@ static void launch_desktop_app_arg(const char *path, const char *name,
             "--enable-page-cache=false",
             "--enable-dns-prefetching=false",
             "--enable-offline-web-application-cache=false",
-            (char *)webkit_feature_flags_no_idle,
+            (char *)webkit_feature_flags,
             (char *)(arg ? arg : "https://www.google.com/"),
             NULL,
         };
@@ -4048,21 +4048,6 @@ static void launch_desktop_app_arg(const char *path, const char *name,
             "WEBKIT_XV6_SKIP_RULE_FEATURES=1",
             "WEBKIT_XV6_SKIP_INITIAL_EMPTY_RENDER=1",
             "SOUP_FORCE_HTTP1=1",
-            "JSC_useJIT=0",
-            "JSC_useBaselineJIT=0",
-            "JSC_useDFGJIT=0",
-            "JSC_useFTLJIT=0",
-            "JSC_useRegExpJIT=0",
-            "JSC_useDOMJIT=0",
-            "JSC_useBBQJIT=0",
-            "JSC_useOMGJIT=0",
-            "JSC_useConcurrentJIT=0",
-            "JSC_useConcurrentGC=0",
-            "JSC_numberOfDFGCompilerThreads=1",
-            "JSC_numberOfFTLCompilerThreads=1",
-            "JSC_numberOfWasmCompilerThreads=1",
-            "JSC_numberOfWorklistThreads=1",
-            "JSC_numberOfGCMarkers=1",
             NULL
         };
         char *envp_minibrowser_accel[] = {
@@ -4102,21 +4087,6 @@ static void launch_desktop_app_arg(const char *path, const char *name,
             "ANGLE_DEFAULT_PLATFORM=gl",
             "SOUP_FORCE_HTTP1=1",
             "EPOXY_XV6_ALLOW_MISSING=1",
-            "JSC_useJIT=0",
-            "JSC_useBaselineJIT=0",
-            "JSC_useDFGJIT=0",
-            "JSC_useFTLJIT=0",
-            "JSC_useRegExpJIT=0",
-            "JSC_useDOMJIT=0",
-            "JSC_useBBQJIT=0",
-            "JSC_useOMGJIT=0",
-            "JSC_useConcurrentJIT=0",
-            "JSC_useConcurrentGC=0",
-            "JSC_numberOfDFGCompilerThreads=1",
-            "JSC_numberOfFTLCompilerThreads=1",
-            "JSC_numberOfWasmCompilerThreads=1",
-            "JSC_numberOfWorklistThreads=1",
-            "JSC_numberOfGCMarkers=1",
             NULL
         };
         char *envp_minibrowser_accel_sw[] = {
@@ -4156,21 +4126,6 @@ static void launch_desktop_app_arg(const char *path, const char *name,
             "SOUP_FORCE_HTTP1=1",
             "EPOXY_XV6_ALLOW_MISSING=1",
             "WEBKIT_XV6_DISABLE_BCG_SWITCH=1",
-            "JSC_useJIT=0",
-            "JSC_useBaselineJIT=0",
-            "JSC_useDFGJIT=0",
-            "JSC_useFTLJIT=0",
-            "JSC_useRegExpJIT=0",
-            "JSC_useDOMJIT=0",
-            "JSC_useBBQJIT=0",
-            "JSC_useOMGJIT=0",
-            "JSC_useConcurrentJIT=0",
-            "JSC_useConcurrentGC=0",
-            "JSC_numberOfDFGCompilerThreads=1",
-            "JSC_numberOfFTLCompilerThreads=1",
-            "JSC_numberOfWasmCompilerThreads=1",
-            "JSC_numberOfWorklistThreads=1",
-            "JSC_numberOfGCMarkers=1",
             NULL
         };
         char *envp_mesa_accel[] = {

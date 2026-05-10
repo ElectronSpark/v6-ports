@@ -608,6 +608,17 @@ copy_usr_glob() {
     fi
 }
 
+copy_runtime_dir() {
+    local source="$1"
+    local target_parent="$2"
+
+    if [[ -d "${source}" ]]; then
+        mkdir -p "${target_parent}"
+        rm -rf "${target_parent}/$(basename "${source}")"
+        cp -a "${source}" "${target_parent}/"
+    fi
+}
+
 # Keep the existing GTK/GLib foundation coherent.  The WebKit/GStreamer
 # reference runtime is allowed to refresh WebKit and media pieces, but mixing a
 # newer GLib/GIO/GObject/GModule set with the older staged GTK/GDK pair hangs
@@ -1091,6 +1102,7 @@ lib_patterns=(
     "${ref}/lib/libjavascriptcoregtk-4.1.so"*
     "${ref}/lib/libnghttp2.so"*
     "${ref}/lib/libgstgl-1.0.so"*
+    "${ref}/lib/libgraphene-1.0.so"*
     "${ref}/lib/libwebpdemux.so"*
     "${ref}/lib/libharfbuzz-icu.so"*
     "${ref}/lib/libmanette-0.2.so"*
@@ -1200,6 +1212,15 @@ if [[ -d "${ref}/include/webkitgtk-4.1" ]]; then
 fi
 if [[ -d "${ref}/include/libsoup-3.0" ]]; then
     cp -a "${ref}/include/libsoup-3.0" "${dst}/include/"
+fi
+copy_runtime_dir "${ref}/usr/share/fonts" "${dst}/usr/share"
+copy_runtime_dir "${ref}/share/fonts" "${dst}/share"
+copy_runtime_dir "${ref}/share/netsurf/fonts" "${dst}/share/netsurf"
+copy_runtime_dir "${ref}/usr/share/icons/hicolor" "${dst}/usr/share/icons"
+copy_runtime_dir "${ref}/share/icons/hicolor" "${dst}/share/icons"
+if [[ ! -d "${dst}/share/icons/hicolor" && ! -d "${dst}/usr/share/icons/hicolor" &&
+      -d "/usr/share/icons/hicolor" ]]; then
+    copy_runtime_dir "/usr/share/icons/hicolor" "${dst}/share/icons"
 fi
 for pc in \
     webkit2gtk-4.1.pc \
