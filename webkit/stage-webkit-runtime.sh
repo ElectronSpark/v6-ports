@@ -1237,10 +1237,13 @@ if [[ -d "${gst_plugin_ref}/usr/lib/gstreamer-1.0" ]]; then
     mkdir -p "${dst}/lib/gstreamer-1.0"
     cp -a "${gst_plugin_ref}/usr/lib/gstreamer-1.0"/. "${dst}/lib/gstreamer-1.0/"
 fi
-# WebKitGTK's GStreamer-GL path currently aborts inside gstglbasememory on xv6.
-# Keep codec/demux plugins staged, but force the stable non-GL video path.
-rm -f "${dst}/lib/gstreamer-1.0/libgstopengl.so" \
-      "${dst}/usr/lib/gstreamer-1.0/libgstopengl.so"
+# Keep the GStreamer-GL sink available for WebKitGTK video.  It is required for
+# the accelerated/zero-copy path; set WEBKIT_DISABLE_GST_GL=1 when bisecting a
+# media crash to force the older software-video fallback.
+if [[ "${WEBKIT_DISABLE_GST_GL:-0}" == "1" ]]; then
+    rm -f "${dst}/lib/gstreamer-1.0/libgstopengl.so" \
+          "${dst}/usr/lib/gstreamer-1.0/libgstopengl.so"
+fi
 if [[ -d "/usr/share/X11/xkb" ]]; then
     mkdir -p "${dst}/usr/share/X11"
     rm -rf "${dst}/usr/share/X11/xkb"
