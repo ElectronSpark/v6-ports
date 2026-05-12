@@ -430,6 +430,124 @@ prepare_host_webkit_runtime_dependency_cache() {
     fi
 }
 
+prepare_host_webkit_runtime_cache() {
+    local cache
+    local root
+    local refroot
+    local debs
+    local stamp
+    local deb
+    local packages=(
+        libwebkit2gtk-4.1-0
+        webkit2gtk-driver
+        gir1.2-webkit2-4.1
+        libjavascriptcoregtk-4.1-0
+        libjavascriptcoregtk-bin
+    )
+    local all_packages=()
+    local chunk=()
+
+    [[ "${WEBKIT_DOWNLOAD_HOST_WEBKIT_RUNTIME:-1}" != "0" ]] || return 1
+    command -v apt-cache >/dev/null 2>&1 || return 1
+    command -v apt-get >/dev/null 2>&1 || return 1
+    command -v dpkg-deb >/dev/null 2>&1 || return 1
+
+    if ! apt-cache show "${packages[0]}" >/dev/null 2>&1; then
+        echo "ports/webkit: refreshing apt metadata for cached WebKitGTK runtime" >&2
+        if ! apt-get update >/dev/null 2>&1; then
+            echo "ports/webkit: warning: apt metadata refresh failed; no host WebKitGTK runtime cache available" >&2
+            return 1
+        fi
+    fi
+
+    cache="${WEBKIT_HOST_WEBKIT_RUNTIME_CACHE:-${dst}/../webkit-runtime-cache}"
+    root="${cache}/root"
+    refroot="${cache}/ref"
+    debs="${cache}/debs"
+    stamp="${cache}/.extract.stamp"
+
+    mkdir -p "${debs}" "${root}" "${refroot}"
+
+    if [[ ! -e "${stamp}" ]]; then
+        echo "ports/webkit: preparing cached host WebKitGTK runtime in ${cache}" >&2
+        mapfile -t all_packages < <(
+            {
+                printf '%s\n' "${packages[@]}"
+                apt-cache depends --recurse \
+                    --no-recommends --no-suggests --no-conflicts \
+                    --no-breaks --no-replaces --no-enhances \
+                    "${packages[@]}" 2>/dev/null |
+                    awk '/^[[:space:]]*(Pre)?Depends:/ { print $2 }'
+            } |
+            awk '/^[[:alnum:]][[:alnum:].+:-]*$/ { print }' |
+            LC_ALL=C sort -u
+        )
+        for pkg in "${all_packages[@]}"; do
+            chunk+=("${pkg}")
+            if ((${#chunk[@]} >= 48)); then
+                download_deb_chunk "${debs}" "${chunk[@]}"
+                chunk=()
+            fi
+        done
+        if ((${#chunk[@]})); then
+            download_deb_chunk "${debs}" "${chunk[@]}"
+        fi
+
+        rm -rf "${root}" "${refroot}"
+        mkdir -p "${root}" "${refroot}"
+        shopt -s nullglob
+        for deb in "${debs}"/*.deb; do
+            dpkg-deb -x "${deb}" "${root}"
+        done
+        shopt -u nullglob
+
+        mkdir -p "${refroot}/lib" \
+                 "${refroot}/usr/lib" \
+                 "${refroot}/bin" \
+                 "${refroot}/libexec/webkit2gtk-4.1" \
+                 "${refroot}/lib/webkit2gtk-4.1"
+        if [[ -d "${root}/usr/lib/x86_64-linux-gnu" ]]; then
+            cp -a "${root}/usr/lib/x86_64-linux-gnu"/. "${refroot}/lib/"
+        fi
+        if [[ -d "${root}/usr/lib/x86_64-linux-gnu/webkit2gtk-4.1" ]]; then
+            cp -a "${root}/usr/lib/x86_64-linux-gnu/webkit2gtk-4.1"/. \
+                  "${refroot}/libexec/webkit2gtk-4.1/"
+            if [[ -d "${root}/usr/lib/x86_64-linux-gnu/webkit2gtk-4.1/injected-bundle" ]]; then
+                mkdir -p "${refroot}/lib/webkit2gtk-4.1"
+                cp -a "${root}/usr/lib/x86_64-linux-gnu/webkit2gtk-4.1/injected-bundle" \
+                      "${refroot}/lib/webkit2gtk-4.1/"
+            fi
+        fi
+        if [[ -x "${root}/usr/bin/jsc" ]]; then
+            cp -a "${root}/usr/bin/jsc" "${refroot}/libexec/webkit2gtk-4.1/jsc"
+        fi
+        if [[ -d "${root}/usr/bin" ]]; then
+            cp -a "${root}/usr/bin"/. "${refroot}/bin/" 2>/dev/null || true
+        fi
+        (
+            cd "${refroot}/lib"
+            [[ -e libwebkit2gtk-4.1.so || ! -e libwebkit2gtk-4.1.so.0 ]] ||
+                ln -s libwebkit2gtk-4.1.so.0 libwebkit2gtk-4.1.so
+            [[ -e libjavascriptcoregtk-4.1.so || ! -e libjavascriptcoregtk-4.1.so.0 ]] ||
+                ln -s libjavascriptcoregtk-4.1.so.0 libjavascriptcoregtk-4.1.so
+        )
+        touch "${stamp}"
+    fi
+
+    if [[ -x "${refroot}/libexec/webkit2gtk-4.1/MiniBrowser" ]]; then
+        if [[ -d "${root}/usr/lib/x86_64-linux-gnu" ]]; then
+            host_library_dirs=(
+                "${root}/usr/lib/x86_64-linux-gnu"
+                "${refroot}/lib"
+                "${host_library_dirs[@]}"
+            )
+        fi
+        printf '%s\n' "${refroot}"
+        return 0
+    fi
+    return 1
+}
+
 remove_legacy_libc_glob() {
     local pattern="$1"
     local matches=()
@@ -533,10 +651,13 @@ runtime_uses_legacy_libc() {
 }
 
 if [[ -z "${ref}" ]]; then
-    echo "ports/webkit: warning: no WebKitGTK runtime selected; skipping stage" >&2
-    mkdir -p "${dst}/libexec/webkit2gtk-4.1"
-    touch "${dst}/libexec/webkit2gtk-4.1/.webkit-stage.stamp"
-    exit 0
+    ref="$(prepare_host_webkit_runtime_cache || true)"
+    if [[ -z "${ref}" ]]; then
+        echo "ports/webkit: warning: no WebKitGTK runtime selected; skipping stage" >&2
+        mkdir -p "${dst}/libexec/webkit2gtk-4.1"
+        touch "${dst}/libexec/webkit2gtk-4.1/.webkit-stage.stamp"
+        exit 0
+    fi
 fi
 
 if [[ ! -x "${ref}/libexec/webkit2gtk-4.1/MiniBrowser" ]]; then
@@ -773,6 +894,9 @@ stage_host_library_soname() {
     fi
 
     echo "ports/webkit: staging host ${soname} for ${reason}" >&2
+    if [[ -L "${dst}/lib/${soname}" && ! -e "${dst}/lib/${soname}" ]]; then
+        rm -f "${dst}/lib/${soname}"
+    fi
     cp -L "${host_lib}" "${dst}/lib/${soname}"
     chmod 0755 "${dst}/lib/${soname}" 2>/dev/null || true
     return 0
@@ -809,7 +933,8 @@ stage_host_x11_runtime() {
 sysroot_has_library_soname() {
     local soname="$1"
 
-    [[ -e "${dst}/lib/${soname}" || -e "${dst}/usr/lib/${soname}" ]]
+    [[ -e "${dst}/lib/${soname}" || -L "${dst}/lib/${soname}" ||
+       -e "${dst}/usr/lib/${soname}" || -L "${dst}/usr/lib/${soname}" ]]
 }
 
 is_glibc_baseline_soname() {
@@ -993,6 +1118,49 @@ restore_ref_library_for_png_isolation() {
     fi
 }
 
+select_staged_versioned_library() {
+    local stem="$1"
+    local matches=()
+
+    shopt -s nullglob
+    matches=( "${dst}/lib/${stem}.so.0."[0-9]* )
+    shopt -u nullglob
+    if ((${#matches[@]})); then
+        printf '%s\n' "${matches[@]}" | sort -V | tail -n1
+    fi
+}
+
+normalize_staged_gtk3_runtime() {
+    local gtk_real
+    local gdk_real
+    local candidate
+
+    gtk_real="$(select_staged_versioned_library "libgtk-3")"
+    gdk_real="$(select_staged_versioned_library "libgdk-3")"
+    [[ -n "${gtk_real}" && -n "${gdk_real}" ]] || return 0
+
+    rm -f \
+        "${dst}/lib/libgtk-3.so" \
+        "${dst}/lib/libgtk-3.so.0" \
+        "${dst}/lib/libgdk-3.so" \
+        "${dst}/lib/libgdk-3.so.0"
+    ln -sf "$(basename "${gtk_real}")" "${dst}/lib/libgtk-3.so.0"
+    ln -sf libgtk-3.so.0 "${dst}/lib/libgtk-3.so"
+    ln -sf "$(basename "${gdk_real}")" "${dst}/lib/libgdk-3.so.0"
+    ln -sf libgdk-3.so.0 "${dst}/lib/libgdk-3.so"
+
+    shopt -s nullglob
+    for candidate in "${dst}/lib/libgtk-3.so.0."[0-9]*; do
+        [[ "$(readlink -f "${candidate}")" == "$(readlink -f "${gtk_real}")" ]] ||
+            rm -f "${candidate}"
+    done
+    for candidate in "${dst}/lib/libgdk-3.so.0."[0-9]*; do
+        [[ "$(readlink -f "${candidate}")" == "$(readlink -f "${gdk_real}")" ]] ||
+            rm -f "${candidate}"
+    done
+    shopt -u nullglob
+}
+
 stage_host_library_if_png_interposes() {
     local soname="$1"
     local link_name="${2:-}"
@@ -1027,11 +1195,12 @@ stage_host_library_if_png_interposes() {
 }
 
 stage_host_png_symbol_isolation() {
-    restore_ref_library_for_png_isolation "libgdk-3.so"
+    # GTK/GDK must stay as the pair built by the gtk3 port.  The WebKit
+    # reference runtime may carry an older GDK with a different private ABI,
+    # which crashes gtk_application_startup through GDK_PRIVATE_CALL.
     restore_ref_library_for_png_isolation "libcairo.so"
     restore_ref_library_for_png_isolation "libharfbuzz.so"
 
-    stage_host_library_if_png_interposes "libgdk-3.so.0" "libgdk-3.so"
     stage_host_cairo_xlib_if_needed
     stage_host_library_if_png_interposes "libcairo.so.2" "libcairo.so"
     stage_host_library_if_png_interposes "libharfbuzz.so.0" "libharfbuzz.so"
@@ -1304,6 +1473,7 @@ done
 stage_host_needed_closure
 stage_host_png_symbol_isolation
 stage_host_needed_closure
+normalize_staged_gtk3_runtime
 
 require_staged_path() {
     local rel="$1"

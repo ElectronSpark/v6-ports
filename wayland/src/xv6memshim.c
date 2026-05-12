@@ -1,16 +1,42 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <dlfcn.h>
+
+typedef uintptr_t xv6_mem_word_t __attribute__((__may_alias__));
 
 void *
 memset(void *dst, int value, size_t len)
 {
     unsigned char *p = dst;
+    uintptr_t word;
+    size_t word_size = sizeof(xv6_mem_word_t);
 
-    for (size_t i = 0; i < len; i++)
-        p[i] = (unsigned char)value;
+    if (len == 0)
+        return dst;
+
+    word = (unsigned char)value;
+    word |= word << 8;
+    word |= word << 16;
+#if UINTPTR_MAX > 0xffffffffU
+    word |= word << 32;
+#endif
+
+    while (len > 0 && ((uintptr_t)p & (word_size - 1)) != 0) {
+        *p++ = (unsigned char)value;
+        len--;
+    }
+
+    while (len >= word_size) {
+        *(xv6_mem_word_t *)p = word;
+        p += word_size;
+        len -= word_size;
+    }
+
+    while (len-- > 0)
+        *p++ = (unsigned char)value;
     return dst;
 }
 
@@ -19,9 +45,22 @@ memcpy(void *dst, const void *src, size_t len)
 {
     unsigned char *d = dst;
     const unsigned char *s = src;
+    size_t word_size = sizeof(xv6_mem_word_t);
 
-    for (size_t i = 0; i < len; i++)
-        d[i] = s[i];
+    if (len == 0 || d == s)
+        return dst;
+
+    if ((((uintptr_t)d | (uintptr_t)s) & (word_size - 1)) == 0) {
+        while (len >= word_size) {
+            *(xv6_mem_word_t *)d = *(const xv6_mem_word_t *)s;
+            d += word_size;
+            s += word_size;
+            len -= word_size;
+        }
+    }
+
+    while (len-- > 0)
+        *d++ = *s++;
     return dst;
 }
 
@@ -30,15 +69,34 @@ memmove(void *dst, const void *src, size_t len)
 {
     unsigned char *d = dst;
     const unsigned char *s = src;
+    size_t word_size = sizeof(xv6_mem_word_t);
 
     if (d == s || len == 0)
         return dst;
     if (d < s) {
-        for (size_t i = 0; i < len; i++)
-            d[i] = s[i];
+        if ((((uintptr_t)d | (uintptr_t)s) & (word_size - 1)) == 0) {
+            while (len >= word_size) {
+                *(xv6_mem_word_t *)d = *(const xv6_mem_word_t *)s;
+                d += word_size;
+                s += word_size;
+                len -= word_size;
+            }
+        }
+        while (len-- > 0)
+            *d++ = *s++;
     } else {
-        for (size_t i = len; i > 0; i--)
-            d[i - 1] = s[i - 1];
+        d += len;
+        s += len;
+        if ((((uintptr_t)d | (uintptr_t)s) & (word_size - 1)) == 0) {
+            while (len >= word_size) {
+                d -= word_size;
+                s -= word_size;
+                len -= word_size;
+                *(xv6_mem_word_t *)d = *(const xv6_mem_word_t *)s;
+            }
+        }
+        while (len-- > 0)
+            *--d = *--s;
     }
     return dst;
 }
@@ -214,6 +272,19 @@ xv6_normalize_webkit_uri(const char *uri, char *buf, size_t buf_size,
     return uri;
 }
 
+static int
+xv6_webkit_uri_log_enabled(void)
+{
+    static int enabled = -1;
+    const char *value;
+
+    if (enabled >= 0)
+        return enabled;
+    value = getenv("XV6_WEBKIT_URI_LOG");
+    enabled = value && value[0] && strcmp(value, "0") != 0;
+    return enabled;
+}
+
 typedef void (*xv6_webkit_load_uri_fn)(void *web_view, const char *uri);
 
 void
@@ -230,7 +301,10 @@ webkit_web_view_load_uri(void *web_view, const char *uri)
         return;
 
     load_uri = xv6_normalize_webkit_uri(uri, normalized, sizeof(normalized), 1);
-    if (load_uri && uri && load_uri != uri)
+    if (xv6_webkit_uri_log_enabled())
+        fprintf(stderr, "xv6-webkit-uri: load_uri '%s'\n",
+                load_uri ? load_uri : "(null)");
+    if (load_uri && uri && load_uri != uri && xv6_webkit_uri_log_enabled())
         fprintf(stderr, "xv6-webkit-uri: normalized '%s' -> '%s'\n",
                 uri, load_uri);
     real_load_uri(web_view, load_uri);
@@ -253,7 +327,8 @@ webkit_uri_request_new(const char *uri)
 
     request_uri = xv6_normalize_webkit_uri(uri, normalized,
                                            sizeof(normalized), 1);
-    if (request_uri && uri && request_uri != uri)
+    if (request_uri && uri && request_uri != uri &&
+        xv6_webkit_uri_log_enabled())
         fprintf(stderr, "xv6-webkit-uri: normalized request '%s' -> '%s'\n",
                 uri, request_uri);
     return real_request_new(request_uri);
@@ -277,7 +352,7 @@ g_uri_parse(const char *uri, unsigned int flags, void **error)
 
     parse_uri = xv6_normalize_webkit_uri(uri, normalized,
                                          sizeof(normalized), 0);
-    if (parse_uri && uri && parse_uri != uri)
+    if (parse_uri && uri && parse_uri != uri && xv6_webkit_uri_log_enabled())
         fprintf(stderr, "xv6-webkit-uri: normalized parse '%s' -> '%s'\n",
                 uri, parse_uri);
     return real_g_uri_parse(parse_uri, flags, error);
@@ -312,10 +387,14 @@ webkit_web_view_load_request(void *web_view, void *request)
         const char *request_uri = xv6_normalize_webkit_uri(
             uri, normalized, sizeof(normalized), 1);
 
+        if (xv6_webkit_uri_log_enabled())
+            fprintf(stderr, "xv6-webkit-uri: load_request '%s'\n",
+                    request_uri ? request_uri : "(null)");
         if (request_uri && uri && request_uri != uri) {
-            fprintf(stderr,
-                    "xv6-webkit-uri: normalized load request '%s' -> '%s'\n",
-                    uri, request_uri);
+            if (xv6_webkit_uri_log_enabled())
+                fprintf(stderr,
+                        "xv6-webkit-uri: normalized load request '%s' -> '%s'\n",
+                        uri, request_uri);
             real_request_set_uri(request, request_uri);
         }
     }
@@ -343,8 +422,9 @@ gtk_entry_get_text(void *entry)
     entry_text = xv6_normalize_webkit_uri(text, normalized,
                                           sizeof(normalized), 1);
     if (entry_text && text && entry_text != text) {
-        fprintf(stderr, "xv6-webkit-uri: normalized entry '%s' -> '%s'\n",
-                text, entry_text);
+        if (xv6_webkit_uri_log_enabled())
+            fprintf(stderr, "xv6-webkit-uri: normalized entry '%s' -> '%s'\n",
+                    text, entry_text);
         return entry_text;
     }
     return text;

@@ -402,7 +402,7 @@ add_custom_command(
 
 set(_webkit_smoke_ok OFF)
 option(XV6_BUILD_WEBKIT_GPU_SMOKE
-    "Build the optional WebKit GPU policy smoke helper" OFF)
+    "Build the optional WebKit GPU policy smoke helper" ON)
 set(_webkit_lib "${XV6_SYSROOT}/lib/libwebkit2gtk-4.1.so")
 if(XV6_BUILD_WEBKIT_GPU_SMOKE AND EXISTS "${_webkit_lib}")
     find_program(_READELF NAMES readelf)

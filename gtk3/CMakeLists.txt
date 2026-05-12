@@ -91,3 +91,32 @@ add_custom_command(
     VERBATIM)
 add_custom_target(port-gtk3-schemas ALL
     DEPENDS ${_gtk_schemas_compiled})
+
+set(_gtk_runtime_links_stamp ${CMAKE_CURRENT_BINARY_DIR}/runtime-links.stamp)
+add_custom_command(
+    OUTPUT  ${_gtk_runtime_links_stamp}
+    COMMAND ${CMAKE_COMMAND} -E rm -f
+                ${XV6_SYSROOT}/lib/libgdk-3.so
+                ${XV6_SYSROOT}/lib/libgdk-3.so.0
+                ${XV6_SYSROOT}/lib/libgdk-3.so.0.2409.32
+                ${XV6_SYSROOT}/lib/libgtk-3.so
+                ${XV6_SYSROOT}/lib/libgtk-3.so.0
+                ${XV6_SYSROOT}/lib/libgtk-3.so.0.2409.32
+    COMMAND ${CMAKE_COMMAND} -E create_symlink
+                libgdk-3.so.0
+                ${XV6_SYSROOT}/lib/libgdk-3.so
+    COMMAND ${CMAKE_COMMAND} -E create_symlink
+                libgdk-3.so.0.2421.32
+                ${XV6_SYSROOT}/lib/libgdk-3.so.0
+    COMMAND ${CMAKE_COMMAND} -E create_symlink
+                libgtk-3.so.0
+                ${XV6_SYSROOT}/lib/libgtk-3.so
+    COMMAND ${CMAKE_COMMAND} -E create_symlink
+                libgtk-3.so.0.2421.32
+                ${XV6_SYSROOT}/lib/libgtk-3.so.0
+    COMMAND ${CMAKE_COMMAND} -E touch ${_gtk_runtime_links_stamp}
+    DEPENDS port-gtk3
+    COMMENT "Normalizing GTK/GDK runtime soname links"
+    VERBATIM)
+add_custom_target(port-gtk3-runtime-links ALL
+    DEPENDS ${_gtk_runtime_links_stamp})

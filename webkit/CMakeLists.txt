@@ -81,6 +81,9 @@ foreach(_dep gtk3 glib gdk-pixbuf pango atk cairo fontconfig freetype
         list(APPEND _webkit_deps port-${_dep})
     endif()
 endforeach()
+if(TARGET port-gtk3-runtime-links)
+    list(APPEND _webkit_deps port-gtk3-runtime-links)
+endif()
 
 set(_webkit_runtime_stack_files
     "${XV6_SYSROOT}/lib/libgtk-3.so.0"

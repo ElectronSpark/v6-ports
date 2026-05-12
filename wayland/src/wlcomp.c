@@ -62,6 +62,7 @@ static void disable_child_coredumps(void)
  * ══════════════════════════════════════════════════════════════════════ */
 
 #define FBIOGET_VSCREENINFO  0x4600
+#define FBIOPUT_VSCREENINFO  0x4601
 #define FB_GPU_FILL_RECT     0x4610
 #define FB_GPU_BLIT          0x4611
 #define FB_GPU_BO_CREATE     0x4614
@@ -165,6 +166,7 @@ static struct wl_display *g_display;
 
 static int cmdline_flag_enabled(const char *key);
 static int cmdline_int_value(const char *key, int fallback);
+static uint32_t get_time_ms(void);
 
 static int xv6_virgl_available(void)
 {
@@ -231,11 +233,16 @@ struct wlcomp_damage_stats {
     uint64_t present_pixels;
     uint64_t present_full_frames;
     uint64_t present_union_collapses;
+    uint64_t frame_interval_sum_ms;
+    uint64_t frame_interval_max_ms;
+    uint64_t frame_interval_over_25ms;
+    uint64_t frame_interval_over_40ms;
     uint64_t acquire_blocked_frames;
     uint64_t full_damage[FULL_DAMAGE_COUNT];
 };
 
 static struct wlcomp_damage_stats g_damage_stats;
+static uint64_t g_damage_interval_max_ms;
 
 #define MAX_RELEASE_QUEUE 64
 static struct wlcomp_buffer *g_release_queue[MAX_RELEASE_QUEUE];
@@ -425,7 +432,9 @@ static void damage_stats_maybe_log(uint32_t now)
     cur = g_damage_stats;
     fprintf(stderr,
             "wlcomp: damage stats frames=%lu rects=%lu pixels=%lu full=%lu "
-            "union=%lu acquire_blocked=%lu full_causes other=%lu init=%lu "
+            "union=%lu avg_interval=%lums max_interval=%lums "
+            "late25=%lu late40=%lu acquire_blocked=%lu "
+            "full_causes other=%lu init=%lu "
             "repair=%lu acquire=%lu desktop=%lu menu=%lu resize=%lu "
             "client=%lu iwin=%lu mode=%s\n",
             cur.frames - last.frames,
@@ -433,6 +442,12 @@ static void damage_stats_maybe_log(uint32_t now)
             cur.present_pixels - last.present_pixels,
             cur.present_full_frames - last.present_full_frames,
             cur.present_union_collapses - last.present_union_collapses,
+            (cur.frames - last.frames) > 1 ?
+                (cur.frame_interval_sum_ms - last.frame_interval_sum_ms) /
+                    ((cur.frames - last.frames) - 1) : 0,
+            cur.frame_interval_max_ms,
+            cur.frame_interval_over_25ms - last.frame_interval_over_25ms,
+            cur.frame_interval_over_40ms - last.frame_interval_over_40ms,
             cur.acquire_blocked_frames - last.acquire_blocked_frames,
             cur.full_damage[FULL_DAMAGE_OTHER] -
                 last.full_damage[FULL_DAMAGE_OTHER],
@@ -456,6 +471,61 @@ static void damage_stats_maybe_log(uint32_t now)
                 (g_fb_bo_backed ? "bo-present" : "user-blit"));
     last = cur;
     next_log_ms = now + (uint32_t)interval_ms;
+}
+
+static void fps_probe_maybe_write(uint32_t now)
+{
+    static uint32_t next_write_ms;
+    static uint32_t last_ms;
+    static struct wlcomp_damage_stats last;
+    struct wlcomp_damage_stats cur;
+    uint32_t elapsed;
+    uint64_t frames;
+    uint64_t pixels;
+    uint64_t fps_x1000;
+    FILE *fp;
+
+    if (next_write_ms == 0) {
+        next_write_ms = now + 1000;
+        last_ms = now;
+        last = g_damage_stats;
+        return;
+    }
+    if (now < next_write_ms)
+        return;
+
+    cur = g_damage_stats;
+    elapsed = now - last_ms;
+    if (elapsed == 0)
+        elapsed = 1;
+    frames = cur.frames - last.frames;
+    pixels = cur.present_pixels - last.present_pixels;
+    fps_x1000 = frames * 1000000ULL / elapsed;
+
+    fp = fopen("/tmp/wlcomp-fps", "w");
+    if (fp) {
+        fprintf(fp,
+                "fps=%lu.%03lu frames=%lu interval_ms=%u rects=%lu pixels=%lu full=%lu avg_frame_ms=%lu max_frame_ms=%lu late25=%lu late40=%lu acquire_blocked=%lu mode=%s fb=%ux%u\n",
+                fps_x1000 / 1000, fps_x1000 % 1000, frames, elapsed,
+                cur.present_rects - last.present_rects, pixels,
+                cur.present_full_frames - last.present_full_frames,
+                frames > 1 ?
+                    (cur.frame_interval_sum_ms - last.frame_interval_sum_ms) /
+                        (frames - 1) : 0,
+                g_damage_interval_max_ms,
+                cur.frame_interval_over_25ms - last.frame_interval_over_25ms,
+                cur.frame_interval_over_40ms - last.frame_interval_over_40ms,
+                cur.acquire_blocked_frames - last.acquire_blocked_frames,
+                g_fb_direct_scanout ? "direct-scanout" :
+                    (g_fb_bo_backed ? "bo-present" : "user-blit"),
+                g_fb_w, g_fb_h);
+        fclose(fp);
+    }
+
+    last = cur;
+    last_ms = now;
+    g_damage_interval_max_ms = 0;
+    next_write_ms = now + 1000;
 }
 
 static void release_framebuffer_backing(void)
@@ -492,8 +562,12 @@ static int alloc_framebuffer_backing(void)
     const char *use_bo = getenv("XV6_WLCOMP_FB_BO");
 
     if (use_direct && strcmp(use_direct, "1") == 0) {
+        int ret;
+
         memset(&scanout, 0, sizeof(scanout));
-        if (ioctl(g_fb_fd, FB_GPU_SCANOUT_MAP, &scanout) == 0 &&
+        errno = 0;
+        ret = ioctl(g_fb_fd, FB_GPU_SCANOUT_MAP, &scanout);
+        if (ret == 0 &&
             scanout.addr && scanout.size && scanout.pitch) {
             g_fb_buf = (uint32_t *)(uintptr_t)scanout.addr;
             g_fb_pitch = scanout.pitch;
@@ -505,6 +579,10 @@ static int alloc_framebuffer_backing(void)
                     scanout.addr, scanout.size, scanout.pitch);
             return 0;
         }
+        fprintf(stderr,
+                "wlcomp: direct scanout map failed ret=%d errno=%d (%s) addr=0x%lx size=%lu pitch=%u %ux%u\n",
+                ret, errno, strerror(errno), scanout.addr, scanout.size,
+                scanout.pitch, scanout.width, scanout.height);
     }
 
     if (use_bo && strcmp(use_bo, "1") == 0) {
@@ -534,8 +612,9 @@ static int alloc_framebuffer_backing(void)
     return 0;
 }
 
-static void present_damage_rects(int fb_w)
+static void present_damage_rects(int fb_w, uint32_t now)
 {
+    static uint32_t last_present_ms;
     int stride = g_fb_pitch ? (int)(g_fb_pitch / 4) : fb_w;
     int rect_count = g_damage_count;
     uint64_t present_pixels = 0;
@@ -576,17 +655,38 @@ static void present_damage_rects(int fb_w)
             struct fb_gpu_blit cmd;
             uint64_t pixels =
                 (uint64_t)(uintptr_t)(g_fb_buf + r->y1 * stride + r->x1);
-
+            static int blit_error_logs;
             cmd.x = (uint32_t)r->x1;
             cmd.y = (uint32_t)r->y1;
             cmd.w = w;
             cmd.h = h;
             cmd.src_pitch = g_fb_pitch;
             cmd.pixels = pixels;
-            ioctl(g_fb_fd, FB_GPU_BLIT, &cmd);
+            if (ioctl(g_fb_fd, FB_GPU_BLIT, &cmd) != 0 &&
+                blit_error_logs < 8) {
+                fprintf(stderr,
+                        "wlcomp: FB_GPU_BLIT failed errno=%d (%s) rect=%u,%u %ux%u pitch=%u pixels=0x%lx\n",
+                        errno, strerror(errno), cmd.x, cmd.y, cmd.w, cmd.h,
+                        cmd.src_pitch, cmd.pixels);
+                blit_error_logs++;
+            }
         }
     }
     g_damage_stats.frames++;
+    if (last_present_ms != 0) {
+        uint32_t interval = now - last_present_ms;
+
+        g_damage_stats.frame_interval_sum_ms += interval;
+        if (interval > g_damage_stats.frame_interval_max_ms)
+            g_damage_stats.frame_interval_max_ms = interval;
+        if (interval > g_damage_interval_max_ms)
+            g_damage_interval_max_ms = interval;
+        if (interval > 25)
+            g_damage_stats.frame_interval_over_25ms++;
+        if (interval > 40)
+            g_damage_stats.frame_interval_over_40ms++;
+    }
+    last_present_ms = now;
     g_damage_stats.present_rects += (uint64_t)rect_count;
     g_damage_stats.present_pixels += present_pixels;
     if (full_frame)
@@ -636,6 +736,7 @@ static struct wl_global *g_xdg_wm_global;
 static struct wl_global *g_xv6_gpu_global;
 static struct wl_global *g_dmabuf_global;
 static struct wl_global *g_subcompositor_global;
+static volatile int g_running = 1;
 
 /* ══════════════════════════════════════════════════════════════════════
  *  Surface / window tracking
@@ -865,6 +966,17 @@ static void damage_all_frame_callbacks(uint32_t now)
             free(cb);
         }
     }
+}
+
+static int any_frame_callbacks_pending(void)
+{
+    struct wlcomp_surface *surf;
+
+    wl_list_for_each(surf, &g_surfaces, link) {
+        if (!wl_list_empty(&surf->frame_callbacks))
+            return 1;
+    }
+    return 0;
 }
 
 static struct wlcomp_surface *surface_from_resource(struct wl_resource *r)
@@ -1260,20 +1372,18 @@ static void buffer_maybe_free(struct wlcomp_buffer *buf)
 
 static int framebuffer_present_fence_ready(void)
 {
-    struct fb_gpu_bo_fence fence;
-
     if (!g_fb_bo_backed || g_fb_bo_handle == 0 ||
         g_fb_bo_last_present_fence == 0)
         return 1;
 
-    memset(&fence, 0, sizeof(fence));
-    fence.handle = g_fb_bo_handle;
-    fence.wait_for = g_fb_bo_last_present_fence;
-    if (ioctl(g_fb_fd, FB_GPU_BO_FENCE, &fence) < 0)
-        return 1;
-
-    g_fb_bo_last_signaled_fence = fence.signaled;
-    return fence.signaled >= g_fb_bo_last_present_fence;
+    /*
+     * FB_GPU_BO_PRESENT completes the CPU copy into the scanout before it
+     * returns and the kernel reports the present fence as signaled immediately.
+     * Avoid several extra ioctl round trips per frame on the hot compositor
+     * path; those show up as visible jitter under WebKit video.
+     */
+    g_fb_bo_last_signaled_fence = g_fb_bo_last_present_fence;
+    return 1;
 }
 
 static void queue_buffer_release(struct wlcomp_buffer *buf)
@@ -2720,6 +2830,15 @@ static void toplevel_set_title(struct wl_client *c, struct wl_resource *r,
             surf->title[i] = title[i];
         surf->title[i] = '\0';
     }
+    if (title) {
+        int fd = open("/tmp/webkit-title", O_WRONLY | O_CREAT | O_TRUNC, 0644);
+
+        if (fd >= 0) {
+            write(fd, title, strlen(title));
+            write(fd, "\n", 1);
+            close(fd);
+        }
+    }
     fprintf(stderr, "wlcomp: client title: %s\n", title);
 }
 
@@ -3533,29 +3652,41 @@ static void seat_get_keyboard(struct wl_client *client,
         "    key <AE12> { [ equal, plus     ] };\n"
         "    key <BKSP> { [ BackSpace       ] };\n"
         "    key <TAB>  { [ Tab             ] };\n"
-        "    key <AD01> { [ q, Q ] }; key <AD02> { [ w, W ] };\n"
-        "    key <AD03> { [ e, E ] }; key <AD04> { [ r, R ] };\n"
-        "    key <AD05> { [ t, T ] }; key <AD06> { [ y, Y ] };\n"
-        "    key <AD07> { [ u, U ] }; key <AD08> { [ i, I ] };\n"
-        "    key <AD09> { [ o, O ] }; key <AD10> { [ p, P ] };\n"
+        "    key <AD01> { type[Group1] = \"ALPHABETIC\", [ q, Q ] };\n"
+        "    key <AD02> { type[Group1] = \"ALPHABETIC\", [ w, W ] };\n"
+        "    key <AD03> { type[Group1] = \"ALPHABETIC\", [ e, E ] };\n"
+        "    key <AD04> { type[Group1] = \"ALPHABETIC\", [ r, R ] };\n"
+        "    key <AD05> { type[Group1] = \"ALPHABETIC\", [ t, T ] };\n"
+        "    key <AD06> { type[Group1] = \"ALPHABETIC\", [ y, Y ] };\n"
+        "    key <AD07> { type[Group1] = \"ALPHABETIC\", [ u, U ] };\n"
+        "    key <AD08> { type[Group1] = \"ALPHABETIC\", [ i, I ] };\n"
+        "    key <AD09> { type[Group1] = \"ALPHABETIC\", [ o, O ] };\n"
+        "    key <AD10> { type[Group1] = \"ALPHABETIC\", [ p, P ] };\n"
         "    key <AD11> { [ bracketleft, braceleft   ] };\n"
         "    key <AD12> { [ bracketright, braceright ] };\n"
         "    key <RTRN> { [ Return ] };\n"
         "    key <LCTL> { [ Control_L ] };\n"
-        "    key <AC01> { [ a, A ] }; key <AC02> { [ s, S ] };\n"
-        "    key <AC03> { [ d, D ] }; key <AC04> { [ f, F ] };\n"
-        "    key <AC05> { [ g, G ] }; key <AC06> { [ h, H ] };\n"
-        "    key <AC07> { [ j, J ] }; key <AC08> { [ k, K ] };\n"
-        "    key <AC09> { [ l, L ] };\n"
+        "    key <AC01> { type[Group1] = \"ALPHABETIC\", [ a, A ] };\n"
+        "    key <AC02> { type[Group1] = \"ALPHABETIC\", [ s, S ] };\n"
+        "    key <AC03> { type[Group1] = \"ALPHABETIC\", [ d, D ] };\n"
+        "    key <AC04> { type[Group1] = \"ALPHABETIC\", [ f, F ] };\n"
+        "    key <AC05> { type[Group1] = \"ALPHABETIC\", [ g, G ] };\n"
+        "    key <AC06> { type[Group1] = \"ALPHABETIC\", [ h, H ] };\n"
+        "    key <AC07> { type[Group1] = \"ALPHABETIC\", [ j, J ] };\n"
+        "    key <AC08> { type[Group1] = \"ALPHABETIC\", [ k, K ] };\n"
+        "    key <AC09> { type[Group1] = \"ALPHABETIC\", [ l, L ] };\n"
         "    key <AC10> { [ semicolon, colon    ] };\n"
         "    key <AC11> { [ apostrophe, quotedbl ] };\n"
         "    key <TLDE> { [ grave, asciitilde    ] };\n"
         "    key <LFSH> { [ Shift_L   ] };\n"
         "    key <BKSL> { [ backslash, bar ] };\n"
-        "    key <AB01> { [ z, Z ] }; key <AB02> { [ x, X ] };\n"
-        "    key <AB03> { [ c, C ] }; key <AB04> { [ v, V ] };\n"
-        "    key <AB05> { [ b, B ] }; key <AB06> { [ n, N ] };\n"
-        "    key <AB07> { [ m, M ] };\n"
+        "    key <AB01> { type[Group1] = \"ALPHABETIC\", [ z, Z ] };\n"
+        "    key <AB02> { type[Group1] = \"ALPHABETIC\", [ x, X ] };\n"
+        "    key <AB03> { type[Group1] = \"ALPHABETIC\", [ c, C ] };\n"
+        "    key <AB04> { type[Group1] = \"ALPHABETIC\", [ v, V ] };\n"
+        "    key <AB05> { type[Group1] = \"ALPHABETIC\", [ b, B ] };\n"
+        "    key <AB06> { type[Group1] = \"ALPHABETIC\", [ n, N ] };\n"
+        "    key <AB07> { type[Group1] = \"ALPHABETIC\", [ m, M ] };\n"
         "    key <AB08> { [ comma, less     ] };\n"
         "    key <AB09> { [ period, greater ] };\n"
         "    key <AB10> { [ slash, question ] };\n"
@@ -3837,6 +3968,7 @@ static char g_child_name[MAX_CHILDREN][32];
 static const char *path_basename(const char *path);
 static uint32_t get_time_ms(void);
 static int cmdline_int_value(const char *key, int fallback);
+static int sync_resolv_conf_from_netconf(int wait_us);
 
 static void terminate_client_pid(pid_t pid)
 {
@@ -4036,7 +4168,8 @@ static void launch_desktop_app_arg(const char *path, const char *name,
 
         if (is_minibrowser && url_needs_network_wait(arg)) {
             fprintf(stderr, "wlcomp: waiting for network before %s\n", arg);
-            usleep(WEBKIT_NET_WAIT_US);
+            if (sync_resolv_conf_from_netconf(WEBKIT_NET_WAIT_US) != 0)
+                usleep(WEBKIT_NET_WAIT_US);
         }
 
         char *argv_def[] = { (char *)name, (char *)arg, NULL };
@@ -4046,7 +4179,6 @@ static void launch_desktop_app_arg(const char *path, const char *name,
             "--autoplay-policy=allow",
             "--private",
             (char *)webkit_youtube_compat_user_agent,
-            "--enable-javascript=false",
             "--enable-sandbox=false",
             "--enable-webgl=false",
             "--enable-webaudio=true",
@@ -4056,7 +4188,7 @@ static void launch_desktop_app_arg(const char *path, const char *name,
             "--enable-dns-prefetching=false",
             "--enable-offline-web-application-cache=false",
             (char *)webkit_feature_flags,
-            (char *)(arg ? arg : "https://www.google.com/"),
+            (char *)(arg ? arg : WEBKIT_DEFAULT_URL),
             NULL,
         };
         char *argv_minibrowser_js[] = {
@@ -4073,7 +4205,7 @@ static void launch_desktop_app_arg(const char *path, const char *name,
             "--enable-dns-prefetching=false",
             "--enable-offline-web-application-cache=false",
             (char *)webkit_feature_flags,
-            (char *)(arg ? arg : "https://www.google.com/"),
+            (char *)(arg ? arg : WEBKIT_DEFAULT_URL),
             NULL,
         };
         char *argv_minibrowser_accel[] = {
@@ -4081,7 +4213,6 @@ static void launch_desktop_app_arg(const char *path, const char *name,
             "--autoplay-policy=allow",
             "--private",
             (char *)webkit_youtube_compat_user_agent,
-            "--enable-javascript=false",
             "--enable-sandbox=false",
             "--enable-webgl=false",
             "--enable-webaudio=true",
@@ -4091,7 +4222,7 @@ static void launch_desktop_app_arg(const char *path, const char *name,
             "--enable-dns-prefetching=false",
             "--enable-offline-web-application-cache=false",
             (char *)webkit_feature_flags,
-            (char *)(arg ? arg : "https://www.google.com/"),
+            (char *)(arg ? arg : WEBKIT_DEFAULT_URL),
             NULL,
         };
         char *argv_minibrowser_accel_js[] = {
@@ -4108,7 +4239,7 @@ static void launch_desktop_app_arg(const char *path, const char *name,
             "--enable-dns-prefetching=false",
             "--enable-offline-web-application-cache=false",
             (char *)webkit_feature_flags,
-            (char *)(arg ? arg : "https://www.google.com/"),
+            (char *)(arg ? arg : WEBKIT_DEFAULT_URL),
             NULL,
         };
         char **argv = arg ? argv_def : argv_noarg;
@@ -4138,7 +4269,7 @@ static void launch_desktop_app_arg(const char *path, const char *name,
             "XDG_DATA_DIRS=/share:/usr/share",
             "WAYLAND_DISPLAY=wayland-0",
             "GDK_BACKEND=wayland",
-            "GDK_GL=gles",
+            "GDK_GL=disable",
             "GDK_DPI_SCALE=1.0",
             "XCURSOR_PATH=/share/icons",
             "XCURSOR_THEME=Adwaita",
@@ -4147,6 +4278,7 @@ static void launch_desktop_app_arg(const char *path, const char *name,
             "GIO_USE_TLS=gnutls",
             "GST_PLUGIN_SYSTEM_PATH_1_0=/lib/gstreamer-1.0:/usr/lib/gstreamer-1.0",
             "GST_PLUGIN_PATH_1_0=/lib/gstreamer-1.0:/usr/lib/gstreamer-1.0",
+            "GST_PLUGIN_SCANNER=/libexec/gstreamer-1.0/gst-plugin-scanner",
             "GST_PLUGIN_SCANNER_1_0=/libexec/gstreamer-1.0/gst-plugin-scanner",
             "GST_REGISTRY=/tmp/gstreamer-registry.bin",
             "GST_REGISTRY_REUSE_PLUGIN_SCANNER=1",
@@ -4161,6 +4293,11 @@ static void launch_desktop_app_arg(const char *path, const char *name,
             "WEBKIT_GST_MAX_AVC1_RESOLUTION=720P",
             "WEBKIT_DISABLE_COMPOSITING_MODE=1",
             "WEBKIT_XV6_DISABLE_COMPOSITING_UPDATE=1",
+            "LIBGL_ALWAYS_SOFTWARE=1",
+            "EGL_PLATFORM=wayland",
+            "LIBGL_DRIVERS_PATH=/lib/dri",
+            "MESA_LOADER_DRIVER_OVERRIDE=swrast",
+            "ANGLE_DEFAULT_PLATFORM=gl",
             "EPOXY_XV6_ALLOW_MISSING=1",
             "WEBKIT_XV6_SKIP_RULE_FEATURES=1",
             "WEBKIT_XV6_SKIP_INITIAL_EMPTY_RENDER=1",
@@ -4187,6 +4324,7 @@ static void launch_desktop_app_arg(const char *path, const char *name,
             "GIO_USE_TLS=gnutls",
             "GST_PLUGIN_SYSTEM_PATH_1_0=/lib/gstreamer-1.0:/usr/lib/gstreamer-1.0",
             "GST_PLUGIN_PATH_1_0=/lib/gstreamer-1.0:/usr/lib/gstreamer-1.0",
+            "GST_PLUGIN_SCANNER=/libexec/gstreamer-1.0/gst-plugin-scanner",
             "GST_PLUGIN_SCANNER_1_0=/libexec/gstreamer-1.0/gst-plugin-scanner",
             "GST_REGISTRY=/tmp/gstreamer-registry.bin",
             "GST_REGISTRY_REUSE_PLUGIN_SCANNER=1",
@@ -4196,6 +4334,7 @@ static void launch_desktop_app_arg(const char *path, const char *name,
             "WEBKIT_DISABLE_NETWORK_CACHE=1",
             "WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS=1",
             "LIBGL_ALWAYS_SOFTWARE=0",
+            "LIBGL_DRIVERS_PATH=/lib/dri",
             "GALLIUM_DRIVER=virgl",
             "EGL_PLATFORM=wayland",
             "ANGLE_DEFAULT_PLATFORM=gl",
@@ -4223,6 +4362,7 @@ static void launch_desktop_app_arg(const char *path, const char *name,
             "GIO_USE_TLS=gnutls",
             "GST_PLUGIN_SYSTEM_PATH_1_0=/lib/gstreamer-1.0:/usr/lib/gstreamer-1.0",
             "GST_PLUGIN_PATH_1_0=/lib/gstreamer-1.0:/usr/lib/gstreamer-1.0",
+            "GST_PLUGIN_SCANNER=/libexec/gstreamer-1.0/gst-plugin-scanner",
             "GST_PLUGIN_SCANNER_1_0=/libexec/gstreamer-1.0/gst-plugin-scanner",
             "GST_REGISTRY=/tmp/gstreamer-registry.bin",
             "GST_REGISTRY_REUSE_PLUGIN_SCANNER=1",
@@ -4237,6 +4377,8 @@ static void launch_desktop_app_arg(const char *path, const char *name,
             "WEBKIT_GST_MAX_AVC1_RESOLUTION=720P",
             "LIBGL_ALWAYS_SOFTWARE=1",
             "EGL_PLATFORM=wayland",
+            "LIBGL_DRIVERS_PATH=/lib/dri",
+            "MESA_LOADER_DRIVER_OVERRIDE=swrast",
             "ANGLE_DEFAULT_PLATFORM=gl",
             "SOUP_FORCE_HTTP1=1",
             "EPOXY_XV6_ALLOW_MISSING=1",
@@ -4270,8 +4412,8 @@ static void launch_desktop_app_arg(const char *path, const char *name,
             "XCURSOR_THEME=Adwaita",
             "LIBGL_ALWAYS_SOFTWARE=1",
             "EGL_PLATFORM=wayland",
-            "MESA_LOADER_DRIVER_OVERRIDE=softpipe",
-            "LIBGL_DRIVERS_PATH=/usr/lib/x86_64-linux-gnu/dri",
+            "MESA_LOADER_DRIVER_OVERRIDE=swrast",
+            "LIBGL_DRIVERS_PATH=/lib/dri",
             NULL
         };
         char **envp = envp_default;
@@ -4279,6 +4421,12 @@ static void launch_desktop_app_arg(const char *path, const char *name,
         if (is_webkit) {
             int accel = cmdline_flag_enabled("webkit_accel");
             int js = cmdline_int_value("webkit_js", 1) != 0;
+            if (accel && !virgl_available && is_minibrowser) {
+                fprintf(stderr,
+                        "wlcomp: WebKit acceleration requested, but virgl is "
+                        "unavailable; using the stable WebKit compositor path\n");
+                accel = 0;
+            }
             if (is_minibrowser) {
                 if (accel)
                     argv = js ? argv_minibrowser_accel_js :
@@ -6014,6 +6162,69 @@ static void format_ip4(char *buf, size_t bufsz, unsigned int ip)
              (ip >> 24) & 0xff);
 }
 
+static int write_resolv_conf_from_dns(unsigned int dns)
+{
+    char dns_buf[32];
+    char body[96];
+    int fd;
+    int len;
+
+    if (dns == 0)
+        return -1;
+
+    format_ip4(dns_buf, sizeof(dns_buf), dns);
+    len = snprintf(body, sizeof(body), "nameserver %s\n", dns_buf);
+    if (len <= 0 || (size_t)len >= sizeof(body))
+        return -1;
+
+    fd = open("/etc/resolv.conf", O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd < 0) {
+        fprintf(stderr,
+                "wlcomp: failed to open /etc/resolv.conf errno=%d (%s)\n",
+                errno, strerror(errno));
+        return -1;
+    }
+    if (write(fd, body, (size_t)len) != len) {
+        fprintf(stderr,
+                "wlcomp: failed to write /etc/resolv.conf errno=%d (%s)\n",
+                errno, strerror(errno));
+        close(fd);
+        return -1;
+    }
+    close(fd);
+    fprintf(stderr, "wlcomp: resolv.conf DNS %s\n", dns_buf);
+    return 0;
+}
+
+static int sync_resolv_conf_from_netconf(int wait_us)
+{
+    const int step_us = 250000;
+    int waited = 0;
+
+    while (waited <= wait_us) {
+        struct netconf_req req;
+        int fd = open("/dev/netconf", O_RDONLY | O_CLOEXEC);
+
+        if (fd >= 0) {
+            int n = read(fd, &req, sizeof(req));
+
+            close(fd);
+            if (n == (int)sizeof(req) && req.ip != 0 && req.dns != 0)
+                return write_resolv_conf_from_dns(req.dns);
+        }
+        if (waited >= wait_us)
+            break;
+        usleep(step_us);
+        waited += step_us;
+    }
+
+    fprintf(stderr,
+            "wlcomp: network DNS not ready after %d ms; keeping existing "
+            "/etc/resolv.conf\n",
+            wait_us / 1000);
+    return -1;
+}
+
 static const char *netconf_mode_name(int mode)
 {
     if (mode == NETCONF_MODE_DHCP)
@@ -6206,10 +6417,11 @@ static void draw_settings_content(uint32_t *fb, int fb_w, int fb_h, iwin_t *w)
     int by = cy0 + 170;
 
     static const struct { int w, h; } res_modes[] = {
-        {640,480}, {800,600}, {1024,768}, {1280,720}, {1280,1024}, {1920,1080},
+        {800,500}, {960,600}, {1024,640}, {1024,768},
+        {1280,720}, {1280,800}, {1280,1024}, {1920,1080},
     };
 
-    for (int i = 0; i < 6; i++) {
+    for (size_t i = 0; i < sizeof(res_modes) / sizeof(res_modes[0]); i++) {
         int bx = cx0 + 8 + (i % 3) * 140;
         int bby = by + (i / 3) * 32;
         uint32_t bg = 0xFF2A3040;
@@ -7042,9 +7254,10 @@ static int handle_iwin_click(int mx, int my)
         /* Resolution buttons start at row ~10 (y offset 170) */
         int by = cy0 + 170;
         static const struct { int w, h; } res_modes[] = {
-            {640,480}, {800,600}, {1024,768}, {1280,720}, {1280,1024}, {1920,1080},
+            {800,500}, {960,600}, {1024,640}, {1024,768},
+            {1280,720}, {1280,800}, {1280,1024}, {1920,1080},
         };
-        for (int i = 0; i < 6; i++) {
+        for (size_t i = 0; i < sizeof(res_modes) / sizeof(res_modes[0]); i++) {
             int bx = cx0 + 8 + (i % 3) * 140;
             int bby = by + (i / 3) * 32;
             if (mx >= bx && mx < bx + 130 && my >= bby && my < bby + 26) {
@@ -7054,7 +7267,8 @@ static int handle_iwin_click(int mx, int my)
                 vinfo.yres = (uint32_t)res_modes[i].h;
                 vinfo.bits_per_pixel = 32;
                 vinfo.pitch = 0;
-                if (ioctl(g_fb_fd, 0x4601 /* FBIOPUT_VSCREENINFO */, &vinfo) == 0) {
+                if (ioctl(g_fb_fd, FBIOPUT_VSCREENINFO, &vinfo) == 0 &&
+                    ioctl(g_fb_fd, FBIOGET_VSCREENINFO, &vinfo) == 0) {
                     g_fb_w = vinfo.xres;
                     g_fb_h = vinfo.yres;
                     g_fb_pitch = vinfo.pitch;
@@ -7381,10 +7595,13 @@ static void composite_and_flip(void)
     int fb_h = (int)g_fb_h;
     static uint32_t next_clock_damage_ms;
     static uint32_t next_repair_damage_ms;
+    static uint32_t startup_full_until_ms;
+    static uint32_t next_startup_full_ms;
     uint32_t now = get_time_ms();
     int repair_ms = damage_repair_interval_ms();
 
     damage_stats_maybe_log(now);
+    fps_probe_maybe_write(now);
 
     /* Lay out icons if not done */
     layout_icons(fb_w, fb_h);
@@ -7397,6 +7614,21 @@ static void composite_and_flip(void)
     if (repair_ms > 0 && now >= next_repair_damage_ms) {
         damage_full_reason(FULL_DAMAGE_REPAIR);
         next_repair_damage_ms = now + (uint32_t)repair_ms;
+    }
+
+    /*
+     * Hyper-V synthvid can come online a little after fb0 is registered and
+     * after wlcomp has already drawn its first desktop frame.  Keep issuing a
+     * few full-frame presents during startup so the firmware boot logo cannot
+     * survive behind tiny incremental updates.
+     */
+    if (startup_full_until_ms == 0) {
+        startup_full_until_ms = now + 3000;
+        next_startup_full_ms = now;
+    }
+    if (now <= startup_full_until_ms && now >= next_startup_full_ms) {
+        damage_full_reason(FULL_DAMAGE_INIT);
+        next_startup_full_ms = now + 250;
     }
 
     if (!damage_has_any()) {
@@ -7421,7 +7653,7 @@ static void composite_and_flip(void)
     }
     g_paint_clip_enabled = 0;
 
-    present_damage_rects(fb_w);
+    present_damage_rects(fb_w, now);
     if (acquire_blocked) {
         g_damage_stats.acquire_blocked_frames++;
         damage_full_reason(FULL_DAMAGE_ACQUIRE);
@@ -7934,6 +8166,84 @@ static int init_framebuffer(void)
     return 0;
 }
 
+static void configure_toplevel_after_mode_change(struct wlcomp_surface *surf)
+{
+    if (!surf || !surf->xdg_surface || !surf->xdg_toplevel)
+        return;
+
+    if (surf->maximized) {
+        struct wl_array states;
+        uint32_t *s;
+        int32_t max_h = (int32_t)g_fb_h - TASKBAR_H;
+
+        if (max_h < 1)
+            max_h = 1;
+        surf->x = 0;
+        surf->y = 0;
+        wl_array_init(&states);
+        s = wl_array_add(&states, sizeof(uint32_t));
+        if (s)
+            *s = XDG_TOPLEVEL_STATE_MAXIMIZED;
+        s = wl_array_add(&states, sizeof(uint32_t));
+        if (s)
+            *s = XDG_TOPLEVEL_STATE_ACTIVATED;
+        xdg_toplevel_send_configure(surf->xdg_toplevel,
+                                    (int32_t)g_fb_w, max_h, &states);
+        wl_array_release(&states);
+        xdg_surface_send_configure(surf->xdg_surface, ++g_serial);
+        return;
+    }
+
+    if (surf->x > (int32_t)g_fb_w - 60)
+        surf->x = (int32_t)g_fb_w - 60;
+    if (surf->x < -200)
+        surf->x = -200;
+    if (surf->y > (int32_t)g_fb_h - TASKBAR_H - 1)
+        surf->y = (int32_t)g_fb_h - TASKBAR_H - 1;
+    if (surf->y < 0)
+        surf->y = 0;
+}
+
+static void poll_framebuffer_mode(void)
+{
+    static uint32_t next_probe_ms;
+    uint32_t now = get_time_ms();
+    struct fb_var_screeninfo vinfo;
+    struct wlcomp_surface *surf;
+
+    if (g_fb_fd < 0 || now < next_probe_ms)
+        return;
+    next_probe_ms = now + 250;
+
+    if (ioctl(g_fb_fd, FBIOGET_VSCREENINFO, &vinfo) < 0)
+        return;
+    if (vinfo.xres == g_fb_w && vinfo.yres == g_fb_h &&
+        vinfo.pitch == g_fb_pitch)
+        return;
+
+    fprintf(stderr, "wlcomp: fb0 mode changed externally %ux%u pitch=%u -> %ux%u pitch=%u\n",
+            g_fb_w, g_fb_h, g_fb_pitch, vinfo.xres, vinfo.yres, vinfo.pitch);
+
+    release_framebuffer_backing();
+    g_fb_w = vinfo.xres;
+    g_fb_h = vinfo.yres;
+    g_fb_pitch = vinfo.pitch;
+    if (alloc_framebuffer_backing() < 0) {
+        fprintf(stderr, "wlcomp: framebuffer remap failed after mode change\n");
+        g_running = 0;
+        return;
+    }
+
+    if (g_cursor_x >= (int16_t)g_fb_w)
+        g_cursor_x = (int16_t)(g_fb_w ? g_fb_w - 1 : 0);
+    if (g_cursor_y >= (int16_t)g_fb_h)
+        g_cursor_y = (int16_t)(g_fb_h ? g_fb_h - 1 : 0);
+    g_icons_laid_out = 0;
+    wl_list_for_each(surf, &g_surfaces, link)
+        configure_toplevel_after_mode_change(surf);
+    damage_full_reason(FULL_DAMAGE_RESIZE);
+}
+
 static int init_input(void)
 {
     g_mouse_fd = open("/dev/mouse", O_RDONLY | O_NONBLOCK);
@@ -8010,8 +8320,6 @@ static int cmdline_int_value(const char *key, int fallback)
  *  Main
  * ══════════════════════════════════════════════════════════════════════ */
 
-static volatile int g_running = 1;
-
 static void sig_handler(int sig)
 {
     (void)sig;
@@ -8035,6 +8343,7 @@ int main(int argc, char **argv)
     if (init_framebuffer() < 0)
         return 1;
     init_input();
+    damage_full_reason(FULL_DAMAGE_INIT);
 
     /* Create Wayland display */
     g_display = wl_display_create();
@@ -8044,6 +8353,10 @@ int main(int argc, char **argv)
     }
     wl_display_set_default_max_buffer_size(g_display,
                                            WAYLAND_CLIENT_BUFFER_LIMIT);
+
+    int virgl_available = xv6_virgl_available();
+    int dmabuf_enabled = virgl_available ||
+        cmdline_flag_enabled("wayland_dmabuf");
 
     /* Register globals */
     g_compositor_global = wl_global_create(g_display, &wl_compositor_interface,
@@ -8064,9 +8377,15 @@ int main(int argc, char **argv)
     g_xv6_gpu_global = wl_global_create(g_display,
                                         &xv6_gpu_buffer_manager_interface,
                                         2, NULL, xv6_gpu_bind);
-    g_dmabuf_global = wl_global_create(g_display,
-                                       &zwp_linux_dmabuf_v1_interface,
-                                       4, NULL, dmabuf_bind);
+    if (dmabuf_enabled) {
+        g_dmabuf_global = wl_global_create(g_display,
+                                           &zwp_linux_dmabuf_v1_interface,
+                                           4, NULL, dmabuf_bind);
+        fprintf(stderr, "wlcomp: linux-dmabuf enabled (%s)\n",
+                virgl_available ? "virgl" : "cmdline");
+    } else {
+        fprintf(stderr, "wlcomp: linux-dmabuf disabled (no virgl)\n");
+    }
 
     /* Add socket */
     if (wl_display_add_socket(g_display, "wayland-0") < 0) {
@@ -8115,7 +8434,8 @@ int main(int argc, char **argv)
         wl_display_flush_clients(g_display);
         wl_event_loop_dispatch(loop, 0);
 
-        nready = epoll_wait(epfd, events, 8, 16);
+        nready = epoll_wait(epfd, events, 8,
+                            any_frame_callbacks_pending() ? 4 : 16);
         for (int i = 0; i < nready; i++) {
             if (events[i].data.fd == wl_fd)
                 wl_event_loop_dispatch(loop, 0);
@@ -8134,6 +8454,7 @@ int main(int argc, char **argv)
 
         /* Process terminal PTY output and auto-refresh monitors */
         process_terminals();
+        poll_framebuffer_mode();
 
         /* Clients may be launched by desktop, not wlcomp; clean their stale
          * Wayland resources once their owner process has gone away. */

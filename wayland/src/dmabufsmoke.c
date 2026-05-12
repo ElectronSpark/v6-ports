@@ -138,15 +138,18 @@ static int create_dmabuf_buffer(struct app *app)
     struct gbm_bo *bo = NULL;
     struct zwp_linux_buffer_params_v1 *params = NULL;
     void *map = NULL;
+    void *map_data = NULL;
     int gpu_fd = -1;
     int bo_fd = -1;
     uint32_t stride;
     uint32_t width = 240;
     uint32_t height = 160;
 
-    gpu_fd = open("/dev/gpu0", O_RDWR);
+    gpu_fd = open("/dev/dri/renderD128", O_RDWR | O_CLOEXEC);
     if (gpu_fd < 0)
-        gpu_fd = open("/dev/fb0", O_RDWR);
+        gpu_fd = open("/dev/gpu0", O_RDWR | O_CLOEXEC);
+    if (gpu_fd < 0)
+        gpu_fd = open("/dev/fb0", O_RDWR | O_CLOEXEC);
     if (gpu_fd < 0) {
         perror("dmabufsmoke: open gpu");
         return -1;
@@ -167,14 +170,15 @@ static int create_dmabuf_buffer(struct app *app)
 
     stride = gbm_bo_get_stride(bo);
     map = gbm_bo_map(bo, 0, 0, width, height, GBM_BO_TRANSFER_WRITE,
-                     &stride, NULL);
+                     &stride, &map_data);
     if (!map) {
         perror("dmabufsmoke: gbm_bo_map");
         goto fail;
     }
     fill_pattern(map, width, height, stride);
-    gbm_bo_unmap(bo, map);
+    gbm_bo_unmap(bo, map_data);
     map = NULL;
+    map_data = NULL;
 
     bo_fd = gbm_bo_get_fd(bo);
     if (bo_fd < 0) {
@@ -209,6 +213,8 @@ fail:
         close(bo_fd);
     if (params)
         zwp_linux_buffer_params_v1_destroy(params);
+    if (map_data)
+        gbm_bo_unmap(bo, map_data);
     if (bo)
         gbm_bo_destroy(bo);
     if (gbm)
@@ -222,6 +228,9 @@ int main(void)
 {
     struct app app;
     int frames = 0;
+
+    setenv("XDG_RUNTIME_DIR", "/tmp", 0);
+    setenv("WAYLAND_DISPLAY", "wayland-0", 0);
 
     memset(&app, 0, sizeof(app));
     app.running = 1;

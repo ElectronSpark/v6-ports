@@ -28,11 +28,16 @@
 #define SOCKET_WAIT_TRIES    200      /* 200 × 20 ms = 4 s */
 #define SOCKET_WAIT_US       20000
 #define WEBKIT_NET_WAIT_US   35000000 /* DHCP fallback/network daemons need ~30s */
+#define WEBKIT_GST_WAIT_US   60000000
 #define WEBKIT_DEFAULT_URL   "https://www.google.com/search?q=xv6&gbv=1"
 #define WEBKIT_URL_MAX       768
 #define XV6_DRM_RENDER_NODE  "/dev/dri/renderD128"
+#define FB_GPU_BACKEND_QUERY 0x462C
+#define FB_GPU_BACKEND_HYPERV_DXG 2
+#define FB_GPU_BACKEND_F_DXG_TRANSPORT 0x0008
 #define DRM_IOCTL_VIRTGPU_GETPARAM 0xc0106443UL
 #define VIRTGPU_PARAM_3D_FEATURES  1
+#define NETCONF_HOSTNAME_MAX 32
 
 static const char *webkit_feature_flags =
     "--features=+OffscreenCanvas,+OffscreenCanvasInWorkers,+requestIdleCallback";
@@ -47,10 +52,39 @@ struct drm_virtgpu_getparam_compat {
     uint64_t value;
 };
 
+struct fb_gpu_backend_info_compat {
+    uint32_t backend;
+    uint32_t flags;
+    uint32_t capset_id;
+    uint32_t capset_version;
+    uint32_t capset_size;
+    uint32_t dxg_global_open;
+    uint32_t dxg_vgpu_open;
+    uint32_t dxg_d3dkmt;
+    uint32_t dxg_global_status;
+    uint32_t dxg_vgpu_status;
+    uint32_t dxg_global_rx;
+    uint32_t dxg_vgpu_rx;
+    char name[32];
+    char renderer[64];
+};
+
+struct netconf_req_compat {
+    int mode;
+    uint32_t ip;
+    uint32_t netmask;
+    uint32_t gateway;
+    uint32_t dns;
+    char hostname[NETCONF_HOSTNAME_MAX];
+};
+
 static volatile sig_atomic_t g_running = 1;
 static pid_t wlcomp_pid;
 static pid_t client_pid;
 static pid_t httpd_pid;
+static pid_t gst_warmup_pid;
+static int gst_registry_ready;
+static int http_smoke_request_count;
 
 static int webkit_accel_enabled_by_cmdline(void);
 static int webkit_gpu_smoke_enabled_by_cmdline(void);
@@ -62,15 +96,26 @@ static int webkit_js_smoke_enabled_by_cmdline(void);
 static int webkit_youtube_boot_smoke_enabled_by_cmdline(void);
 static int webkit_youtube_waterfall_smoke_enabled_by_cmdline(void);
 static int webkit_youtube_compat_disabled_by_cmdline(void);
+static int webkit_logging_enabled_by_cmdline(void);
 static int webkit_request_idle_disabled_by_cmdline(void);
 static int webkit_feature_gate_smoke_enabled_by_cmdline(void);
 static int webkit_idle_browse_smoke_enabled_by_cmdline(void);
 static int webkit_compat_gate_smoke_enabled_by_cmdline(void);
 static int webkit_js_disabled_by_cmdline(void);
+static int webkit_disable_gdk_gl_by_cmdline(void);
+static int webkit_dmabuf_enabled_by_cmdline(void);
 static int webkit_reopen_count_from_cmdline(void);
 static int webkit_timeout_ms_from_cmdline(int fallback);
 static int desktop_disabled_by_cmdline(void);
+static int cmdline_int_value(const char *cmdline, const char *key,
+                             int fallback);
 static int read_cmdline(char *buf, size_t buf_size);
+static int write_all_fd(int fd, const void *buf, size_t len);
+static const char *http_content_type_for_path(const char *path);
+static int http_try_serve_webkit_file(int cfd, const char *path,
+                                      const char *extra);
+static void http_smoke_self_probe(const char *path);
+static void webkit_print_runtime_probe(void);
 
 static int xv6_virgl_available(void)
 {
@@ -85,6 +130,32 @@ static int xv6_virgl_available(void)
     if (fd < 0)
         return 0;
     ok = ioctl(fd, DRM_IOCTL_VIRTGPU_GETPARAM, &req) == 0 && value != 0;
+    close(fd);
+    return ok;
+}
+
+static int xv6_render_node_available(void)
+{
+    int fd = open(XV6_DRM_RENDER_NODE, O_RDWR | O_CLOEXEC);
+
+    if (fd < 0)
+        return 0;
+    close(fd);
+    return 1;
+}
+
+static int xv6_dxg_transport_available(void)
+{
+    struct fb_gpu_backend_info_compat info;
+    int fd = open(XV6_DRM_RENDER_NODE, O_RDWR | O_CLOEXEC);
+    int ok;
+
+    if (fd < 0)
+        return 0;
+    memset(&info, 0, sizeof(info));
+    ok = ioctl(fd, FB_GPU_BACKEND_QUERY, &info) == 0 &&
+         info.backend == FB_GPU_BACKEND_HYPERV_DXG &&
+         (info.flags & FB_GPU_BACKEND_F_DXG_TRANSPORT) != 0;
     close(fd);
     return ok;
 }
@@ -124,8 +195,93 @@ static int wait_for_socket(void)
 
 static int url_needs_network_wait(const char *url)
 {
-    (void)url;
+    const char *host;
+
+    if (!url)
+        return 0;
+    if (strncmp(url, "http://", 7) == 0)
+        host = url + 7;
+    else if (strncmp(url, "https://", 8) == 0)
+        host = url + 8;
+    else
+        return 0;
+
+    return strncmp(host, "localhost", 9) != 0 &&
+           strncmp(host, "127.", 4) != 0 &&
+           strncmp(host, "0.0.0.0", 7) != 0 &&
+           strncmp(host, "[::1]", 5) != 0;
+}
+
+static void ipv4_to_string(uint32_t addr, char *buf, size_t buf_size)
+{
+    snprintf(buf, buf_size, "%u.%u.%u.%u",
+             (unsigned)((addr >> 0) & 0xff),
+             (unsigned)((addr >> 8) & 0xff),
+             (unsigned)((addr >> 16) & 0xff),
+             (unsigned)((addr >> 24) & 0xff));
+}
+
+static int write_resolv_conf(uint32_t dns)
+{
+    char dns_buf[32];
+    char body[96];
+    int fd;
+    int len;
+
+    if (dns == 0)
+        return -1;
+
+    ipv4_to_string(dns, dns_buf, sizeof(dns_buf));
+    len = snprintf(body, sizeof(body), "nameserver %s\n", dns_buf);
+    if (len <= 0 || (size_t)len >= sizeof(body))
+        return -1;
+
+    fd = open("/etc/resolv.conf", O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd < 0) {
+        fprintf(stderr,
+                "[desktop] failed to open /etc/resolv.conf errno=%d (%s)\n",
+                errno, strerror(errno));
+        return -1;
+    }
+    if (write(fd, body, (size_t)len) != len) {
+        fprintf(stderr,
+                "[desktop] failed to write /etc/resolv.conf errno=%d (%s)\n",
+                errno, strerror(errno));
+        close(fd);
+        return -1;
+    }
+    close(fd);
+    fprintf(stderr, "[desktop] resolv.conf DNS %s\n", dns_buf);
     return 0;
+}
+
+static int sync_resolv_conf_from_netconf(int wait_us)
+{
+    const int step_us = 250000;
+    int waited = 0;
+
+    while (waited <= wait_us) {
+        struct netconf_req_compat req;
+        int fd = open("/dev/netconf", O_RDONLY | O_CLOEXEC);
+
+        if (fd >= 0) {
+            int n = read(fd, &req, sizeof(req));
+
+            close(fd);
+            if (n == (int)sizeof(req) && req.ip != 0 && req.dns != 0)
+                return write_resolv_conf(req.dns);
+        }
+        if (waited >= wait_us)
+            break;
+        usleep(step_us);
+        waited += step_us;
+    }
+
+    fprintf(stderr,
+            "[desktop] network DNS not ready after %d ms; keeping existing "
+            "/etc/resolv.conf\n",
+            wait_us / 1000);
+    return -1;
 }
 
 static int webkit_youtube_compat_url(const char *url)
@@ -141,7 +297,35 @@ static pid_t launch_wlcomp(void)
 {
     char cmdline_buf[512] = "";
     char cmdline_env[sizeof("XV6_KERNEL_CMDLINE=") + sizeof(cmdline_buf)];
+    char fb_bo_env[] = "XV6_WLCOMP_FB_BO=1";
+    char fb_direct_env[] = "XV6_WLCOMP_FB_DIRECT=1";
     int have_cmdline = read_cmdline(cmdline_buf, sizeof(cmdline_buf)) == 0;
+    int virgl_available = xv6_virgl_available();
+    /*
+     * When no virgl render node is present (e.g. Hyper-V firmware FB), but a
+     * kernel /dev/fb0 exists, the kernel BO/direct-scanout fast paths still
+     * apply: fb_virt is PA2VA cached RAM and a single memcpy/either_copyin
+     * per row beats the generic Wayland SHM blit by ~4x. Default both knobs
+     * on whenever we can open the FB cdev, regardless of virgl. The cmdline
+     * still wins.
+     */
+    int fb_cdev_available = 0;
+    {
+        int fbfd = open("/dev/fb0", O_RDWR | O_CLOEXEC);
+        if (fbfd >= 0) {
+            fb_cdev_available = 1;
+            close(fbfd);
+        }
+    }
+    int fast_default = virgl_available || fb_cdev_available;
+    int use_fb_direct = have_cmdline ?
+        cmdline_int_value(cmdline_buf, "wlcomp_fb_direct",
+                          fast_default) :
+        fast_default;
+    int use_fb_bo = have_cmdline ?
+        cmdline_int_value(cmdline_buf, "wlcomp_fb_bo",
+                          fast_default) :
+        fast_default;
     pid_t pid = fork();
     if (pid == 0) {
         char *argv[] = { "wlcomp", NULL };
@@ -150,8 +334,8 @@ static pid_t launch_wlcomp(void)
             "PATH=/bin:/usr/bin",
             "XDG_RUNTIME_DIR=/tmp",
             "XV6_GUI_SESSION=1",
-            "XV6_WLCOMP_FB_DIRECT=1",
-            "XV6_WLCOMP_FB_BO=1",
+            fb_direct_env,
+            fb_bo_env,
             NULL
         };
         char *envp_cmdline[] = {
@@ -159,11 +343,15 @@ static pid_t launch_wlcomp(void)
             "PATH=/bin:/usr/bin",
             "XDG_RUNTIME_DIR=/tmp",
             "XV6_GUI_SESSION=1",
-            "XV6_WLCOMP_FB_DIRECT=1",
-            "XV6_WLCOMP_FB_BO=1",
+            fb_direct_env,
+            fb_bo_env,
             cmdline_env,
             NULL
         };
+        snprintf(fb_direct_env, sizeof(fb_direct_env),
+                 "XV6_WLCOMP_FB_DIRECT=%d", use_fb_direct ? 1 : 0);
+        snprintf(fb_bo_env, sizeof(fb_bo_env), "XV6_WLCOMP_FB_BO=%d",
+                 use_fb_bo ? 1 : 0);
         if (have_cmdline)
             snprintf(cmdline_env, sizeof(cmdline_env), "XV6_KERNEL_CMDLINE=%s",
                      cmdline_buf);
@@ -199,11 +387,34 @@ static void run_http_smoke_server(void)
         "setTimeout(function(){hit('timeout');},20);"
         "requestAnimationFrame(function(){hit('raf');});"
         "requestIdleCallback(function(){hit('idle');},{timeout:1000});"
-        "fetch('/json').then(function(r){return r.json();}).then(function(j){if(j.ok)hit('fetch');}).catch(function(e){console.error('XV6-JS-SMOKE fetch '+e);});"
-        "fetch('/stream').then(function(r){if(!r.body||typeof r.body.getReader!=='function')throw new Error('missing body reader');var rd=r.body.getReader();var total=0;function pump(){return rd.read().then(function(x){if(x.done){if(total>0)hit('fetch-stream');else throw new Error('empty stream');return;}total+=x.value?x.value.byteLength:0;return pump();});}return pump();}).catch(function(e){console.error('XV6-JS-SMOKE fetch-stream '+e);});"
-        "var x=new XMLHttpRequest();x.onload=function(){if(x.responseText==='ok')hit('xhr');};x.onerror=function(){console.error('XV6-JS-SMOKE xhr error');};x.open('GET','/xhr');x.send();"
+        "mark('fetch-start');fetch('/json').then(function(r){mark('fetch-response');return r.json();}).then(function(j){if(j.ok)hit('fetch');else mark('fetch-bad-json');}).catch(function(e){mark('fetch-error');console.error('XV6-JS-SMOKE fetch '+e);});"
+        "mark('stream-start');fetch('/stream').then(function(r){mark('stream-response');if(!r.body||typeof r.body.getReader!=='function')throw new Error('missing body reader');var rd=r.body.getReader();var total=0;function pump(){return rd.read().then(function(x){if(x.done){if(total>0)hit('fetch-stream');else throw new Error('empty stream');return;}total+=x.value?x.value.byteLength:0;mark('stream-chunk');return pump();});}return pump();}).catch(function(e){mark('stream-error');console.error('XV6-JS-SMOKE fetch-stream '+e);});"
+        "mark('xhr-start');var x=new XMLHttpRequest();x.onload=function(){mark('xhr-load');if(x.responseText==='ok')hit('xhr');else mark('xhr-bad');};x.onerror=function(){mark('xhr-error');console.error('XV6-JS-SMOKE xhr error');};x.open('GET','/xhr');x.send();"
         "</script><script src=/after.js></script>";
     static const char after_js[] = "hit('external');\n";
+    static const char simple_inline_body[] =
+        "<!doctype html><title>xv6-simple:boot</title>"
+        "<script>document.title='xv6-simple:PASS';console.log('XV6-SIMPLE PASS');</script>";
+    static const char media_init_body[] =
+        "<!doctype html><meta charset=utf-8>"
+        "<title>xv6-media-init:boot</title><pre id=out>boot</pre>"
+        "<script>"
+        "(function(){var out=document.getElementById('out'),steps=[];"
+        "function mark(s){steps.push(s);document.title='xv6-media-init:'+steps.join(',');"
+        "out.textContent=steps.join('\\n');console.log('XV6-MEDIA-INIT '+steps.join(','));}"
+        "function safe(s,f){mark('before-'+s);try{mark('after-'+s+':'+f());}"
+        "catch(e){mark('throw-'+s+':'+e.name+':'+e.message);}}"
+        "mark('script');"
+        "safe('create-video',function(){return typeof document.createElement('video');});"
+        "safe('create-audio',function(){return typeof document.createElement('audio');});"
+        "var video=document.createElement('video');"
+        "safe('canplay-mp4',function(){return video.canPlayType('video/mp4');});"
+        "safe('canplay-avc',function(){return video.canPlayType('video/mp4; codecs=\"avc1.42E01E, mp4a.40.2\"');});"
+        "safe('mediasource-type',function(){return typeof window.MediaSource;});"
+        "safe('mse-mp4',function(){return window.MediaSource&&MediaSource.isTypeSupported?String(MediaSource.isTypeSupported('video/mp4; codecs=\"avc1.42E01E, mp4a.40.2\"')):'missing';});"
+        "safe('attach-src',function(){video.muted=true;video.playsInline=true;video.src='test-mse.mp4';return video.readyState+'/'+video.networkState;});"
+        "setTimeout(function(){mark('timeout:'+video.readyState+'/'+video.networkState+':err='+(video.error?video.error.code:0));},500);"
+        "})();</script>";
     static const char ytboot_body[] =
         "<!doctype html><meta charset=utf-8>"
         "<title>xv6-ytboot:boot</title><h1 id=out>boot</h1>"
@@ -369,17 +580,28 @@ static void run_http_smoke_server(void)
     int one = 1;
     struct sockaddr_in addr;
 
-    if (fd < 0)
+    if (fd < 0) {
+        fprintf(stderr, "[desktop] HTTP smoke socket failed errno=%d (%s)\n",
+                errno, strerror(errno));
         _exit(1);
+    }
 
     setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
     memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
     addr.sin_port = htons(18080);
     addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0 ||
-        listen(fd, 4) < 0)
+    if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+        fprintf(stderr, "[desktop] HTTP smoke bind failed errno=%d (%s)\n",
+                errno, strerror(errno));
         _exit(1);
+    }
+    if (listen(fd, 4) < 0) {
+        fprintf(stderr, "[desktop] HTTP smoke listen failed errno=%d (%s)\n",
+                errno, strerror(errno));
+        _exit(1);
+    }
+    fprintf(stderr, "[desktop] HTTP smoke listening on 127.0.0.1:18080\n");
 
     for (;;) {
         char req[2048];
@@ -392,7 +614,23 @@ static void run_http_smoke_server(void)
         if (cfd < 0) {
             if (errno == EINTR)
                 continue;
+            fprintf(stderr, "[desktop] HTTP smoke accept failed errno=%d (%s)\n",
+                    errno, strerror(errno));
             break;
+        }
+        http_smoke_request_count++;
+        {
+            char count_buf[32];
+            int count_fd = open("/tmp/http-smoke-count",
+                                O_WRONLY | O_CREAT | O_TRUNC, 0644);
+
+            if (count_fd >= 0) {
+                int count_len = snprintf(count_buf, sizeof(count_buf), "%d\n",
+                                         http_smoke_request_count);
+                if (count_len > 0)
+                    write(count_fd, count_buf, (size_t)count_len);
+                close(count_fd);
+            }
         }
         while (used + 1 < sizeof(req)) {
             int n = read(cfd, req + used, sizeof(req) - used - 1);
@@ -441,6 +679,21 @@ static void run_http_smoke_server(void)
             char *end = strchr(path, ' ');
             if (end)
                 *end = '\0';
+            char *query = strchr(path, '?');
+            if (query)
+                *query = '\0';
+        }
+        fprintf(stderr, "[desktop] HTTP smoke request %s\n", path);
+        if (http_try_serve_webkit_file(cfd, path, extra)) {
+            close(cfd);
+            continue;
+        }
+        if (strcmp(path, "/simple-inline.html") == 0) {
+            body = simple_inline_body;
+            ctype = "text/html";
+        } else if (strcmp(path, "/media-init-inline.html") == 0) {
+            body = media_init_body;
+            ctype = "text/html";
         }
         if (ytboot_smoke && strcmp(path, "/large.js") == 0) {
             static const char pad[] =
@@ -456,17 +709,23 @@ static void run_http_smoke_server(void)
                      "%s"
                      "Connection: close\r\n\r\n",
                      content_length, extra);
-            write(cfd, header, strlen(header));
-            write(cfd, large_js_prefix, strlen(large_js_prefix));
+            if (write_all_fd(cfd, header, strlen(header)) != 0 ||
+                write_all_fd(cfd, large_js_prefix,
+                             strlen(large_js_prefix)) != 0) {
+                close(cfd);
+                continue;
+            }
             for (unsigned sent = 0; sent < pad_bytes; ) {
                 unsigned n = sizeof(pad) - 1;
 
                 if (n > pad_bytes - sent)
                     n = pad_bytes - sent;
-                write(cfd, pad, n);
+                if (write_all_fd(cfd, pad, n) != 0)
+                    break;
                 sent += n;
             }
-            write(cfd, large_js_suffix, strlen(large_js_suffix));
+            (void)write_all_fd(cfd, large_js_suffix,
+                               strlen(large_js_suffix));
             close(cfd);
             continue;
         }
@@ -556,12 +815,119 @@ static void run_http_smoke_server(void)
                  "%s"
                  "Connection: close\r\n\r\n",
                  ctype, (unsigned)strlen(body), extra);
-        write(cfd, header, strlen(header));
-        write(cfd, body, strlen(body));
+        (void)write_all_fd(cfd, header, strlen(header));
+        (void)write_all_fd(cfd, body, strlen(body));
         close(cfd);
     }
     close(fd);
     _exit(0);
+}
+
+static int write_all_fd(int fd, const void *buf, size_t len)
+{
+    const char *p = buf;
+
+    while (len > 0) {
+        ssize_t n = write(fd, p, len);
+
+        if (n < 0) {
+            if (errno == EINTR)
+                continue;
+            return -1;
+        }
+        if (n == 0) {
+            errno = EIO;
+            return -1;
+        }
+        p += n;
+        len -= (size_t)n;
+    }
+    return 0;
+}
+
+static const char *http_content_type_for_path(const char *path)
+{
+    const char *ext = strrchr(path, '.');
+
+    if (!ext)
+        return "application/octet-stream";
+    if (strcmp(ext, ".html") == 0)
+        return "text/html";
+    if (strcmp(ext, ".js") == 0)
+        return "text/javascript";
+    if (strcmp(ext, ".json") == 0)
+        return "application/json";
+    if (strcmp(ext, ".mp4") == 0)
+        return "video/mp4";
+    if (strcmp(ext, ".webm") == 0)
+        return "video/webm";
+    if (strcmp(ext, ".jpg") == 0 || strcmp(ext, ".jpeg") == 0)
+        return "image/jpeg";
+    if (strcmp(ext, ".png") == 0)
+        return "image/png";
+    if (strcmp(ext, ".css") == 0)
+        return "text/css";
+    return "application/octet-stream";
+}
+
+static int http_try_serve_webkit_file(int cfd, const char *path,
+                                      const char *extra)
+{
+    char fs_path[256];
+    char header[384];
+    char buf[8192];
+    struct stat st;
+    int fd;
+
+    if (!path || path[0] != '/' || strcmp(path, "/") == 0 ||
+        strstr(path, "..") != NULL)
+        return 0;
+    if (snprintf(fs_path, sizeof(fs_path), "/share/webkit%s", path) >=
+        (int)sizeof(fs_path))
+        return 0;
+    fd = open(fs_path, O_RDONLY);
+    if (fd < 0)
+        return 0;
+    if (fstat(fd, &st) < 0 || !S_ISREG(st.st_mode)) {
+        close(fd);
+        return 0;
+    }
+
+    snprintf(header, sizeof(header),
+             "HTTP/1.1 200 OK\r\n"
+             "Content-Type: %s\r\n"
+             "Content-Length: %u\r\n"
+             "%s"
+             "Connection: close\r\n\r\n",
+             http_content_type_for_path(fs_path), (unsigned)st.st_size, extra);
+    if (write_all_fd(cfd, header, strlen(header)) < 0) {
+        fprintf(stderr, "[desktop] HTTP file header write failed %s errno=%d (%s)\n",
+                path, errno, strerror(errno));
+        close(fd);
+        return 1;
+    }
+    for (;;) {
+        ssize_t n = read(fd, buf, sizeof(buf));
+
+        if (n < 0) {
+            if (errno == EINTR)
+                continue;
+            fprintf(stderr, "[desktop] HTTP file read failed %s errno=%d (%s)\n",
+                    path, errno, strerror(errno));
+            break;
+        }
+        if (n == 0)
+            break;
+        if (write_all_fd(cfd, buf, (size_t)n) < 0) {
+            fprintf(stderr, "[desktop] HTTP file body write failed %s errno=%d (%s)\n",
+                    path, errno, strerror(errno));
+            break;
+        }
+    }
+    close(fd);
+    fprintf(stderr, "[desktop] HTTP file served %s bytes=%u\n",
+            path, (unsigned)st.st_size);
+    return 1;
 }
 
 static pid_t launch_http_smoke_server(void)
@@ -571,6 +937,230 @@ static pid_t launch_http_smoke_server(void)
     if (pid == 0)
         run_http_smoke_server();
     return pid;
+}
+
+static void http_smoke_self_probe(const char *path)
+{
+    char req[512];
+    char buf[128];
+    struct sockaddr_in addr;
+    int fd;
+    ssize_t n;
+
+    if (!path || path[0] != '/')
+        path = "/";
+    fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) {
+        fprintf(stderr, "[desktop] HTTP smoke self-probe socket failed errno=%d (%s)\n",
+                errno, strerror(errno));
+        return;
+    }
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(18080);
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+        fprintf(stderr, "[desktop] HTTP smoke self-probe connect failed errno=%d (%s)\n",
+                errno, strerror(errno));
+        close(fd);
+        return;
+    }
+    snprintf(req, sizeof(req),
+             "GET %s HTTP/1.0\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
+             path);
+    if (write_all_fd(fd, req, strlen(req)) < 0) {
+        fprintf(stderr, "[desktop] HTTP smoke self-probe write failed errno=%d (%s)\n",
+                errno, strerror(errno));
+        close(fd);
+        return;
+    }
+    n = read(fd, buf, sizeof(buf) - 1);
+    if (n > 0) {
+        buf[n] = '\0';
+        fprintf(stderr, "[desktop] HTTP smoke self-probe response %.64s\n",
+                buf);
+    } else {
+        fprintf(stderr, "[desktop] HTTP smoke self-probe read failed n=%zd errno=%d (%s)\n",
+                n, errno, strerror(errno));
+    }
+    close(fd);
+}
+
+static void webkit_read_line(const char *path, char *buf, size_t buf_size)
+{
+    int fd;
+    ssize_t n;
+
+    if (buf_size == 0)
+        return;
+    buf[0] = '\0';
+    fd = open(path, O_RDONLY);
+    if (fd < 0)
+        return;
+    n = read(fd, buf, buf_size - 1);
+    close(fd);
+    if (n <= 0)
+        return;
+    buf[n] = '\0';
+    for (ssize_t i = 0; i < n; i++) {
+        if (buf[i] == '\n' || buf[i] == '\r') {
+            buf[i] = '\0';
+            break;
+        }
+    }
+}
+
+static void webkit_print_runtime_probe(void)
+{
+    char title[128];
+    char count[32];
+    struct stat log_st;
+    long log_size = -1;
+    static long last_log_size = -2;
+    static int stable_log_samples;
+    static int excerpt_printed;
+
+    webkit_read_line("/tmp/webkit-title", title, sizeof(title));
+    webkit_read_line("/tmp/http-smoke-count", count, sizeof(count));
+    if (stat("/tmp/webkit_log.txt", &log_st) == 0)
+        log_size = (long)log_st.st_size;
+    fprintf(stderr,
+            "[desktop] WebKit probe title='%s' http_requests=%s log_bytes=%ld\n",
+            title[0] ? title : "(none)",
+            count[0] ? count : "(none)",
+            log_size);
+    if (log_size >= 0 && log_size == last_log_size)
+        stable_log_samples++;
+    else {
+        stable_log_samples = 0;
+        excerpt_printed = 0;
+    }
+    last_log_size = log_size;
+
+    if (!excerpt_printed && stable_log_samples >= 2 && log_size > 0) {
+        int fd = open("/tmp/webkit_log.txt", O_RDONLY);
+        if (fd >= 0) {
+            char buf[2049];
+            ssize_t n;
+            off_t off = log_size > 2048 ? (off_t)log_size - 2048 : 0;
+
+            lseek(fd, off, SEEK_SET);
+            n = read(fd, buf, sizeof(buf) - 1);
+            close(fd);
+            if (n > 0) {
+                buf[n] = '\0';
+                fprintf(stderr,
+                        "[desktop] WebKit stalled log tail (%ld bytes):\n%s\n",
+                        log_size, buf);
+                excerpt_printed = 1;
+            }
+        }
+    }
+}
+
+static pid_t launch_gst_registry_warmup(void)
+{
+    pid_t pid = fork();
+
+    if (pid == 0) {
+        char *argv[] = {
+            "gst-inspect-1.0",
+            "--gst-disable-registry-fork",
+            "coreelements",
+            "typefindfunctions",
+            "playback",
+            "isomp4",
+            "matroska",
+            "libav",
+            "vpx",
+            "opus",
+            "ogg",
+            "videoconvertscale",
+            "audioconvert",
+            NULL,
+        };
+        char *envp[] = {
+            "HOME=/",
+            "PATH=/bin:/usr/bin",
+            "LD_LIBRARY_PATH=/lib:/usr/lib:/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu",
+            "XDG_RUNTIME_DIR=/tmp",
+            "XDG_CACHE_HOME=/tmp/.cache",
+            "XDG_DATA_DIRS=/share:/usr/share",
+            "GST_PLUGIN_SYSTEM_PATH_1_0=/lib/gstreamer-1.0:/usr/lib/gstreamer-1.0",
+            "GST_PLUGIN_PATH_1_0=/lib/gstreamer-1.0:/usr/lib/gstreamer-1.0",
+            "GST_PLUGIN_SCANNER=/libexec/gstreamer-1.0/gst-plugin-scanner",
+            "GST_PLUGIN_SCANNER_1_0=/libexec/gstreamer-1.0/gst-plugin-scanner",
+            "GST_REGISTRY=/tmp/gstreamer-registry.bin",
+            "GST_REGISTRY_REUSE_PLUGIN_SCANNER=1",
+            NULL
+        };
+        int logfd;
+        int nullfd;
+
+        disable_child_coredumps();
+        mkdir("/tmp/.cache", 0755);
+        mkdir("/tmp/.cache/gstreamer-1.0", 0755);
+        nullfd = open("/dev/null", O_WRONLY);
+        if (nullfd >= 0) {
+            dup2(nullfd, 1);
+            close(nullfd);
+        }
+        logfd = open("/tmp/gst-warmup.log",
+                     O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        if (logfd >= 0) {
+            dup2(logfd, 2);
+            close(logfd);
+        }
+        execve("/bin/gst-inspect-1.0", argv, envp);
+        fprintf(stderr, "gst-inspect-1.0: execve failed errno=%d (%s)\n",
+                errno, errno ? strerror(errno) : "no errno from kernel");
+        _exit(127);
+    }
+    if (pid > 0)
+        setpgid(pid, pid);
+    return pid;
+}
+
+static void wait_for_gst_registry_warmup(int wait_us)
+{
+    const int step_us = 100000;
+    int waited = 0;
+
+    if (gst_warmup_pid <= 0)
+        return;
+
+    while (waited <= wait_us) {
+        int status;
+        pid_t exited = waitpid(gst_warmup_pid, &status, WNOHANG);
+
+        if (exited == gst_warmup_pid) {
+            if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
+                gst_registry_ready = 1;
+                fprintf(stderr,
+                        "[desktop] GStreamer registry warmup complete\n");
+            } else {
+                fprintf(stderr,
+                        "[desktop] GStreamer registry warmup exited "
+                        "(status %d)\n",
+                        WIFEXITED(status) ? WEXITSTATUS(status) : status);
+            }
+            gst_warmup_pid = 0;
+            return;
+        }
+        if (exited < 0 && errno == ECHILD) {
+            gst_warmup_pid = 0;
+            return;
+        }
+        if (waited >= wait_us)
+            break;
+        usleep(step_us);
+        waited += step_us;
+    }
+
+    fprintf(stderr,
+            "[desktop] GStreamer registry warmup still running after %d ms; "
+            "continuing WebKit launch\n",
+            wait_us / 1000);
 }
 
 static pid_t launch_client(const char *path, const char *name, const char *arg1,
@@ -599,9 +1189,20 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
         if (is_webkit)
             disable_child_coredumps();
 
-        if (is_netsurf) {
-            int logfd = open("/tmp/app_log.txt",
-                             O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        if (is_netsurf || is_webkit) {
+            const char *log_path = "/tmp/app_log.txt";
+            int log_flags = O_WRONLY | O_CREAT | O_TRUNC;
+
+            if (is_webkit) {
+                if (webkit_logging_enabled_by_cmdline()) {
+                    log_path = "/tmp/webkit_log.txt";
+                } else {
+                    log_path = "/dev/null";
+                    log_flags = O_WRONLY;
+                }
+            }
+
+            int logfd = open(log_path, log_flags, 0644);
             if (logfd >= 0) {
                 dup2(logfd, 1);
                 dup2(logfd, 2);
@@ -635,17 +1236,23 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             argv_default[2] = NULL;
         if (arg3 == NULL)
             argv_default[3] = NULL;
-        const char *minibrowser_url = arg1 ? arg1 : "https://www.google.com/";
+        const char *minibrowser_url = arg1 ? arg1 : WEBKIT_DEFAULT_URL;
         int minibrowser_youtube_compat =
             is_minibrowser && webkit_youtube_compat_url(minibrowser_url);
         const char *minibrowser_feature_flags =
             webkit_request_idle_disabled_by_cmdline() ?
             webkit_feature_flags_no_idle : webkit_feature_flags;
+        char *gst_registry_update_env = "GST_REGISTRY_UPDATE=yes";
+        char *webkit_uri_log_env =
+            webkit_logging_enabled_by_cmdline() ? "XV6_WEBKIT_URI_LOG=1" :
+                                                  "XV6_WEBKIT_URI_LOG=0";
+        char *webkit_gdk_gl_env =
+            webkit_disable_gdk_gl_by_cmdline() ? "GDK_GL=disable" :
+                                                 "GDK_GL=gles";
         char *argv_minibrowser[] = {
             (char *)name,
             "--autoplay-policy=allow",
             "--private",
-            "--enable-javascript=false",
             "--enable-sandbox=false",
             "--enable-webgl=false",
             "--enable-webaudio=true",
@@ -663,7 +1270,6 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             "--autoplay-policy=allow",
             "--private",
             (char *)webkit_youtube_compat_user_agent,
-            "--enable-javascript=false",
             "--enable-sandbox=false",
             "--enable-webgl=false",
             "--enable-webaudio=true",
@@ -713,7 +1319,6 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             (char *)name,
             "--autoplay-policy=allow",
             "--private",
-            "--enable-javascript=false",
             "--enable-sandbox=false",
             "--enable-webgl=false",
             "--enable-webaudio=true",
@@ -731,7 +1336,6 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             "--autoplay-policy=allow",
             "--private",
             (char *)webkit_youtube_compat_user_agent,
-            "--enable-javascript=false",
             "--enable-sandbox=false",
             "--enable-webgl=false",
             "--enable-webaudio=true",
@@ -836,7 +1440,7 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             "XDG_DATA_DIRS=/share:/usr/share",
             "WAYLAND_DISPLAY=wayland-0",
             "GDK_BACKEND=wayland",
-            "GDK_GL=gles",
+            webkit_gdk_gl_env,
             "GDK_DPI_SCALE=1.0",
             "XCURSOR_PATH=/share/icons",
             "XCURSOR_THEME=Adwaita",
@@ -845,12 +1449,15 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             "GIO_USE_TLS=gnutls",
             "GST_PLUGIN_SYSTEM_PATH_1_0=/lib/gstreamer-1.0:/usr/lib/gstreamer-1.0",
             "GST_PLUGIN_PATH_1_0=/lib/gstreamer-1.0:/usr/lib/gstreamer-1.0",
+            "GST_PLUGIN_SCANNER=/libexec/gstreamer-1.0/gst-plugin-scanner",
             "GST_PLUGIN_SCANNER_1_0=/libexec/gstreamer-1.0/gst-plugin-scanner",
             "GST_GL_PLATFORM=egl",
             "GST_GL_WINDOW=wayland",
             "GST_REGISTRY=/tmp/gstreamer-registry.bin",
             "GST_REGISTRY_REUSE_PLUGIN_SCANNER=1",
+            gst_registry_update_env,
             "XV6_GUI_SESSION=1",
+            webkit_uri_log_env,
             "WEBKIT_EXEC_PATH=/libexec/webkit2gtk-4.1",
             "WEBKIT_INJECTED_BUNDLE_PATH=/lib/webkit2gtk-4.1/injected-bundle",
             "WEBKIT_DISABLE_NETWORK_CACHE=1",
@@ -861,6 +1468,11 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             "WEBKIT_GST_MAX_AVC1_RESOLUTION=720P",
             "WEBKIT_DISABLE_COMPOSITING_MODE=1",
             "WEBKIT_XV6_DISABLE_COMPOSITING_UPDATE=1",
+            "LIBGL_ALWAYS_SOFTWARE=1",
+            "EGL_PLATFORM=wayland",
+            "LIBGL_DRIVERS_PATH=/lib/dri",
+            "MESA_LOADER_DRIVER_OVERRIDE=swrast",
+            "ANGLE_DEFAULT_PLATFORM=gl",
             "EPOXY_XV6_ALLOW_MISSING=1",
             "WEBKIT_XV6_SKIP_RULE_FEATURES=1",
             "WEBKIT_XV6_SKIP_INITIAL_EMPTY_RENDER=1",
@@ -878,7 +1490,7 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             "XDG_DATA_DIRS=/share:/usr/share",
             "WAYLAND_DISPLAY=wayland-0",
             "GDK_BACKEND=wayland",
-            "GDK_GL=gles",
+            webkit_gdk_gl_env,
             "GDK_DPI_SCALE=1.0",
             "XCURSOR_PATH=/share/icons",
             "XCURSOR_THEME=Adwaita",
@@ -887,17 +1499,21 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             "GIO_USE_TLS=gnutls",
             "GST_PLUGIN_SYSTEM_PATH_1_0=/lib/gstreamer-1.0:/usr/lib/gstreamer-1.0",
             "GST_PLUGIN_PATH_1_0=/lib/gstreamer-1.0:/usr/lib/gstreamer-1.0",
+            "GST_PLUGIN_SCANNER=/libexec/gstreamer-1.0/gst-plugin-scanner",
             "GST_PLUGIN_SCANNER_1_0=/libexec/gstreamer-1.0/gst-plugin-scanner",
             "GST_GL_PLATFORM=egl",
             "GST_GL_WINDOW=wayland",
             "GST_REGISTRY=/tmp/gstreamer-registry.bin",
             "GST_REGISTRY_REUSE_PLUGIN_SCANNER=1",
+            gst_registry_update_env,
             "XV6_GUI_SESSION=1",
+            webkit_uri_log_env,
             "WEBKIT_EXEC_PATH=/libexec/webkit2gtk-4.1",
             "WEBKIT_INJECTED_BUNDLE_PATH=/lib/webkit2gtk-4.1/injected-bundle",
             "WEBKIT_DISABLE_NETWORK_CACHE=1",
             "WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS=1",
             "LIBGL_ALWAYS_SOFTWARE=0",
+            "LIBGL_DRIVERS_PATH=/lib/dri",
             "GALLIUM_DRIVER=virgl",
             "EGL_PLATFORM=wayland",
             "ANGLE_DEFAULT_PLATFORM=gl",
@@ -916,7 +1532,7 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             "XDG_DATA_DIRS=/share:/usr/share",
             "WAYLAND_DISPLAY=wayland-0",
             "GDK_BACKEND=wayland",
-            "GDK_GL=gles",
+            webkit_gdk_gl_env,
             "GDK_DPI_SCALE=1.0",
             "XCURSOR_PATH=/share/icons",
             "XCURSOR_THEME=Adwaita",
@@ -925,12 +1541,15 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             "GIO_USE_TLS=gnutls",
             "GST_PLUGIN_SYSTEM_PATH_1_0=/lib/gstreamer-1.0:/usr/lib/gstreamer-1.0",
             "GST_PLUGIN_PATH_1_0=/lib/gstreamer-1.0:/usr/lib/gstreamer-1.0",
+            "GST_PLUGIN_SCANNER=/libexec/gstreamer-1.0/gst-plugin-scanner",
             "GST_PLUGIN_SCANNER_1_0=/libexec/gstreamer-1.0/gst-plugin-scanner",
             "GST_GL_PLATFORM=egl",
             "GST_GL_WINDOW=wayland",
             "GST_REGISTRY=/tmp/gstreamer-registry.bin",
             "GST_REGISTRY_REUSE_PLUGIN_SCANNER=1",
+            gst_registry_update_env,
             "XV6_GUI_SESSION=1",
+            webkit_uri_log_env,
             "WEBKIT_EXEC_PATH=/libexec/webkit2gtk-4.1",
             "WEBKIT_INJECTED_BUNDLE_PATH=/lib/webkit2gtk-4.1/injected-bundle",
             "WEBKIT_DISABLE_NETWORK_CACHE=1",
@@ -941,9 +1560,53 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             "WEBKIT_GST_MAX_AVC1_RESOLUTION=720P",
             "LIBGL_ALWAYS_SOFTWARE=1",
             "EGL_PLATFORM=wayland",
+            "LIBGL_DRIVERS_PATH=/lib/dri",
+            "MESA_LOADER_DRIVER_OVERRIDE=swrast",
             "ANGLE_DEFAULT_PLATFORM=gl",
             "WEBKIT_XV6_DISABLE_BCG_SWITCH=1",
             "WEBKIT_XV6_SKIP_RULE_FEATURES=1",
+            "SOUP_FORCE_HTTP1=1",
+            "EPOXY_XV6_ALLOW_MISSING=1",
+            NULL
+        };
+        char *envp_minibrowser_dmabuf_sw[] = {
+            "HOME=/",
+            "PATH=/bin:/usr/bin",
+            "LD_LIBRARY_PATH=/lib:/usr/lib:/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu",
+            "LD_PRELOAD=/lib/libpng16.so.16:/lib/libxv6memshim.so",
+            "XDG_RUNTIME_DIR=/tmp",
+            "XDG_CACHE_HOME=/tmp/.cache",
+            "XDG_DATA_HOME=/tmp/.local/share",
+            "XDG_DATA_DIRS=/share:/usr/share",
+            "WAYLAND_DISPLAY=wayland-0",
+            "GDK_BACKEND=wayland",
+            webkit_gdk_gl_env,
+            "GDK_DPI_SCALE=1.0",
+            "XCURSOR_PATH=/share/icons",
+            "XCURSOR_THEME=Adwaita",
+            "SSL_CERT_FILE=/share/netsurf/ca-bundle",
+            "GIO_MODULE_DIR=/lib/gio/modules",
+            "GIO_USE_TLS=gnutls",
+            "GST_PLUGIN_SYSTEM_PATH_1_0=/lib/gstreamer-1.0:/usr/lib/gstreamer-1.0",
+            "GST_PLUGIN_PATH_1_0=/lib/gstreamer-1.0:/usr/lib/gstreamer-1.0",
+            "GST_PLUGIN_SCANNER=/libexec/gstreamer-1.0/gst-plugin-scanner",
+            "GST_PLUGIN_SCANNER_1_0=/libexec/gstreamer-1.0/gst-plugin-scanner",
+            "GST_GL_PLATFORM=egl",
+            "GST_GL_WINDOW=wayland",
+            "GST_REGISTRY=/tmp/gstreamer-registry.bin",
+            "GST_REGISTRY_REUSE_PLUGIN_SCANNER=1",
+            gst_registry_update_env,
+            "XV6_GUI_SESSION=1",
+            webkit_uri_log_env,
+            "WEBKIT_EXEC_PATH=/libexec/webkit2gtk-4.1",
+            "WEBKIT_INJECTED_BUNDLE_PATH=/lib/webkit2gtk-4.1/injected-bundle",
+            "WEBKIT_DISABLE_NETWORK_CACHE=1",
+            "WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS=1",
+            "LIBGL_ALWAYS_SOFTWARE=1",
+            "EGL_PLATFORM=wayland",
+            "LIBGL_DRIVERS_PATH=/lib/dri",
+            "MESA_LOADER_DRIVER_OVERRIDE=swrast",
+            "ANGLE_DEFAULT_PLATFORM=gl",
             "SOUP_FORCE_HTTP1=1",
             "EPOXY_XV6_ALLOW_MISSING=1",
             NULL
@@ -975,12 +1638,14 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             "XCURSOR_THEME=Adwaita",
             "LIBGL_ALWAYS_SOFTWARE=1",
             "EGL_PLATFORM=wayland",
-            "MESA_LOADER_DRIVER_OVERRIDE=softpipe",
-            "LIBGL_DRIVERS_PATH=/usr/lib/x86_64-linux-gnu/dri",
+            "MESA_LOADER_DRIVER_OVERRIDE=swrast",
+            "LIBGL_DRIVERS_PATH=/lib/dri",
             NULL
         };
         int minibrowser_accel =
             is_minibrowser && webkit_accel_enabled_by_cmdline();
+        int minibrowser_dmabuf =
+            is_minibrowser && webkit_dmabuf_enabled_by_cmdline();
         int minibrowser_js =
             is_minibrowser && !webkit_js_disabled_by_cmdline();
         int minibrowser_webgl_smoke =
@@ -988,9 +1653,34 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
         int webkit_accel =
             (is_minibrowser && minibrowser_accel) || is_webkitgpusmoke;
         int virgl_available = xv6_virgl_available();
+        int dxg_transport_available = xv6_dxg_transport_available();
+        int render_node_available = xv6_render_node_available();
         char **argv_exec = argv_default;
         if (is_webkitgpusmoke)
             webkit_accel = 0;
+        if (minibrowser_dmabuf && !render_node_available) {
+            fprintf(stderr,
+                    "[desktop] WebKit dmabuf requested, but no render node "
+                    "is available; using the stable WebKit compositor path\n");
+            minibrowser_dmabuf = 0;
+        }
+        if (minibrowser_accel && !virgl_available && !minibrowser_dmabuf) {
+            if (dxg_transport_available) {
+                fprintf(stderr,
+                        "[desktop] Hyper-V DXG GPU-PV transport is open, "
+                        "but the D3DKMT/OpenGL bridge is not available; "
+                        "using the stable WebKit compositor path\n");
+            } else {
+                fprintf(stderr,
+                        "[desktop] WebKit acceleration requested, but virgl "
+                        "is unavailable; using the stable WebKit compositor "
+                        "path\n");
+            }
+            minibrowser_accel = 0;
+            webkit_accel = 0;
+        }
+        if (minibrowser_dmabuf)
+            webkit_accel = 1;
         if (is_minibrowser) {
             if (minibrowser_accel) {
                 if (minibrowser_js) {
@@ -1016,14 +1706,22 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
                          argv_minibrowser_youtube :
                          argv_minibrowser);
             }
+            fprintf(stderr,
+                    "[desktop] MiniBrowser argv js=%d accel=%d dmabuf=%d "
+                    "webgl=%d youtube_compat=%d arg4=%s url=%s\n",
+                    minibrowser_js, minibrowser_accel, minibrowser_dmabuf,
+                    minibrowser_webgl_smoke, minibrowser_youtube_compat,
+                    argv_exec[4] ? argv_exec[4] : "(none)",
+                    minibrowser_url);
         }
         errno = 0;
         execve(path,
                argv_exec,
                is_webkit ?
                     (webkit_accel ?
-                         (virgl_available ? envp_minibrowser_accel :
-                                            envp_minibrowser_accel_sw) :
+                         (minibrowser_dmabuf ? envp_minibrowser_dmabuf_sw :
+                          (virgl_available ? envp_minibrowser_accel :
+                                             envp_minibrowser_accel_sw)) :
                          envp_minibrowser) :
                     (is_mesa_gl ?
                          (virgl_available ? envp_mesa_accel :
@@ -1051,6 +1749,7 @@ static void kill_and_reap(pid_t *pidp)
 static void cleanup(void)
 {
     kill_and_reap(&client_pid);
+    kill_and_reap(&gst_warmup_pid);
     kill_and_reap(&httpd_pid);
     kill_and_reap(&wlcomp_pid);
 }
@@ -1184,6 +1883,16 @@ static int webkit_accel_enabled_by_cmdline(void)
     return token_is_enabled(buf, "webkit_accel");
 }
 
+static int webkit_dmabuf_enabled_by_cmdline(void)
+{
+    char buf[512];
+
+    if (read_cmdline(buf, sizeof(buf)) < 0)
+        return 0;
+
+    return token_is_enabled(buf, "webkit_dmabuf");
+}
+
 static int webkit_gpu_smoke_enabled_by_cmdline(void)
 {
     char buf[512];
@@ -1284,6 +1993,17 @@ static int webkit_request_idle_disabled_by_cmdline(void)
     return token_is_disabled(buf, "webkit_request_idle");
 }
 
+static int webkit_logging_enabled_by_cmdline(void)
+{
+    char buf[512];
+
+    if (read_cmdline(buf, sizeof(buf)) < 0)
+        return 0;
+
+    return token_is_enabled(buf, "webkit_log") ||
+           token_is_enabled(buf, "webkit_logging");
+}
+
 static int webkit_feature_gate_smoke_enabled_by_cmdline(void)
 {
     char buf[512];
@@ -1322,6 +2042,16 @@ static int webkit_js_disabled_by_cmdline(void)
         return 0;
 
     return token_is_disabled(buf, "webkit_js");
+}
+
+static int webkit_disable_gdk_gl_by_cmdline(void)
+{
+    char buf[512];
+
+    if (read_cmdline(buf, sizeof(buf)) < 0)
+        return 0;
+
+    return token_is_enabled(buf, "webkit_gdk_gl_disable");
 }
 
 static int webkit_reopen_count_from_cmdline(void)
@@ -1482,11 +2212,6 @@ static void webkit_url_from_cmdline(char *out, size_t out_size)
         snprintf(out, out_size, "file:///share/webkit/gpu-smoke.html");
         return;
     }
-    if (webkit_http_smoke_enabled_by_cmdline()) {
-        snprintf(out, out_size, "http://127.0.0.1:18080/");
-        return;
-    }
-
     if (read_cmdline(buf, sizeof(buf)) < 0) {
         normalize_webkit_url(WEBKIT_DEFAULT_URL, out, out_size);
         return;
@@ -1513,6 +2238,11 @@ static void webkit_url_from_cmdline(char *out, size_t out_size)
         }
         while (*p && *p != ' ' && *p != '\t' && *p != '\n')
             p++;
+    }
+
+    if (webkit_http_smoke_enabled_by_cmdline()) {
+        snprintf(out, out_size, "http://127.0.0.1:18080/");
+        return;
     }
 
     normalize_webkit_url(WEBKIT_DEFAULT_URL, out, out_size);
@@ -1610,6 +2340,23 @@ int main(void)
         return 1;
     }
 
+    if (webkit_enabled_by_cmdline()) {
+        if (!webkit_js_smoke_enabled_by_cmdline() &&
+            access("/share/gstreamer-1.0/registry.x86_64.bin", R_OK) == 0) {
+            gst_registry_ready = 1;
+            fprintf(stderr,
+                    "[desktop] using staged GStreamer registry\n");
+        } else {
+            gst_warmup_pid = launch_gst_registry_warmup();
+        }
+        if (gst_warmup_pid > 0)
+            fprintf(stderr, "[desktop] GStreamer registry warmup pid=%d\n",
+                    gst_warmup_pid);
+        else if (!gst_registry_ready)
+            fprintf(stderr,
+                    "[desktop] failed to start GStreamer registry warmup\n");
+    }
+
     /* 3. Launch the requested Wayland client. */
     if (glsmoke_enabled_by_cmdline()) {
         char frames_arg[32];
@@ -1682,6 +2429,7 @@ int main(void)
         char webkit_timeout_arg[24];
         const char *webkit_timeout = NULL;
         char webkit_url[WEBKIT_URL_MAX];
+        long long next_probe_ms = 0;
 
         if (webkit_http_smoke_enabled_by_cmdline()) {
             httpd_pid = launch_http_smoke_server();
@@ -1701,12 +2449,25 @@ int main(void)
             webkit_timeout = webkit_timeout_arg;
         }
         webkit_url_from_cmdline(webkit_url, sizeof(webkit_url));
+        if (webkit_http_smoke_enabled_by_cmdline()) {
+            const char *path = strstr(webkit_url, "://");
+
+            if (path) {
+                path = strchr(path + 3, '/');
+                if (!path)
+                    path = "/";
+            } else {
+                path = "/";
+            }
+            http_smoke_self_probe(path);
+        }
         if (url_needs_network_wait(webkit_url)) {
             fprintf(stderr,
                     "[desktop] waiting for network before WebKit URL %s\n",
                     webkit_url);
-            usleep(WEBKIT_NET_WAIT_US);
+            sync_resolv_conf_from_netconf(WEBKIT_NET_WAIT_US);
         }
+        wait_for_gst_registry_warmup(WEBKIT_GST_WAIT_US);
         client_pid = launch_client(webkit_path, webkit_name, webkit_url,
                                    webkit_timeout, NULL);
         if (client_pid < 0) {
@@ -1720,6 +2481,7 @@ int main(void)
                 webkit_name, client_pid, accel, webkit_reopen_left,
                 webkit_timeout_ms, webkit_url);
         launch_ms = monotonic_ms();
+        next_probe_ms = launch_ms + 5000;
 
         while (g_running) {
             int status;
@@ -1764,6 +2526,10 @@ int main(void)
             }
             usleep(100000);
             now_ms = monotonic_ms();
+            if (client_pid > 0 && now_ms >= next_probe_ms) {
+                webkit_print_runtime_probe();
+                next_probe_ms = now_ms + 5000;
+            }
             if (webkit_timeout_ms > 0 && client_pid > 0 &&
                 now_ms - launch_ms >= webkit_timeout_ms) {
                 fprintf(stderr,
