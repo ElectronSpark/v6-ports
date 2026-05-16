@@ -47,6 +47,9 @@ struct gbm_bo {
     uint32_t stride;
     uint32_t format;
     uint64_t modifier;
+    uint32_t plane_count;
+    uint32_t strides[4];
+    uint32_t offsets[4];
     uint32_t handle;
     uint64_t size;
     void *addr;
@@ -67,7 +70,8 @@ struct gbm_surface {
 
 static int gbm_format_ok(uint32_t format)
 {
-    return format == GBM_FORMAT_XRGB8888 || format == GBM_FORMAT_ARGB8888;
+    return format == GBM_FORMAT_XRGB8888 || format == GBM_FORMAT_ARGB8888 ||
+           format == GBM_FORMAT_NV12;
 }
 
 static int gbm_modifier_ok(const uint64_t *modifiers, uint32_t count)
@@ -83,6 +87,58 @@ static int gbm_modifier_ok(const uint64_t *modifiers, uint32_t count)
             return 1;
     }
     return 0;
+}
+
+static int gbm_format_plane_count(uint32_t format)
+{
+    if (format == GBM_FORMAT_NV12)
+        return 2;
+    if (format == GBM_FORMAT_XRGB8888 || format == GBM_FORMAT_ARGB8888)
+        return 1;
+    return 0;
+}
+
+static uint64_t gbm_format_min_size(uint32_t format, uint32_t width,
+                                    uint32_t height, uint32_t strides[4],
+                                    uint32_t offsets[4])
+{
+    if (format == GBM_FORMAT_NV12) {
+        strides[0] = width;
+        strides[1] = width;
+        offsets[0] = 0;
+        offsets[1] = width * height;
+        return (uint64_t)offsets[1] + (uint64_t)strides[1] *
+               ((height + 1) / 2);
+    }
+
+    strides[0] = width * 4;
+    offsets[0] = 0;
+    return (uint64_t)strides[0] * height;
+}
+
+static uint64_t gbm_planes_min_size(uint32_t format, uint32_t height,
+                                    const uint32_t strides[4],
+                                    const uint32_t offsets[4])
+{
+    if (format == GBM_FORMAT_NV12)
+        return (uint64_t)offsets[1] + (uint64_t)strides[1] *
+               ((height + 1) / 2);
+    return (uint64_t)offsets[0] + (uint64_t)strides[0] * height;
+}
+
+static int gbm_planes_valid(uint32_t format, uint32_t width, uint32_t height,
+                            uint32_t plane_count,
+                            const uint32_t strides[4],
+                            const uint32_t offsets[4])
+{
+    if (format == GBM_FORMAT_NV12) {
+        if (plane_count != 2 || strides[0] < width || strides[1] < width)
+            return 0;
+        return offsets[0] == 0 && offsets[1] >= strides[0] * height;
+    }
+    if (plane_count != 1 || strides[0] < width * 4)
+        return 0;
+    return offsets[0] == 0;
 }
 
 struct gbm_device *gbm_create_device(int fd)
@@ -141,6 +197,16 @@ int gbm_device_is_format_supported(struct gbm_device *gbm, uint32_t format,
     return 1;
 }
 
+int gbm_device_get_format_modifier_plane_count(struct gbm_device *gbm,
+                                               uint32_t format,
+                                               uint64_t modifier)
+{
+    (void)gbm;
+    if (!gbm_modifier_ok(&modifier, 1))
+        return 0;
+    return gbm_format_plane_count(format);
+}
+
 static struct gbm_bo *gbm_bo_alloc_shell(struct gbm_device *gbm)
 {
     struct gbm_bo *bo;
@@ -187,9 +253,14 @@ struct gbm_bo *gbm_bo_create(struct gbm_device *gbm, uint32_t width,
 
     bo->width = width;
     bo->height = height;
-    bo->stride = create.pitch;
     bo->format = format;
     bo->modifier = GBM_FORMAT_MOD_LINEAR;
+    bo->plane_count = (uint32_t)gbm_format_plane_count(format);
+    (void)gbm_format_min_size(format, width, height, bo->strides,
+                              bo->offsets);
+    if (format == GBM_FORMAT_XRGB8888 || format == GBM_FORMAT_ARGB8888)
+        bo->strides[0] = create.pitch;
+    bo->stride = bo->strides[0];
     bo->handle = create.handle;
     bo->size = create.size;
     bo->addr = (void *)(uintptr_t)create.addr;
@@ -230,14 +301,74 @@ struct gbm_bo *gbm_bo_import(struct gbm_device *gbm, uint32_t type,
                              void *buffer, uint32_t usage)
 {
     struct gbm_import_fd_data *fd_data = buffer;
+    struct gbm_import_fd_modifier_data *mod_data = buffer;
     struct fb_gpu_bo_import_fd import;
     struct gbm_bo *bo;
+    int fd;
+    uint32_t width;
+    uint32_t height;
+    uint32_t format;
+    uint32_t strides[4] = { 0 };
+    uint32_t offsets[4] = { 0 };
+    uint32_t plane_count;
+    uint64_t modifier = GBM_FORMAT_MOD_LINEAR;
+    uint64_t min_size;
 
-    if (type != GBM_BO_IMPORT_FD || !fd_data ||
-        fd_data->width == 0 || fd_data->height == 0 ||
-        !gbm_device_is_format_supported(gbm, fd_data->format, usage)) {
+    if (!buffer) {
         errno = EINVAL;
         return NULL;
+    }
+    if (type == GBM_BO_IMPORT_FD) {
+        fd = fd_data->fd;
+        width = fd_data->width;
+        height = fd_data->height;
+        format = fd_data->format;
+        strides[0] = fd_data->stride;
+        offsets[0] = 0;
+    } else if (type == GBM_BO_IMPORT_FD_MODIFIER) {
+        if (mod_data->num_fds == 0 || mod_data->num_fds > 4 ||
+            !gbm_modifier_ok(&mod_data->modifier, 1)) {
+            errno = EINVAL;
+            return NULL;
+        }
+        fd = mod_data->fds[0];
+        width = mod_data->width;
+        height = mod_data->height;
+        format = mod_data->format;
+        modifier = mod_data->modifier == GBM_FORMAT_MOD_INVALID ?
+                       GBM_FORMAT_MOD_LINEAR :
+                       mod_data->modifier;
+        for (uint32_t i = 0; i < mod_data->num_fds; i++) {
+            if (mod_data->fds[i] < 0 || mod_data->strides[i] < 0 ||
+                mod_data->offsets[i] < 0) {
+                errno = EINVAL;
+                return NULL;
+            }
+            strides[i] = (uint32_t)mod_data->strides[i];
+            offsets[i] = (uint32_t)mod_data->offsets[i];
+        }
+    } else {
+        errno = EINVAL;
+        return NULL;
+    }
+    if (width == 0 || height == 0 ||
+        !gbm_device_is_format_supported(gbm, format, usage)) {
+        errno = EINVAL;
+        return NULL;
+    }
+    plane_count = (uint32_t)gbm_format_plane_count(format);
+    if (plane_count == 0 ||
+        (type == GBM_BO_IMPORT_FD_MODIFIER && mod_data->num_fds != plane_count)) {
+        errno = EINVAL;
+        return NULL;
+    }
+    if (type == GBM_BO_IMPORT_FD) {
+        uint32_t expected_offsets[4] = { 0 };
+        uint64_t expected =
+            gbm_format_min_size(format, width, height, strides,
+                                expected_offsets);
+        (void)expected;
+        offsets[0] = expected_offsets[0];
     }
 
     bo = gbm_bo_alloc_shell(gbm);
@@ -245,15 +376,35 @@ struct gbm_bo *gbm_bo_import(struct gbm_device *gbm, uint32_t type,
         return NULL;
 
     memset(&import, 0, sizeof(import));
-    import.fd = fd_data->fd;
+    import.fd = fd;
     if (ioctl(gbm->fd, FB_GPU_BO_IMPORT_FD, &import) < 0 ||
         import.addr == 0 || import.size == 0 || import.handle == 0) {
         free(bo);
         return NULL;
     }
-    if (import.width != fd_data->width ||
-        import.height != fd_data->height ||
-        import.pitch != fd_data->stride) {
+    if (type == GBM_BO_IMPORT_FD) {
+        (void)gbm_format_min_size(format, width, height, bo->strides,
+                                  bo->offsets);
+        bo->strides[0] = strides[0];
+        bo->offsets[0] = offsets[0];
+    } else {
+        for (uint32_t i = 0; i < plane_count; i++) {
+            bo->strides[i] = strides[i];
+            bo->offsets[i] = offsets[i];
+        }
+    }
+    if (!gbm_planes_valid(format, width, height, plane_count, bo->strides,
+                          bo->offsets)) {
+        munmap((void *)(uintptr_t)import.addr, (size_t)import.size);
+        errno = EINVAL;
+        free(bo);
+        return NULL;
+    }
+    min_size = gbm_planes_min_size(format, height, bo->strides, bo->offsets);
+    if (import.width != width || import.height != height ||
+        import.size < min_size ||
+        ((format == GBM_FORMAT_XRGB8888 || format == GBM_FORMAT_ARGB8888) &&
+         import.pitch != strides[0])) {
         munmap((void *)(uintptr_t)import.addr, (size_t)import.size);
         errno = EINVAL;
         free(bo);
@@ -262,13 +413,16 @@ struct gbm_bo *gbm_bo_import(struct gbm_device *gbm, uint32_t type,
 
     bo->width = import.width;
     bo->height = import.height;
-    bo->stride = import.pitch;
-    bo->format = fd_data->format;
-    bo->modifier = GBM_FORMAT_MOD_LINEAR;
+    bo->format = format;
+    bo->modifier = modifier;
+    bo->plane_count = plane_count;
+    if (type == GBM_BO_IMPORT_FD && format != GBM_FORMAT_NV12)
+        bo->strides[0] = import.pitch;
+    bo->stride = bo->strides[0];
     bo->handle = import.handle;
     bo->size = import.size;
     bo->addr = (void *)(uintptr_t)import.addr;
-    bo->imported_fd = fd_data->fd;
+    bo->imported_fd = fd;
     return bo;
 }
 
@@ -312,12 +466,29 @@ uint32_t gbm_bo_get_stride(struct gbm_bo *bo)
 
 uint32_t gbm_bo_get_stride_for_plane(struct gbm_bo *bo, int plane)
 {
-    return bo && plane == 0 ? bo->stride : 0;
+    return bo && plane >= 0 && (uint32_t)plane < bo->plane_count ?
+               bo->strides[plane] :
+               0;
 }
 
 uint32_t gbm_bo_get_format(struct gbm_bo *bo)
 {
     return bo ? bo->format : 0;
+}
+
+uint32_t gbm_bo_get_bpp(struct gbm_bo *bo)
+{
+    if (!bo)
+        return 0;
+    switch (bo->format) {
+    case GBM_FORMAT_ARGB8888:
+    case GBM_FORMAT_XRGB8888:
+        return 32;
+    case GBM_FORMAT_NV12:
+        return 8;
+    default:
+        return 0;
+    }
 }
 
 uint64_t gbm_bo_get_modifier(struct gbm_bo *bo)
@@ -327,7 +498,7 @@ uint64_t gbm_bo_get_modifier(struct gbm_bo *bo)
 
 int gbm_bo_get_plane_count(struct gbm_bo *bo)
 {
-    return bo ? 1 : 0;
+    return bo ? (int)bo->plane_count : 0;
 }
 
 union gbm_bo_handle gbm_bo_get_handle(struct gbm_bo *bo)
@@ -342,7 +513,7 @@ union gbm_bo_handle gbm_bo_get_handle(struct gbm_bo *bo)
 
 union gbm_bo_handle gbm_bo_get_handle_for_plane(struct gbm_bo *bo, int plane)
 {
-    if (plane != 0) {
+    if (!bo || plane < 0 || (uint32_t)plane >= bo->plane_count) {
         union gbm_bo_handle handle;
 
         memset(&handle, 0, sizeof(handle));
@@ -370,7 +541,7 @@ int gbm_bo_get_fd(struct gbm_bo *bo)
 
 int gbm_bo_get_fd_for_plane(struct gbm_bo *bo, int plane)
 {
-    if (plane != 0) {
+    if (!bo || plane < 0 || (uint32_t)plane >= bo->plane_count) {
         errno = EINVAL;
         return -1;
     }
@@ -395,7 +566,9 @@ void *gbm_bo_get_user_data(struct gbm_bo *bo)
 
 uint32_t gbm_bo_get_offset(struct gbm_bo *bo, int plane)
 {
-    return bo && plane == 0 ? 0 : 0;
+    return bo && plane >= 0 && (uint32_t)plane < bo->plane_count ?
+               bo->offsets[plane] :
+               0;
 }
 
 int gbm_bo_write(struct gbm_bo *bo, const void *buf, size_t count)
@@ -526,4 +699,17 @@ void gbm_surface_destroy(struct gbm_surface *surface)
         return;
     gbm_bo_destroy(surface->front);
     free(surface);
+}
+
+char *gbm_format_get_name(uint32_t gbm_format,
+                          struct gbm_format_name_desc *desc)
+{
+    if (!desc)
+        return NULL;
+    desc->name[0] = (char)(gbm_format & 0xff);
+    desc->name[1] = (char)((gbm_format >> 8) & 0xff);
+    desc->name[2] = (char)((gbm_format >> 16) & 0xff);
+    desc->name[3] = (char)((gbm_format >> 24) & 0xff);
+    desc->name[4] = '\0';
+    return desc->name;
 }

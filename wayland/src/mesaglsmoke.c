@@ -10,21 +10,19 @@
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
 #include <GLES2/gl2.h>
-#include <errno.h>
-#include <fcntl.h>
 #include <math.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/ioctl.h>
-#include <sys/mman.h>
-#include <sys/stat.h>
-#include <sys/types.h>
 #include <time.h>
 #include <unistd.h>
 #include <wayland-client.h>
 
+#include "gl_program.h"
+#include "mesawlegl_sphere.h"
+#include "pixel_fps_overlay.h"
+#include "xv6_present_buffer.h"
 #include "xdg-shell-client-protocol.h"
 
 #ifndef EGL_PLATFORM_SURFACELESS_MESA
@@ -51,20 +49,6 @@
 #define DEFAULT_SPHERE_QUALITY 4
 #define DEMO_SPHERE_QUALITY 3
 
-#define FB_GPU_BO_CREATE       0x4614
-#define FB_GPU_BO_DESTROY      0x4616
-#define FB_GPU_BO_F_EXPORTABLE 0x1
-
-struct fb_gpu_bo_create {
-    uint32_t width, height, flags, pitch;
-    uint64_t size, addr;
-    uint32_t handle, reserved;
-};
-
-struct fb_gpu_bo_destroy {
-    uint32_t handle, flags;
-};
-
 struct vertex {
     GLfloat x;
     GLfloat y;
@@ -73,28 +57,6 @@ struct vertex {
     GLfloat g;
     GLfloat b;
     GLfloat a;
-};
-
-struct sphere_vertex {
-    GLfloat x;
-    GLfloat y;
-    GLfloat z;
-    GLfloat nx;
-    GLfloat ny;
-    GLfloat nz;
-};
-
-struct present_buffer {
-    struct wl_buffer *wl_buffer;
-    uint32_t *pixels;
-    size_t size;
-    int stride;
-    int width;
-    int height;
-    int fd;
-    int fb_fd;
-    uint32_t bo_handle;
-    int bo_backed;
 };
 
 struct app_state {
@@ -108,7 +70,7 @@ struct app_state {
     struct xdg_surface *xdg_surface;
     struct xdg_toplevel *toplevel;
     struct wl_callback *frame_cb;
-    struct present_buffer buffer;
+    struct xv6_present_buffer buffer;
     EGLDisplay egl_display;
     EGLConfig egl_config;
     EGLContext egl_context;
@@ -141,56 +103,13 @@ struct app_state {
     uint8_t *readback;
     size_t readback_size;
     uint64_t start_ns;
+    uint64_t fps_last_ns;
+    int fps_last_frame;
+    char fps_text[PIXEL_FPS_OVERLAY_TEXT_MAX];
 };
 
-static const struct wl_interface *xv6_gpu_buffer_create_types[] = {
-    &wl_buffer_interface,
-    NULL,
-    NULL,
-    NULL,
-    NULL,
-    NULL,
-    NULL,
-};
-
-static const struct wl_message xv6_gpu_buffer_manager_requests[] = {
-    { "create_buffer", "nuiiiu", xv6_gpu_buffer_create_types },
-    { "create_buffer_with_fence", "nuiiiuh", xv6_gpu_buffer_create_types },
-};
-
-static const struct wl_interface xv6_gpu_buffer_manager_interface = {
-    "xv6_gpu_buffer_manager",
-    2,
-    2,
-    xv6_gpu_buffer_manager_requests,
-    0,
-    NULL,
-};
-
-static struct wl_buffer *xv6_gpu_buffer_manager_create_buffer(
-    struct wl_proxy *manager, uint32_t handle, int32_t width, int32_t height,
-    int32_t stride, uint32_t format)
-{
-    return (struct wl_buffer *)wl_proxy_marshal_flags(
-        manager, 0, &wl_buffer_interface, wl_proxy_get_version(manager), 0,
-        NULL, handle, width, height, stride, format);
-}
-
-static struct wl_buffer *xv6_gpu_buffer_manager_create_buffer_with_fence(
-    struct wl_proxy *manager, uint32_t handle, int32_t width, int32_t height,
-    int32_t stride, uint32_t format, int acquire_fence_fd)
-{
-    if (wl_proxy_get_version(manager) < 2 || acquire_fence_fd < 0) {
-        if (acquire_fence_fd >= 0)
-            close(acquire_fence_fd);
-        return xv6_gpu_buffer_manager_create_buffer(
-            manager, handle, width, height, stride, format);
-    }
-
-    return (struct wl_buffer *)wl_proxy_marshal_flags(
-        manager, 1, &wl_buffer_interface, wl_proxy_get_version(manager), 0,
-        NULL, handle, width, height, stride, format, acquire_fence_fd);
-}
+static uint64_t monotonic_ns(void);
+static void draw_and_commit(struct app_state *app);
 
 static EGLDisplay get_surfaceless_display(void)
 {
@@ -204,154 +123,6 @@ static EGLDisplay get_surfaceless_display(void)
         strstr(client_ext, "EGL_MESA_platform_surfaceless") != NULL)
         return get_platform_display(EGL_PLATFORM_SURFACELESS_MESA, NULL, NULL);
     return eglGetDisplay(EGL_DEFAULT_DISPLAY);
-}
-
-static int create_shm_file(size_t size)
-{
-    char path[64];
-    int fd;
-
-    snprintf(path, sizeof(path), "/tmp/mesaglsmoke-%ld", (long)getpid());
-    fd = open(path, O_RDWR | O_CREAT | O_TRUNC, 0600);
-    if (fd < 0)
-        return -1;
-    unlink(path);
-    if (ftruncate(fd, (off_t)size) < 0) {
-        close(fd);
-        return -1;
-    }
-    return fd;
-}
-
-static int init_present_buffer(struct app_state *app)
-{
-    struct present_buffer *buf = &app->buffer;
-    int stride = app->width * 4;
-
-    memset(buf, 0, sizeof(*buf));
-    buf->fd = -1;
-    buf->fb_fd = -1;
-    buf->width = app->width;
-    buf->height = app->height;
-    buf->stride = stride;
-    buf->size = (size_t)stride * (size_t)app->height;
-
-    if (app->gpu_manager) {
-        struct fb_gpu_bo_create bo;
-
-        memset(&bo, 0, sizeof(bo));
-        bo.width = (uint32_t)buf->width;
-        bo.height = (uint32_t)buf->height;
-        bo.flags = FB_GPU_BO_F_EXPORTABLE;
-        buf->fb_fd = open("/dev/fb0", O_RDWR);
-        if (buf->fb_fd >= 0 &&
-            ioctl(buf->fb_fd, FB_GPU_BO_CREATE, &bo) == 0 &&
-            bo.addr != 0 && bo.size != 0 && bo.pitch >= (uint32_t)stride &&
-            bo.handle != 0) {
-            buf->pixels = (uint32_t *)bo.addr;
-            buf->size = (size_t)bo.size;
-            buf->stride = (int)bo.pitch;
-            buf->bo_handle = bo.handle;
-            buf->bo_backed = 1;
-            buf->wl_buffer = xv6_gpu_buffer_manager_create_buffer_with_fence(
-                app->gpu_manager, bo.handle, buf->width, buf->height,
-                buf->stride, WL_SHM_FORMAT_XRGB8888, -1);
-            if (buf->wl_buffer)
-                return 0;
-        }
-        if (buf->bo_handle) {
-            struct fb_gpu_bo_destroy destroy = { .handle = buf->bo_handle };
-            ioctl(buf->fb_fd, FB_GPU_BO_DESTROY, &destroy);
-        }
-        if (buf->pixels && buf->bo_backed)
-            munmap(buf->pixels, buf->size);
-        if (buf->fb_fd >= 0)
-            close(buf->fb_fd);
-        memset(buf, 0, sizeof(*buf));
-        buf->fd = -1;
-        buf->fb_fd = -1;
-        buf->width = app->width;
-        buf->height = app->height;
-        buf->stride = stride;
-        buf->size = (size_t)stride * (size_t)app->height;
-    }
-
-    if (!app->shm)
-        return -1;
-
-    buf->fd = create_shm_file(buf->size);
-    if (buf->fd < 0)
-        return -1;
-    buf->pixels = mmap(NULL, buf->size, PROT_READ | PROT_WRITE, MAP_SHARED,
-                       buf->fd, 0);
-    if (buf->pixels == MAP_FAILED) {
-        buf->pixels = NULL;
-        return -1;
-    }
-
-    struct wl_shm_pool *pool = wl_shm_create_pool(app->shm, buf->fd,
-                                                  (int)buf->size);
-    buf->wl_buffer = wl_shm_pool_create_buffer(pool, 0, buf->width,
-                                               buf->height, buf->stride,
-                                               WL_SHM_FORMAT_XRGB8888);
-    wl_shm_pool_destroy(pool);
-    return buf->wl_buffer ? 0 : -1;
-}
-
-static void destroy_present_buffer(struct app_state *app)
-{
-    struct present_buffer *buf = &app->buffer;
-
-    if (buf->wl_buffer)
-        wl_buffer_destroy(buf->wl_buffer);
-    if (buf->pixels)
-        munmap(buf->pixels, buf->size);
-    if (buf->bo_handle && buf->fb_fd >= 0) {
-        struct fb_gpu_bo_destroy destroy = { .handle = buf->bo_handle };
-        ioctl(buf->fb_fd, FB_GPU_BO_DESTROY, &destroy);
-    }
-    if (buf->fb_fd >= 0)
-        close(buf->fb_fd);
-    if (buf->fd >= 0)
-        close(buf->fd);
-
-    memset(buf, 0, sizeof(*buf));
-    buf->fd = -1;
-    buf->fb_fd = -1;
-}
-
-static GLuint compile_shader(GLenum type, const char *src)
-{
-    GLuint shader = glCreateShader(type);
-    GLint ok = GL_FALSE;
-
-    glShaderSource(shader, 1, &src, NULL);
-    glCompileShader(shader);
-    glGetShaderiv(shader, GL_COMPILE_STATUS, &ok);
-    if (!ok)
-        fprintf(stderr, "mesaglsmoke: shader compile failed\n");
-    return shader;
-}
-
-static GLuint link_program(const char *vs, const char *fs)
-{
-    GLuint vshader = compile_shader(GL_VERTEX_SHADER, vs);
-    GLuint fshader = compile_shader(GL_FRAGMENT_SHADER, fs);
-    GLuint program = glCreateProgram();
-    GLint ok = GL_FALSE;
-
-    glAttachShader(program, vshader);
-    glAttachShader(program, fshader);
-    glLinkProgram(program);
-    glGetProgramiv(program, GL_LINK_STATUS, &ok);
-    glDeleteShader(vshader);
-    glDeleteShader(fshader);
-    if (!ok) {
-        fprintf(stderr, "mesaglsmoke: program link failed\n");
-        glDeleteProgram(program);
-        return 0;
-    }
-    return program;
 }
 
 static int gl_has_extension(const char *name)
@@ -375,158 +146,8 @@ static int gl_has_extension(const char *name)
     return 0;
 }
 
-static void mat4_identity(float m[16])
-{
-    memset(m, 0, sizeof(float) * 16);
-    m[0] = 1.0f;
-    m[5] = 1.0f;
-    m[10] = 1.0f;
-    m[15] = 1.0f;
-}
-
-static void mat4_mul(float out[16], const float a[16], const float b[16])
-{
-    float r[16];
-
-    for (int col = 0; col < 4; col++) {
-        for (int row = 0; row < 4; row++) {
-            r[col * 4 + row] =
-                a[0 * 4 + row] * b[col * 4 + 0] +
-                a[1 * 4 + row] * b[col * 4 + 1] +
-                a[2 * 4 + row] * b[col * 4 + 2] +
-                a[3 * 4 + row] * b[col * 4 + 3];
-        }
-    }
-    memcpy(out, r, sizeof(r));
-}
-
-static void mat4_perspective(float m[16], float fovy, float aspect,
-                             float znear, float zfar)
-{
-    float f = 1.0f / tanf(fovy * 0.5f);
-
-    memset(m, 0, sizeof(float) * 16);
-    m[0] = f / aspect;
-    m[5] = f;
-    m[10] = (zfar + znear) / (znear - zfar);
-    m[11] = -1.0f;
-    m[14] = (2.0f * zfar * znear) / (znear - zfar);
-}
-
-static void mat4_translate(float m[16], float x, float y, float z)
-{
-    mat4_identity(m);
-    m[12] = x;
-    m[13] = y;
-    m[14] = z;
-}
-
-static void mat4_rotate_x(float m[16], float angle)
-{
-    float s = sinf(angle);
-    float c = cosf(angle);
-
-    mat4_identity(m);
-    m[5] = c;
-    m[6] = s;
-    m[9] = -s;
-    m[10] = c;
-}
-
-static void mat4_rotate_y(float m[16], float angle)
-{
-    float s = sinf(angle);
-    float c = cosf(angle);
-
-    mat4_identity(m);
-    m[0] = c;
-    m[2] = -s;
-    m[8] = s;
-    m[10] = c;
-}
-
-static struct sphere_vertex make_poly_vertex(float x, float y, float z)
-{
-    float inv_len = 1.0f / sqrtf(x * x + y * y + z * z);
-    struct sphere_vertex v;
-
-    v.x = x * inv_len;
-    v.y = y * inv_len;
-    v.z = z * inv_len;
-    v.nx = 0.0f;
-    v.ny = 0.0f;
-    v.nz = 1.0f;
-    return v;
-}
-
-static void sphere_emit_flat(struct sphere_vertex *dst, int *idx,
-                             struct sphere_vertex a, struct sphere_vertex b,
-                             struct sphere_vertex c)
-{
-    struct sphere_vertex out[3] = { a, b, c };
-    float ux = b.x - a.x;
-    float uy = b.y - a.y;
-    float uz = b.z - a.z;
-    float vx = c.x - a.x;
-    float vy = c.y - a.y;
-    float vz = c.z - a.z;
-    float nx = uy * vz - uz * vy;
-    float ny = uz * vx - ux * vz;
-    float nz = ux * vy - uy * vx;
-    float inv_len = 1.0f / sqrtf(nx * nx + ny * ny + nz * nz);
-    float cx = (a.x + b.x + c.x) / 3.0f;
-    float cy = (a.y + b.y + c.y) / 3.0f;
-    float cz = (a.z + b.z + c.z) / 3.0f;
-
-    nx *= inv_len;
-    ny *= inv_len;
-    nz *= inv_len;
-    if (nx * cx + ny * cy + nz * cz < 0.0f) {
-        struct sphere_vertex tmp = out[1];
-
-        out[1] = out[2];
-        out[2] = tmp;
-        nx = -nx;
-        ny = -ny;
-        nz = -nz;
-    }
-    for (int i = 0; i < 3; i++) {
-        out[i].nx = nx;
-        out[i].ny = ny;
-        out[i].nz = nz;
-        dst[(*idx)++] = out[i];
-    }
-}
-
-static struct sphere_vertex barycentric_sphere_point(struct sphere_vertex a,
-                                                     struct sphere_vertex b,
-                                                     struct sphere_vertex c,
-                                                     int ia, int ib, int ic,
-                                                     int frequency)
-{
-    float fa = (float)ia / (float)frequency;
-    float fb = (float)ib / (float)frequency;
-    float fc = (float)ic / (float)frequency;
-
-    return make_poly_vertex(a.x * fa + b.x * fb + c.x * fc,
-                            a.y * fa + b.y * fb + c.y * fc,
-                            a.z * fa + b.z * fb + c.z * fc);
-}
-
 static int init_sphere_resources(struct app_state *app)
 {
-    static const float phi = 1.61803398875f;
-    static const struct {
-        int a;
-        int b;
-        int c;
-    } faces[20] = {
-        { 0, 11, 5 }, { 0, 5, 1 }, { 0, 1, 7 }, { 0, 7, 10 },
-        { 0, 10, 11 }, { 1, 5, 9 }, { 5, 11, 4 }, { 11, 10, 2 },
-        { 10, 7, 6 }, { 7, 1, 8 }, { 3, 9, 4 }, { 3, 4, 2 },
-        { 3, 2, 6 }, { 3, 6, 8 }, { 3, 8, 9 }, { 4, 9, 5 },
-        { 2, 4, 11 }, { 6, 2, 10 }, { 8, 6, 7 }, { 9, 8, 1 },
-    };
     static const char *sphere_vs =
         "attribute vec3 a_pos;\n"
         "attribute vec3 a_normal;\n"
@@ -556,74 +177,26 @@ static int init_sphere_resources(struct app_state *app)
         "  vec3 color = base * (0.18 + diffuse * 0.88) + vec3(0.80, 0.92, 1.0) * rim * 0.25;\n"
         "  gl_FragColor = vec4(color, 1.0);\n"
         "}\n";
-    struct sphere_vertex base[12] = {
-        { -1.0f,  phi, 0.0f, 0.0f, 0.0f, 1.0f },
-        {  1.0f,  phi, 0.0f, 0.0f, 0.0f, 1.0f },
-        { -1.0f, -phi, 0.0f, 0.0f, 0.0f, 1.0f },
-        {  1.0f, -phi, 0.0f, 0.0f, 0.0f, 1.0f },
-        { 0.0f, -1.0f,  phi, 0.0f, 0.0f, 1.0f },
-        { 0.0f,  1.0f,  phi, 0.0f, 0.0f, 1.0f },
-        { 0.0f, -1.0f, -phi, 0.0f, 0.0f, 1.0f },
-        { 0.0f,  1.0f, -phi, 0.0f, 0.0f, 1.0f },
-        {  phi, 0.0f, -1.0f, 0.0f, 0.0f, 1.0f },
-        {  phi, 0.0f,  1.0f, 0.0f, 0.0f, 1.0f },
-        { -phi, 0.0f, -1.0f, 0.0f, 0.0f, 1.0f },
-        { -phi, 0.0f,  1.0f, 0.0f, 0.0f, 1.0f },
-    };
     int frequency = app->sphere_quality;
-    const int base_faces = 20;
-    int verts_per_face;
     int count;
     struct sphere_vertex *vertices;
-    int idx = 0;
 
     if (frequency < 1)
         frequency = DEFAULT_SPHERE_QUALITY;
     if (frequency > 8)
         frequency = 8;
-    verts_per_face = frequency * frequency * 3;
-    count = base_faces * verts_per_face;
+    count = mesawlegl_poly_sphere_vertex_count(frequency);
     vertices = calloc((size_t)count, sizeof(*vertices));
     if (!vertices)
         return -1;
 
-    for (int i = 0; i < 12; i++)
-        base[i] = make_poly_vertex(base[i].x, base[i].y, base[i].z);
-
-    for (int face = 0; face < base_faces; face++) {
-        struct sphere_vertex a = base[faces[face].a];
-        struct sphere_vertex b = base[faces[face].b];
-        struct sphere_vertex c = base[faces[face].c];
-
-        for (int row = 0; row < frequency; row++) {
-            for (int col = 0; col < frequency - row; col++) {
-                struct sphere_vertex p0 =
-                    barycentric_sphere_point(a, b, c,
-                                             frequency - row - col,
-                                             col, row, frequency);
-                struct sphere_vertex p1 =
-                    barycentric_sphere_point(a, b, c,
-                                             frequency - row - col - 1,
-                                             col + 1, row, frequency);
-                struct sphere_vertex p2 =
-                    barycentric_sphere_point(a, b, c,
-                                             frequency - row - col - 1,
-                                             col, row + 1, frequency);
-
-                sphere_emit_flat(vertices, &idx, p0, p1, p2);
-                if (col < frequency - row - 1) {
-                    struct sphere_vertex p3 =
-                        barycentric_sphere_point(a, b, c,
-                                                 frequency - row - col - 2,
-                                                 col + 1, row + 1,
-                                                 frequency);
-                    sphere_emit_flat(vertices, &idx, p1, p3, p2);
-                }
-            }
-        }
+    if (mesawlegl_build_poly_sphere(vertices, count, frequency) != count) {
+        free(vertices);
+        return -1;
     }
 
-    app->sphere_program = link_program(sphere_vs, sphere_fs);
+    app->sphere_program =
+        xv6_gl_link_program("mesaglsmoke", sphere_vs, sphere_fs);
     if (!app->sphere_program) {
         free(vertices);
         return -1;
@@ -722,7 +295,7 @@ static int init_mesa(struct app_state *app)
         return -1;
     }
 
-    app->program = link_program(vs, fs);
+    app->program = xv6_gl_link_program("mesaglsmoke", vs, fs);
     if (!app->program)
         return -1;
     app->attr_pos = glGetAttribLocation(app->program, "a_pos");
@@ -804,8 +377,9 @@ static int resize_surface_and_buffer_to(struct app_state *app, int width,
     app->width = width;
     app->height = height;
 
-    destroy_present_buffer(app);
-    if (init_present_buffer(app) < 0)
+    xv6_present_buffer_destroy(&app->buffer);
+    if (xv6_present_buffer_init(&app->buffer, app->width, app->height,
+                                app->shm, app->gpu_manager) < 0)
         return -1;
     if (recreate_mesa_surface(app) < 0)
         return -1;
@@ -863,14 +437,14 @@ static void render_sphere_frame(struct app_state *app)
     float angle = app->frame * 0.022f;
     const GLfloat light[3] = { 1.6f, 1.2f, 2.8f };
 
-    mat4_perspective(projection, 58.0f * (float)M_PI / 180.0f, aspect,
-                     0.1f, 16.0f);
-    mat4_translate(view, 0.0f, 0.0f, -3.6f);
-    mat4_rotate_y(ry, angle);
-    mat4_rotate_x(rx, 0.35f * sinf(angle * 0.43f));
-    mat4_mul(model, ry, rx);
-    mat4_mul(pv, projection, view);
-    mat4_mul(mvp, pv, model);
+    mesawlegl_mat4_perspective(projection, 58.0f * (float)M_PI / 180.0f,
+                               aspect, 0.1f, 16.0f);
+    mesawlegl_mat4_translate(view, 0.0f, 0.0f, -3.6f);
+    mesawlegl_mat4_rotate_y(ry, angle);
+    mesawlegl_mat4_rotate_x(rx, 0.35f * sinf(angle * 0.43f));
+    mesawlegl_mat4_mul(model, ry, rx);
+    mesawlegl_mat4_mul(pv, projection, view);
+    mesawlegl_mat4_mul(mvp, pv, model);
 
     glViewport(0, 0, app->width, app->height);
     glClearColor(0.015f, 0.022f, 0.032f, 1.0f);
@@ -935,7 +509,38 @@ static int copy_pixels_to_wayland_buffer(struct app_state *app)
     return 0;
 }
 
-static void draw_and_commit(struct app_state *app);
+static void update_fps_overlay(struct app_state *app)
+{
+    uint64_t now = monotonic_ns();
+
+    if (app->fps_text[0] == '\0')
+        snprintf(app->fps_text, sizeof(app->fps_text), "FPS --.-");
+    if (app->fps_last_ns == 0) {
+        app->fps_last_ns = now;
+        app->fps_last_frame = app->frame;
+        return;
+    }
+    if (now > app->fps_last_ns + 1000000000ull) {
+        double elapsed = (double)(now - app->fps_last_ns) / 1000000000.0;
+        double fps = elapsed > 0.0 ?
+                     (double)(app->frame - app->fps_last_frame) / elapsed :
+                     0.0;
+        char title[64];
+
+        snprintf(app->fps_text, sizeof(app->fps_text), "FPS %.1f", fps);
+        snprintf(title, sizeof(title), "Mesa GL Smoke - %.1f FPS", fps);
+        xdg_toplevel_set_title(app->toplevel, title);
+        fprintf(stderr, "mesaglsmoke[%d]: fps=%.1f\n", app->loop, fps);
+        app->fps_last_ns = now;
+        app->fps_last_frame = app->frame;
+    }
+}
+
+static void draw_fps_overlay(struct app_state *app)
+{
+    pixel_fps_overlay_draw(app->buffer.pixels, app->width, app->height,
+                           app->buffer.stride, app->fps_text);
+}
 
 static void frame_done(void *data, struct wl_callback *cb, uint32_t time)
 {
@@ -979,6 +584,10 @@ static void draw_and_commit(struct app_state *app)
     if (copy_pixels_to_wayland_buffer(app) < 0) {
         app->running = 0;
         return;
+    }
+    if (app->sphere_demo) {
+        update_fps_overlay(app);
+        draw_fps_overlay(app);
     }
     app->frame_cb = wl_surface_frame(app->surface);
     wl_callback_add_listener(app->frame_cb, &frame_listener, app);
@@ -1121,7 +730,9 @@ static int init_wayland(struct app_state *app)
     xdg_toplevel_set_title(app->toplevel, "Mesa GL Smoke");
     xdg_toplevel_set_app_id(app->toplevel, "mesaglsmoke");
 
-    if (init_present_buffer(app) < 0 || init_mesa(app) < 0)
+    if (xv6_present_buffer_init(&app->buffer, app->width, app->height,
+                                app->shm, app->gpu_manager) < 0 ||
+        init_mesa(app) < 0)
         return -1;
     wl_surface_commit(app->surface);
     return 0;
@@ -1148,7 +759,7 @@ static void cleanup(struct app_state *app)
             eglDestroyContext(app->egl_display, app->egl_context);
         eglTerminate(app->egl_display);
     }
-    destroy_present_buffer(app);
+    xv6_present_buffer_destroy(&app->buffer);
     free(app->readback);
     app->readback = NULL;
     app->readback_size = 0;

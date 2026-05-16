@@ -3,11 +3,49 @@
 #include <stdio.h>
 #include <stdint.h>
 #include <string.h>
+#include <sys/ioctl.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
 #include <gbm.h>
 #include <xf86drm.h>
+
+#define FB_GPU_BACKEND_QUERY 0x462C
+
+struct fb_gpu_backend_info_compat {
+    uint32_t backend;
+    uint32_t flags;
+    uint32_t capset_id;
+    uint32_t capset_version;
+    uint32_t capset_size;
+    uint32_t dxg_global_open;
+    uint32_t dxg_vgpu_open;
+    uint32_t dxg_d3dkmt;
+    uint32_t dxg_global_status;
+    uint32_t dxg_vgpu_status;
+    uint32_t dxg_global_rx;
+    uint32_t dxg_vgpu_rx;
+    char name[32];
+    char renderer[64];
+};
+
+static int probe_backend(int fd)
+{
+    struct fb_gpu_backend_info_compat info;
+
+    memset(&info, 0, sizeof(info));
+    if (ioctl(fd, FB_GPU_BACKEND_QUERY, &info) < 0) {
+        printf("drmgpuprobe: backend query failed: %s\n", strerror(errno));
+        return 1;
+    }
+
+    printf("drmgpuprobe: backend=%s flags=0x%x renderer=%s\n",
+           info.name, info.flags, info.renderer);
+    printf("drmgpuprobe: capset id=%u version=%u size=%u dxg=%u/%u d3dkmt=%u\n",
+           info.capset_id, info.capset_version, info.capset_size,
+           info.dxg_global_open, info.dxg_vgpu_open, info.dxg_d3dkmt);
+    return 0;
+}
 
 static int probe_drm_devices(void)
 {
@@ -88,6 +126,7 @@ int main(void)
 
     printf("drmgpuprobe: fd node_type=%d\n", drmGetNodeTypeFromFd(fd));
 
+    failed |= probe_backend(fd);
     failed |= probe_gbm(fd);
     close(fd);
 

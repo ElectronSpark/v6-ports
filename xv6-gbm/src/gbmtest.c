@@ -29,11 +29,17 @@ int main(void)
     struct gbm_device *dev;
     struct gbm_bo *bo;
     struct gbm_bo *imported;
+    struct gbm_bo *nv12;
+    struct gbm_bo *nv12_imported;
     struct gbm_import_fd_data import_data;
+    struct gbm_import_fd_modifier_data mod_import;
     uint32_t stride = 0;
     void *map_data = NULL;
     uint32_t *pixels;
+    uint64_t linear_mod = GBM_FORMAT_MOD_LINEAR;
     int prime_fd;
+    int nv12_fd0 = -1;
+    int nv12_fd1 = -1;
     int ok = 1;
 
     if (fd < 0)
@@ -115,7 +121,91 @@ int main(void)
     gbm_bo_destroy(imported);
     close(prime_fd);
 
+    if (gbm_device_get_format_modifier_plane_count(dev, GBM_FORMAT_NV12,
+                                                   GBM_FORMAT_MOD_LINEAR) != 2) {
+        printf("gbmtest: NV12 linear plane count unsupported\n");
+        ok = 0;
+        goto out_bo;
+    }
+
+    nv12 = gbm_bo_create_with_modifiers2(dev, 64, 32, GBM_FORMAT_NV12,
+                                         &linear_mod, 1,
+                                         GBM_BO_USE_RENDERING |
+                                         GBM_BO_USE_LINEAR |
+                                         GBM_BO_USE_WRITE);
+    if (!nv12) {
+        printf("gbmtest: NV12 modifier create failed: %s\n", strerror(errno));
+        ok = 0;
+        goto out_bo;
+    }
+
+    if (gbm_bo_get_modifier(nv12) != GBM_FORMAT_MOD_LINEAR ||
+        gbm_bo_get_plane_count(nv12) != 2 ||
+        gbm_bo_get_stride_for_plane(nv12, 0) < gbm_bo_get_width(nv12) ||
+        gbm_bo_get_stride_for_plane(nv12, 1) < gbm_bo_get_width(nv12) ||
+        gbm_bo_get_offset(nv12, 0) != 0 ||
+        gbm_bo_get_offset(nv12, 1) <
+            gbm_bo_get_stride_for_plane(nv12, 0) * gbm_bo_get_height(nv12) ||
+        gbm_bo_get_handle_for_plane(nv12, 0).u32 == 0 ||
+        gbm_bo_get_handle_for_plane(nv12, 1).u32 == 0) {
+        printf("gbmtest: NV12 plane metadata mismatch\n");
+        ok = 0;
+        gbm_bo_destroy(nv12);
+        goto out_bo;
+    }
+
+    nv12_fd0 = gbm_bo_get_fd_for_plane(nv12, 0);
+    nv12_fd1 = gbm_bo_get_fd_for_plane(nv12, 1);
+    if (nv12_fd0 < 0 || nv12_fd1 < 0) {
+        printf("gbmtest: NV12 plane fd export failed: %s\n", strerror(errno));
+        ok = 0;
+        gbm_bo_destroy(nv12);
+        goto out_bo;
+    }
+
+    memset(&mod_import, 0, sizeof(mod_import));
+    mod_import.width = gbm_bo_get_width(nv12);
+    mod_import.height = gbm_bo_get_height(nv12);
+    mod_import.format = gbm_bo_get_format(nv12);
+    mod_import.num_fds = 2;
+    mod_import.fds[0] = nv12_fd0;
+    mod_import.fds[1] = nv12_fd1;
+    mod_import.strides[0] = (int)gbm_bo_get_stride_for_plane(nv12, 0);
+    mod_import.strides[1] = (int)gbm_bo_get_stride_for_plane(nv12, 1);
+    mod_import.offsets[0] = (int)gbm_bo_get_offset(nv12, 0);
+    mod_import.offsets[1] = (int)gbm_bo_get_offset(nv12, 1);
+    mod_import.modifier = gbm_bo_get_modifier(nv12);
+
+    nv12_imported = gbm_bo_import(dev, GBM_BO_IMPORT_FD_MODIFIER, &mod_import,
+                                  GBM_BO_USE_RENDERING | GBM_BO_USE_LINEAR);
+    if (!nv12_imported) {
+        printf("gbmtest: NV12 modifier import failed: %s\n", strerror(errno));
+        ok = 0;
+        gbm_bo_destroy(nv12);
+        goto out_bo;
+    }
+    if (gbm_bo_get_plane_count(nv12_imported) != 2 ||
+        gbm_bo_get_modifier(nv12_imported) != GBM_FORMAT_MOD_LINEAR ||
+        gbm_bo_get_stride_for_plane(nv12_imported, 1) !=
+            gbm_bo_get_stride_for_plane(nv12, 1) ||
+        gbm_bo_get_offset(nv12_imported, 1) != gbm_bo_get_offset(nv12, 1)) {
+        printf("gbmtest: imported NV12 modifier metadata mismatch\n");
+        ok = 0;
+    }
+    gbm_bo_destroy(nv12_imported);
+    gbm_bo_destroy(nv12);
+    close(nv12_fd0);
+    close(nv12_fd1);
+    nv12_fd0 = -1;
+    nv12_fd1 = -1;
+    if (ok)
+        printf("gbmtest: passed linear NV12 modifier plane metadata import\n");
+
 out_bo:
+    if (nv12_fd0 >= 0)
+        close(nv12_fd0);
+    if (nv12_fd1 >= 0)
+        close(nv12_fd1);
     gbm_bo_destroy(bo);
     gbm_device_destroy(dev);
     if (!ok)
