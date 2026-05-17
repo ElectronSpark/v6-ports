@@ -43,9 +43,12 @@ static uint8_t overlay_segments_for_char(char ch)
     case '7': return 0x07;
     case '8': return 0x7f;
     case '9': return 0x6f;
+    case 'C': return 0x39;
     case 'F': return 0x71;
     case 'P': return 0x73;
+    case 'R': return 0x77;
     case 'S': return 0x6d;
+    case 'T': return 0x78;
     case '-': return 0x40;
     default: return 0;
     }
@@ -94,29 +97,29 @@ static void overlay_emit_glyph(struct overlay_vertex *vertices, int *count,
 void gl_fps_overlay_draw(const char *text, GLuint program,
                          GLint attr_pos, GLint attr_color)
 {
-    struct overlay_vertex vertices[512];
+    struct overlay_vertex vertices[768];
     int count = 0;
-    float w = 0.105f;
-    float h = 0.185f;
-    float gap = 0.026f;
-    float x = -0.88f;
+    float w = 0.078f;
+    float h = 0.155f;
+    float gap = 0.019f;
+    float x = -0.90f;
     float y = 0.82f;
 
     if (text == NULL || text[0] == '\0')
         return;
 
-    overlay_emit_rect(vertices, &count, -0.95f, 0.93f, 0.02f, 0.55f,
+    overlay_emit_rect(vertices, &count, -0.95f, 0.93f, 0.50f, 0.55f,
                       0.00f, 0.00f, 0.00f, 0.82f);
-    overlay_emit_rect(vertices, &count, -0.95f, 0.93f, 0.02f, 0.89f,
+    overlay_emit_rect(vertices, &count, -0.95f, 0.93f, 0.50f, 0.89f,
                       0.10f, 0.78f, 1.00f, 0.94f);
-    overlay_emit_rect(vertices, &count, -0.95f, 0.59f, 0.02f, 0.55f,
+    overlay_emit_rect(vertices, &count, -0.95f, 0.59f, 0.50f, 0.55f,
                       0.10f, 0.78f, 1.00f, 0.94f);
     overlay_emit_rect(vertices, &count, -0.95f, 0.93f, -0.91f, 0.55f,
                       0.10f, 0.78f, 1.00f, 0.94f);
-    overlay_emit_rect(vertices, &count, -0.02f, 0.93f, 0.02f, 0.55f,
+    overlay_emit_rect(vertices, &count, 0.46f, 0.93f, 0.50f, 0.55f,
                       0.10f, 0.78f, 1.00f, 0.94f);
 
-    for (const char *p = text; *p && count + 42 < 512; p++) {
+    for (const char *p = text; *p && count + 42 < (int)(sizeof(vertices) / sizeof(vertices[0])); p++) {
         if (*p == ' ') {
             x += w * 0.55f;
             continue;

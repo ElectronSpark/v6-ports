@@ -5,6 +5,200 @@ static uint32_t get_time_ms(void)
     return (uint32_t)(ts.tv_sec * 1000 + ts.tv_nsec / 1000000);
 }
 
+static int paint_scaled_window_geometry_buffer(struct wlcomp_surface *surf,
+                                               struct wlcomp_buffer *buf,
+                                               int32_t draw_x,
+                                               int32_t draw_y,
+                                               int32_t gw,
+                                               int32_t gh)
+{
+    uint8_t *src_bytes;
+    uint32_t *src;
+    int32_t bw;
+    int32_t bh;
+    int32_t src_stride_px;
+    int32_t dst_x0;
+    int32_t dst_y0;
+    int32_t dst_x1;
+    int32_t dst_y1;
+    int opaque_fast;
+
+    if (!surf->has_window_geometry || gw <= 0 || gh <= 0)
+        return 0;
+
+    bw = buf->width;
+    bh = buf->height;
+    if (bw <= 0 || bh <= 0 || (bw == gw && bh == gh))
+        return 0;
+
+    src_bytes = buffer_data(buf);
+    if (!src_bytes) {
+        static int missing_source_logs;
+
+        if (missing_source_logs < 8) {
+            fprintf(stderr,
+                    "wlcomp: scaled paint missing source buf=%p gpu=%d size=%dx%d geom=%dx%d\n",
+                    (void *)buf, buf ? buf->is_gpu_bo : 0, bw, bh, gw, gh);
+            missing_source_logs++;
+        }
+        return 0;
+    }
+    src = (uint32_t *)src_bytes;
+    src_stride_px = buf->plane_stride[0] / 4;
+    if (surface_is_demo_window(surf) && getenv("WLCOMP_GPU_PIXEL_PROBE")) {
+        static int scaled_probe_logs;
+
+        if (scaled_probe_logs < 12) {
+            uint32_t samples[5] = { 0, 0, 0, 0, 0 };
+            int nonblack = 0;
+            int points[5][2] = {
+                { bw / 2, bh / 2 },
+                { bw / 4, bh / 4 },
+                { (bw * 3) / 4, bh / 4 },
+                { bw / 4, (bh * 3) / 4 },
+                { (bw * 3) / 4, (bh * 3) / 4 },
+            };
+
+            for (int i = 0; i < 5; i++) {
+                int sx = points[i][0];
+                int sy = points[i][1];
+                uint32_t p;
+
+                if (sx < 0) sx = 0;
+                if (sx >= bw) sx = bw - 1;
+                if (sy < 0) sy = 0;
+                if (sy >= bh) sy = bh - 1;
+                p = src[sy * src_stride_px + sx];
+                samples[i] = p;
+                if ((p & 0x00ffffffu) != 0)
+                    nonblack++;
+            }
+            fprintf(stderr,
+                    "wlcomp: scaled probe frame=%d buf=%dx%d geom=%dx%d stride=%d nonblack=%d samples=%08x,%08x,%08x,%08x,%08x\n",
+                    scaled_probe_logs, bw, bh, gw, gh, buf->plane_stride[0],
+                    nonblack, samples[0], samples[1], samples[2],
+                    samples[3], samples[4]);
+            scaled_probe_logs++;
+        }
+    }
+    opaque_fast =
+        buf->format == WL_SHM_FORMAT_XRGB8888 ||
+        buf->format == DRM_FORMAT_XRGB8888 ||
+        ((buf->format == WL_SHM_FORMAT_ARGB8888 ||
+          buf->format == DRM_FORMAT_ARGB8888) &&
+         (buf->is_gpu_bo || surface_is_demo_window(surf)));
+
+    dst_x0 = draw_x;
+    dst_y0 = draw_y;
+    dst_x1 = draw_x + gw;
+    dst_y1 = draw_y + gh;
+    if (dst_x0 < 0) dst_x0 = 0;
+    if (dst_y0 < 0) dst_y0 = 0;
+    if (dst_x1 > (int32_t)g_fb_w) dst_x1 = (int32_t)g_fb_w;
+    if (dst_y1 > (int32_t)g_fb_h) dst_y1 = (int32_t)g_fb_h;
+    if (g_paint_clip_enabled) {
+        if (dst_x0 < g_paint_clip.x1) dst_x0 = g_paint_clip.x1;
+        if (dst_y0 < g_paint_clip.y1) dst_y0 = g_paint_clip.y1;
+        if (dst_x1 > g_paint_clip.x2) dst_x1 = g_paint_clip.x2;
+        if (dst_y1 > g_paint_clip.y2) dst_y1 = g_paint_clip.y2;
+    }
+    if (dst_x0 >= dst_x1 || dst_y0 >= dst_y1)
+        return 1;
+
+    if (opaque_fast && gw % bw == 0 && gh % bh == 0) {
+        int32_t scale_x = gw / bw;
+        int32_t scale_y = gh / bh;
+
+        if (scale_x > 1 && scale_y > 1) {
+            static uint32_t *scale_line;
+            static size_t scale_line_pixels;
+            int32_t sy0 = (dst_y0 - draw_y) / scale_y;
+            int32_t sy1 = (dst_y1 - draw_y + scale_y - 1) / scale_y;
+            int32_t sx0 = (dst_x0 - draw_x) / scale_x;
+            int32_t sx1 = (dst_x1 - draw_x + scale_x - 1) / scale_x;
+            size_t needed_pixels = g_fb_w;
+
+            if (sy0 < 0) sy0 = 0;
+            if (sx0 < 0) sx0 = 0;
+            if (sy1 > bh) sy1 = bh;
+            if (sx1 > bw) sx1 = bw;
+            if (scale_line_pixels < needed_pixels) {
+                uint32_t *new_line = realloc(scale_line,
+                                             needed_pixels * sizeof(uint32_t));
+
+                if (!new_line)
+                    return 0;
+                scale_line = new_line;
+                scale_line_pixels = needed_pixels;
+            }
+
+            for (int32_t sy = sy0; sy < sy1; sy++) {
+                int32_t src_y = buf->y_inverted ? (bh - 1 - sy) : sy;
+                int32_t dy0 = draw_y + sy * scale_y;
+                int32_t dy1 = dy0 + scale_y;
+                int32_t line_x0 = dst_x1;
+                int32_t line_x1 = dst_x0;
+
+                if (dy0 < dst_y0) dy0 = dst_y0;
+                if (dy1 > dst_y1) dy1 = dst_y1;
+                for (int32_t sx = sx0; sx < sx1; sx++) {
+                    uint32_t pixel =
+                        src[src_y * src_stride_px + sx] | 0xFF000000u;
+                    int32_t dx0 = draw_x + sx * scale_x;
+                    int32_t dx1 = dx0 + scale_x;
+
+                    if (dx0 < dst_x0) dx0 = dst_x0;
+                    if (dx1 > dst_x1) dx1 = dst_x1;
+                    if (dx0 < line_x0) line_x0 = dx0;
+                    if (dx1 > line_x1) line_x1 = dx1;
+                    for (int32_t dx = dx0; dx < dx1; dx++)
+                        scale_line[dx] = pixel;
+                }
+                if (line_x0 >= line_x1)
+                    continue;
+                for (int32_t dy = dy0; dy < dy1; dy++) {
+                    memcpy(&g_fb_buf[dy * g_fb_w + line_x0],
+                           &scale_line[line_x0],
+                           (size_t)(line_x1 - line_x0) * sizeof(uint32_t));
+                }
+            }
+            return 1;
+        }
+    }
+
+    int64_t src_y_fp = (((int64_t)(dst_y0 - draw_y) * bh) << 16) / gh;
+    int64_t src_x_start_fp = (((int64_t)(dst_x0 - draw_x) * bw) << 16) / gw;
+    int64_t src_y_step = ((int64_t)bh << 16) / gh;
+    int64_t src_x_step = ((int64_t)bw << 16) / gw;
+
+    for (int32_t dy = dst_y0; dy < dst_y1; dy++, src_y_fp += src_y_step) {
+        int32_t src_y = (int32_t)(src_y_fp >> 16);
+        int64_t src_x_fp = src_x_start_fp;
+        if (src_y < 0) src_y = 0;
+        if (src_y >= bh) src_y = bh - 1;
+        if (buf->y_inverted)
+            src_y = bh - 1 - src_y;
+
+        for (int32_t dx = dst_x0; dx < dst_x1; dx++, src_x_fp += src_x_step) {
+            int32_t src_x = (int32_t)(src_x_fp >> 16);
+            if (src_x < 0) src_x = 0;
+            if (src_x >= bw) src_x = bw - 1;
+
+            if (buf->format == DRM_FORMAT_NV12) {
+                g_fb_buf[dy * g_fb_w + dx] =
+                    nv12_pixel_argb(buf, src_x, src_y);
+            } else if (opaque_fast) {
+                g_fb_buf[dy * g_fb_w + dx] =
+                    src[src_y * src_stride_px + src_x] | 0xFF000000u;
+            } else {
+                blend_pixel(&g_fb_buf[dy * g_fb_w + dx], buf,
+                            src[src_y * src_stride_px + src_x]);
+            }
+        }
+    }
+    return 1;
+}
+
 static void paint_scene(int fb_w, int fb_h, int *acquire_blocked)
 {
     struct wlcomp_surface *surf;
@@ -123,7 +317,12 @@ static void paint_scene(int fb_w, int fb_h, int *acquire_blocked)
         if (row0 >= row1 || col0 >= col1)
             continue;
 
-        if (gpu_compose_present_buffer(buf, draw_x, draw_y,
+        if (paint_scaled_window_geometry_buffer(surf, buf, draw_x, draw_y,
+                                                gw, gh))
+            continue;
+
+        if (gpu_compose_can_present_surface(surf, buf) &&
+            gpu_compose_present_buffer(buf, draw_x, draw_y,
                                        row0, row1, col0, col1))
             continue;
 
@@ -142,7 +341,11 @@ static void paint_scene(int fb_w, int fb_h, int *acquire_blocked)
             continue;
         }
 
-        if (buf->format == WL_SHM_FORMAT_XRGB8888) {
+        if (buf->format == WL_SHM_FORMAT_XRGB8888 ||
+            buf->format == DRM_FORMAT_XRGB8888 ||
+            ((buf->format == WL_SHM_FORMAT_ARGB8888 ||
+              buf->format == DRM_FORMAT_ARGB8888) &&
+             (buf->is_gpu_bo || surface_is_demo_window(surf)))) {
             size_t copy_bytes = (size_t)(col1 - col0) * sizeof(uint32_t);
 
             for (int32_t row = row0; row < row1; row++) {
@@ -183,6 +386,53 @@ static void paint_scene(int fb_w, int fb_h, int *acquire_blocked)
     draw_default_cursor();
 }
 
+static void release_cpu_copied_buffers_after_paint(void)
+{
+    struct wlcomp_surface *surf;
+
+    wl_list_for_each(surf, &g_surfaces, link) {
+        struct wlcomp_buffer *buf = surf->committed_buf;
+        int32_t gx, gy, gw, gh;
+
+        if (!buf || surf->buffer_released || buf->release_pending)
+            continue;
+        if (buf->is_gpu_bo) {
+            surface_window_geometry(surf, &gx, &gy, &gw, &gh);
+            if (!surf->has_window_geometry ||
+                (buf->width == gw && buf->height == gh))
+                continue;
+        }
+        if (!buffer_acquire_ready(buf))
+            continue;
+
+        buffer_send_immediate_release_events(buf);
+        surf->buffer_released = 1;
+        buf->release_pending = 0;
+        buffer_maybe_free(buf);
+    }
+}
+
+static void damage_fast_gpu_windows(uint32_t now)
+{
+    static uint32_t next_gpu_damage_ms;
+    struct wlcomp_surface *surf;
+    int damaged = 0;
+
+    if (now < next_gpu_damage_ms)
+        return;
+
+    wl_list_for_each(surf, &g_surfaces, link) {
+        if (!surface_tree_visible(surf) || !surf->committed_buf ||
+            !surf->committed_buf->is_gpu_bo || !surface_is_demo_window(surf))
+            continue;
+        damage_surface(surf);
+        damaged = 1;
+    }
+
+    if (damaged)
+        next_gpu_damage_ms = now + 16;
+}
+
 static void composite_and_flip(void)
 {
     int fb_w = (int)g_fb_w;
@@ -209,6 +459,7 @@ static void composite_and_flip(void)
         damage_full_reason(FULL_DAMAGE_REPAIR);
         next_repair_damage_ms = now + (uint32_t)repair_ms;
     }
+    damage_fast_gpu_windows(now);
 
     /*
      * Hyper-V synthvid can come online a little after fb0 is registered and
@@ -254,6 +505,7 @@ static void composite_and_flip(void)
     g_paint_clip_enabled = 0;
     wlcomp_draw_clear_clip();
 
+    release_cpu_copied_buffers_after_paint();
     present_damage_rects(fb_w, now);
     if (acquire_blocked) {
         g_damage_stats.acquire_blocked_frames++;
@@ -291,4 +543,3 @@ static void composite_and_flip(void)
     if (!present_ready)
         damage_full_reason(FULL_DAMAGE_ACQUIRE);
 }
-

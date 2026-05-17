@@ -10,6 +10,7 @@
 #include <EGL/eglext.h>
 #include <GLES2/gl2.h>
 #include <math.h>
+#include <poll.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -36,8 +37,10 @@
 #define GL_DEPTH24_STENCIL8 0x88F0
 #endif
 
-#define WINDOW_W 480
-#define WINDOW_H 360
+#define WINDOW_W 640
+#define WINDOW_H 480
+#define WINDOW_MIN_W 320
+#define WINDOW_MIN_H 240
 #define SOFTWARE_DEMO_W 180
 #define SOFTWARE_DEMO_H 135
 
@@ -64,6 +67,7 @@ struct app_state {
     struct wl_compositor *compositor;
     struct xdg_wm_base *wm_base;
     struct wl_surface *surface;
+    struct wl_callback *frame_callback;
     struct xdg_surface *xdg_surface;
     struct xdg_toplevel *toplevel;
     struct wl_egl_window *egl_window;
@@ -71,6 +75,8 @@ struct app_state {
     EGLConfig egl_config;
     EGLContext egl_context;
     EGLSurface egl_surface;
+    int egl_surface_width;
+    int egl_surface_height;
     GLuint program;
     GLuint tex_program;
     GLuint vbo;
@@ -96,18 +102,41 @@ struct app_state {
     int resize_every;
     int width;
     int height;
+    int render_width;
+    int render_height;
+    int render_divisor;
     int loop;
     int api_smoke;
     int sphere_demo;
     int software_demo;
     int max_width;
     int max_height;
+    int throttle_frames;
+    int pace_us;
+    double next_frame_sec;
     int sphere_vertex_count;
     int fps_frame_count;
+    int fps_title_count;
     double fps_value;
     double fps_start_sec;
+    int visible_fps_frame_count;
+    double visible_fps_value;
+    double callback_fps_value;
+    double visible_fps_start_sec;
+    double draw_total_sec;
+    double swap_total_sec;
+    double dispatch_total_sec;
+    double pace_total_sec;
+    double sleep_total_sec;
     char fps_text[GL_FPS_OVERLAY_TEXT_MAX];
 };
+
+static void update_render_size(struct app_state *app);
+static double monotonic_seconds(void);
+static double rtc_seconds(void);
+static int using_d3d12_driver(void);
+static void update_demo_visible_fps(struct app_state *app);
+static int dispatch_wayland_nonblocking(struct app_state *app);
 
 static EGLDisplay get_wayland_display(struct wl_display *display)
 {
@@ -167,7 +196,9 @@ static int init_api_smoke_resources(struct app_state *app)
 
 static int init_sphere_resources(struct app_state *app)
 {
-    int frequency = app->software_demo ? 2 : 4;
+    const char *driver = getenv("GALLIUM_DRIVER");
+    int frequency = app->software_demo ? 2 :
+                    (driver && strcmp(driver, "d3d12") == 0) ? 2 : 4;
     static const char *sphere_vs =
         "attribute vec3 a_pos;\n"
         "attribute vec3 a_normal;\n"
@@ -255,7 +286,7 @@ static void render_simple_frame(struct app_state *app)
           0.20f, 0.42f, 1.0f, 1.0f },
     };
 
-    glViewport(0, 0, app->width, app->height);
+    glViewport(0, 0, app->render_width, app->render_height);
     glClearColor(0.03f, 0.055f, 0.07f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT);
     glUseProgram(app->program);
@@ -285,10 +316,10 @@ static void render_api_frame(struct app_state *app)
         { -0.82f,  0.72f, 0.0f, 1.0f },
         {  0.82f,  0.72f, 1.0f, 1.0f },
     };
-    int sx = app->width / 10;
-    int sy = app->height / 10;
-    int sw = app->width - sx * 2;
-    int sh = app->height - sy * 2;
+    int sx = app->render_width / 10;
+    int sy = app->render_height / 10;
+    int sw = app->render_width - sx * 2;
+    int sh = app->render_height - sy * 2;
 
     glBindFramebuffer(GL_FRAMEBUFFER, app->fbo);
     glViewport(0, 0, 128, 128);
@@ -319,7 +350,7 @@ static void render_api_frame(struct app_state *app)
     glDisable(GL_STENCIL_TEST);
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-    glViewport(0, 0, app->width, app->height);
+    glViewport(0, 0, app->render_width, app->render_height);
     glClearColor(0.03f, 0.055f, 0.07f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT);
     glEnable(GL_SCISSOR_TEST);
@@ -342,8 +373,9 @@ static void render_api_frame(struct app_state *app)
 
 static void render_sphere_frame(struct app_state *app)
 {
-    float aspect = app->height > 0 ? (float)app->width / (float)app->height :
-                                     1.0f;
+    float aspect = app->render_height > 0 ?
+                   (float)app->render_width / (float)app->render_height :
+                   1.0f;
     float projection[16];
     float view[16];
     float rx[16];
@@ -363,7 +395,7 @@ static void render_sphere_frame(struct app_state *app)
     mesawlegl_mat4_mul(pv, projection, view);
     mesawlegl_mat4_mul(mvp, pv, model);
 
-    glViewport(0, 0, app->width, app->height);
+    glViewport(0, 0, app->render_width, app->render_height);
     glClearColor(0.015f, 0.022f, 0.032f, 1.0f);
     if (!app->software_demo)
         glClearDepthf(1.0f);
@@ -417,6 +449,8 @@ static int create_window_surface(struct app_state *app)
                 app->loop, eglGetError());
         return -1;
     }
+    app->egl_surface_width = app->render_width;
+    app->egl_surface_height = app->render_height;
     return 0;
 }
 
@@ -426,14 +460,18 @@ static int recreate_window_surface(struct app_state *app)
         app->egl_context == EGL_NO_CONTEXT || !app->egl_window)
         return -1;
 
-    eglMakeCurrent(app->egl_display, EGL_NO_SURFACE, EGL_NO_SURFACE,
-                   EGL_NO_CONTEXT);
-    if (app->egl_surface != EGL_NO_SURFACE) {
-        eglDestroySurface(app->egl_display, app->egl_surface);
-        app->egl_surface = EGL_NO_SURFACE;
+    if (app->egl_surface == EGL_NO_SURFACE)
+        return create_window_surface(app);
+
+    update_render_size(app);
+    if (app->egl_surface_width != app->render_width ||
+        app->egl_surface_height != app->render_height) {
+        wl_egl_window_resize(app->egl_window, app->render_width,
+                             app->render_height, 0, 0);
+        app->egl_surface_width = app->render_width;
+        app->egl_surface_height = app->render_height;
     }
-    wl_egl_window_resize(app->egl_window, app->width, app->height, 0, 0);
-    return create_window_surface(app);
+    return 0;
 }
 
 static int init_mesa(struct app_state *app)
@@ -490,8 +528,9 @@ static int init_mesa(struct app_state *app)
         return -1;
     }
 
-    app->egl_window = wl_egl_window_create(app->surface, app->width,
-                                           app->height);
+    update_render_size(app);
+    app->egl_window = wl_egl_window_create(app->surface, app->render_width,
+                                           app->render_height);
     if (!app->egl_window) {
         fprintf(stderr, "mesawlegl: wl_egl_window_create failed\n");
         return -1;
@@ -502,6 +541,12 @@ static int init_mesa(struct app_state *app)
         fprintf(stderr, "mesawlegl: EGL context setup failed (0x%x)\n",
                 eglGetError());
         return -1;
+    }
+    if (app->sphere_demo && !app->software_demo) {
+        if (!eglSwapInterval(app->egl_display, 0))
+            fprintf(stderr,
+                    "mesawlegl: warning: eglSwapInterval(0) failed (0x%x)\n",
+                    eglGetError());
     }
 
     app->program = xv6_gl_link_program("mesawlegl", vs, fs);
@@ -531,13 +576,51 @@ static int init_mesa(struct app_state *app)
             major, minor, glGetString(GL_VERSION), glGetString(GL_RENDERER),
             app->api_smoke ? " api-smoke" : "",
             app->sphere_demo ? " spherical-poly-demo" : "");
+    if (app->render_divisor > 1)
+        fprintf(stderr,
+                "mesawlegl: render-scale window=%dx%d render=%dx%d divisor=%d\n",
+                app->width, app->height, app->render_width,
+                app->render_height, app->render_divisor);
     return 0;
 }
 
-static void sleep_frame(void)
+static void sleep_frame_if_needed(const struct app_state *app)
 {
     struct timespec ts = { .tv_sec = 0, .tv_nsec = 16000000L };
+
+    if (!app->throttle_frames)
+        return;
     nanosleep(&ts, NULL);
+}
+
+static void pace_frame_if_needed(struct app_state *app)
+{
+    double now;
+    double remaining;
+    struct timespec ts;
+
+    if (app->pace_us <= 0)
+        return;
+
+    now = monotonic_seconds();
+    if (app->next_frame_sec <= 0.0) {
+        app->next_frame_sec = now + (double)app->pace_us / 1000000.0;
+        return;
+    }
+
+    remaining = app->next_frame_sec - now;
+    if (remaining > 0.0) {
+        ts.tv_sec = (time_t)remaining;
+        ts.tv_nsec = (long)((remaining - (double)ts.tv_sec) * 1000000000.0);
+        if (ts.tv_nsec < 0)
+            ts.tv_nsec = 0;
+        nanosleep(&ts, NULL);
+        now = monotonic_seconds();
+    }
+
+    app->next_frame_sec += (double)app->pace_us / 1000000.0;
+    if (app->next_frame_sec < now)
+        app->next_frame_sec = now + (double)app->pace_us / 1000000.0;
 }
 
 static double monotonic_seconds(void)
@@ -547,6 +630,15 @@ static double monotonic_seconds(void)
     if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0)
         return 0.0;
     return (double)ts.tv_sec + (double)ts.tv_nsec / 1000000000.0;
+}
+
+static double rtc_seconds(void)
+{
+    struct timespec ts;
+
+    if (clock_gettime(CLOCK_REALTIME, &ts) == 0)
+        return (double)ts.tv_sec + (double)ts.tv_nsec / 1000000000.0;
+    return monotonic_seconds();
 }
 
 static int env_enabled(const char *name)
@@ -563,6 +655,99 @@ static int env_is_zero(const char *name)
     return value && strcmp(value, "0") == 0;
 }
 
+static int env_int_value(const char *name, int fallback)
+{
+    const char *value = getenv(name);
+    char *end = NULL;
+    long parsed;
+
+    if (!value || !*value)
+        return fallback;
+    parsed = strtol(value, &end, 10);
+    if (end == value)
+        return fallback;
+    if (parsed < 1)
+        parsed = 1;
+    if (parsed > 32)
+        parsed = 32;
+    return (int)parsed;
+}
+
+static int env_int_range(const char *name, int fallback, int min_value,
+                         int max_value)
+{
+    const char *value = getenv(name);
+    char *end = NULL;
+    long parsed;
+
+    if (!value || !*value)
+        return fallback;
+    parsed = strtol(value, &end, 10);
+    if (end == value)
+        return fallback;
+    if (parsed < min_value)
+        parsed = min_value;
+    if (parsed > max_value)
+        parsed = max_value;
+    return (int)parsed;
+}
+
+static int using_d3d12_driver(void)
+{
+    const char *driver = getenv("GALLIUM_DRIVER");
+
+    return driver && strcmp(driver, "d3d12") == 0;
+}
+
+static int read_wlcomp_fps(double *fps_out)
+{
+    FILE *fp;
+    char line[192];
+    double fps;
+
+    if (fps_out)
+        *fps_out = 0.0;
+    fp = fopen("/tmp/wlcomp-fps", "r");
+    if (!fp)
+        return 0;
+    if (!fgets(line, sizeof(line), fp)) {
+        fclose(fp);
+        return 0;
+    }
+    fclose(fp);
+    if (sscanf(line, "fps=%lf", &fps) != 1)
+        return 0;
+    if (fps < 0.0)
+        fps = 0.0;
+    if (fps_out)
+        *fps_out = fps;
+    return 1;
+}
+
+static int dispatch_wayland_nonblocking(struct app_state *app)
+{
+    struct pollfd pfd;
+    int ret;
+
+    if (!app->display)
+        return -1;
+    while ((ret = wl_display_dispatch_pending(app->display)) > 0)
+        ;
+    if (ret < 0)
+        return -1;
+    wl_display_flush(app->display);
+
+    pfd.fd = wl_display_get_fd(app->display);
+    pfd.events = POLLIN;
+    pfd.revents = 0;
+    ret = poll(&pfd, 1, 0);
+    if (ret < 0)
+        return -1;
+    if (ret > 0 && (pfd.revents & (POLLIN | POLLERR | POLLHUP)) != 0)
+        return wl_display_dispatch(app->display);
+    return 0;
+}
+
 static void clamp_demo_size(struct app_state *app)
 {
     if (!app->sphere_demo || app->max_width <= 0 || app->max_height <= 0)
@@ -573,36 +758,143 @@ static void clamp_demo_size(struct app_state *app)
         app->height = app->max_height;
 }
 
-static void update_demo_fps(struct app_state *app)
+static void update_render_size(struct app_state *app)
 {
+    int divisor = app->render_divisor > 0 ? app->render_divisor : 1;
+    int min_width = using_d3d12_driver() ? 80 : 160;
+    int min_height = using_d3d12_driver() ? 48 : 90;
+
+    app->render_width = app->width / divisor;
+    app->render_height = app->height / divisor;
+    if (app->render_width < min_width)
+        app->render_width = min_width;
+    if (app->render_height < min_height)
+        app->render_height = min_height;
+    if (app->render_width > app->width)
+        app->render_width = app->width;
+    if (app->render_height > app->height)
+        app->render_height = app->height;
+}
+
+static void update_demo_client_fps(struct app_state *app)
+{
+    static int stderr_fps_counter;
     double now;
     double elapsed;
     double fps;
+    double compositor_fps;
+    double display_fps;
     char title[96];
 
     if (!app->sphere_demo || !app->toplevel)
         return;
 
-    now = monotonic_seconds();
-    if (app->fps_start_sec <= 0.0)
-        app->fps_start_sec = now;
     app->fps_frame_count++;
+    if (app->fps_frame_count < 30)
+        return;
+
+    now = rtc_seconds();
+    if (app->fps_start_sec <= 0.0) {
+        app->fps_start_sec = now;
+        return;
+    }
     elapsed = now - app->fps_start_sec;
     if (elapsed < 1.0)
         return;
 
     fps = elapsed > 0.0 ? (double)app->fps_frame_count / elapsed : 0.0;
     app->fps_value = fps;
-    snprintf(app->fps_text, sizeof(app->fps_text), "FPS %.1f", fps);
-    snprintf(title, sizeof(title), "Mesa 3D Demo - %.1f FPS", fps);
-    xdg_toplevel_set_title(app->toplevel, title);
-    fprintf(stderr, "mesawlegl[%d]: fps=%.1f\n", app->loop, fps);
+    if (read_wlcomp_fps(&compositor_fps)) {
+        display_fps = compositor_fps;
+    } else {
+        compositor_fps = 0.0;
+        display_fps = app->callback_fps_value;
+    }
+    if (display_fps > 0.0) {
+        app->visible_fps_value = display_fps;
+        snprintf(app->fps_text, sizeof(app->fps_text), "VIS %.1f FPS",
+                 display_fps);
+        app->fps_title_count++;
+        if ((app->fps_title_count & 3) == 1) {
+            snprintf(title, sizeof(title), "Mesa 3D Demo - VIS %.1f FPS",
+                     display_fps);
+            xdg_toplevel_set_title(app->toplevel, title);
+            wl_display_flush(app->display);
+        }
+    }
+    if ((stderr_fps_counter++ & 3) == 0)
+        fprintf(stderr,
+                "mesawlegl[%d]: client_rtc_fps=%.1f compositor_rtc_fps=%.1f callback_rtc_fps=%.1f displayed_fps=%.1f\n",
+                app->loop, fps, compositor_fps, app->callback_fps_value,
+                app->visible_fps_value);
     app->fps_frame_count = 0;
     app->fps_start_sec = now;
 }
 
+static void update_demo_visible_fps(struct app_state *app)
+{
+    static int stderr_fps_counter;
+    double now;
+    double elapsed;
+    double fps;
+
+    if (!app->sphere_demo || !app->toplevel)
+        return;
+
+    app->visible_fps_frame_count++;
+    now = rtc_seconds();
+    if (app->visible_fps_start_sec <= 0.0) {
+        app->visible_fps_start_sec = now;
+        return;
+    }
+    elapsed = now - app->visible_fps_start_sec;
+    if (elapsed < 1.0)
+        return;
+
+    fps = elapsed > 0.0 ?
+          (double)app->visible_fps_frame_count / elapsed : 0.0;
+    app->callback_fps_value = fps;
+    if ((stderr_fps_counter++ & 3) == 0)
+        fprintf(stderr,
+                "mesawlegl[%d]: callback_rtc_fps=%.1f client_rtc_fps=%.1f displayed_fps=%.1f\n",
+                app->loop, fps, app->fps_value, app->visible_fps_value);
+    app->visible_fps_frame_count = 0;
+    app->visible_fps_start_sec = now;
+}
+
+static void frame_done(void *data, struct wl_callback *cb, uint32_t time)
+{
+    struct app_state *app = data;
+    (void)time;
+
+    if (cb)
+        wl_callback_destroy(cb);
+    if (app->frame_callback == cb)
+        app->frame_callback = NULL;
+    update_demo_visible_fps(app);
+}
+
+static const struct wl_callback_listener frame_listener = {
+    .done = frame_done,
+};
+
+static void request_frame_callback(struct app_state *app)
+{
+    if (!app->sphere_demo || app->frame_callback || !app->surface)
+        return;
+
+    app->frame_callback = wl_surface_frame(app->surface);
+    if (app->frame_callback)
+        wl_callback_add_listener(app->frame_callback, &frame_listener, app);
+}
+
 static int draw_and_swap(struct app_state *app)
 {
+    static int gl_check_count;
+    double t0 = monotonic_seconds();
+    double t1;
+    double t2;
+
     if (app->sphere_demo)
         render_sphere_frame(app);
     else if (app->api_smoke)
@@ -610,17 +902,28 @@ static int draw_and_swap(struct app_state *app)
     else
         render_simple_frame(app);
     render_fps_overlay(app);
-    if (glGetError() != GL_NO_ERROR) {
-        fprintf(stderr, "mesawlegl[%d]: GL error during frame\n", app->loop);
-        return -1;
+    if (!app->sphere_demo || app->software_demo || !using_d3d12_driver()) {
+        gl_check_count++;
+        if (gl_check_count >= 120 && glGetError() != GL_NO_ERROR) {
+            fprintf(stderr, "mesawlegl[%d]: GL error during frame\n", app->loop);
+            return -1;
+        }
+        if (gl_check_count >= 120)
+            gl_check_count = 0;
     }
+    t1 = monotonic_seconds();
+    request_frame_callback(app);
     if (!eglSwapBuffers(app->egl_display, app->egl_surface)) {
         fprintf(stderr, "mesawlegl[%d]: eglSwapBuffers failed (0x%x)\n",
                 app->loop, eglGetError());
         return -1;
     }
-    update_demo_fps(app);
-    wl_display_flush(app->display);
+    t2 = monotonic_seconds();
+    if (t1 >= t0)
+        app->draw_total_sec += t1 - t0;
+    if (t2 >= t1)
+        app->swap_total_sec += t2 - t1;
+    update_demo_client_fps(app);
     return 0;
 }
 
@@ -650,9 +953,13 @@ static void toplevel_configure(void *data, struct xdg_toplevel *toplevel,
         app->width = width;
         app->height = height;
         clamp_demo_size(app);
+        update_render_size(app);
+        if (app->xdg_surface && app->render_divisor > 1)
+            xdg_surface_set_window_geometry(app->xdg_surface, 0, 0,
+                                            app->width, app->height);
         if (app->egl_window)
-            wl_egl_window_resize(app->egl_window, app->width, app->height,
-                                 0, 0);
+            wl_egl_window_resize(app->egl_window, app->render_width,
+                                 app->render_height, 0, 0);
     }
 }
 
@@ -736,6 +1043,11 @@ static int init_wayland(struct app_state *app)
                            app->sphere_demo ? "Mesa 3D Demo - starting" :
                                               "Mesa Native Wayland EGL");
     xdg_toplevel_set_app_id(app->toplevel, "mesawlegl");
+    if (app->render_divisor > 1)
+        xdg_surface_set_window_geometry(app->xdg_surface, 0, 0,
+                                        app->width, app->height);
+    if (app->sphere_demo && !app->software_demo)
+        xdg_toplevel_set_min_size(app->toplevel, WINDOW_MIN_W, WINDOW_MIN_H);
     if (app->sphere_demo && app->max_width > 0 && app->max_height > 0) {
         xdg_toplevel_set_min_size(app->toplevel, app->max_width,
                                   app->max_height);
@@ -753,9 +1065,11 @@ static void cleanup(struct app_state *app)
 {
     if (app->display)
         wl_display_roundtrip(app->display);
+    if (app->frame_callback) {
+        wl_callback_destroy(app->frame_callback);
+        app->frame_callback = NULL;
+    }
     if (app->egl_display != EGL_NO_DISPLAY) {
-        eglMakeCurrent(app->egl_display, EGL_NO_SURFACE, EGL_NO_SURFACE,
-                       EGL_NO_CONTEXT);
         if (app->depth_stencil_rb)
             glDeleteRenderbuffers(1, &app->depth_stencil_rb);
         if (app->fbo_tex)
@@ -772,11 +1086,23 @@ static void cleanup(struct app_state *app)
             glDeleteProgram(app->tex_program);
         if (app->program)
             glDeleteProgram(app->program);
-        if (app->egl_surface != EGL_NO_SURFACE)
-            eglDestroySurface(app->egl_display, app->egl_surface);
-        if (app->egl_context != EGL_NO_CONTEXT)
-            eglDestroyContext(app->egl_display, app->egl_context);
-        eglTerminate(app->egl_display);
+        if (app->display && app->surface) {
+            wl_surface_attach(app->surface, NULL, 0, 0);
+            wl_surface_commit(app->surface);
+            wl_display_roundtrip(app->display);
+        }
+        eglMakeCurrent(app->egl_display, EGL_NO_SURFACE, EGL_NO_SURFACE,
+                       EGL_NO_CONTEXT);
+        if (app->sphere_demo && !app->software_demo) {
+            app->egl_surface = EGL_NO_SURFACE;
+            app->egl_context = EGL_NO_CONTEXT;
+        } else {
+            if (app->egl_surface != EGL_NO_SURFACE)
+                eglDestroySurface(app->egl_display, app->egl_surface);
+            if (app->egl_context != EGL_NO_CONTEXT)
+                eglDestroyContext(app->egl_display, app->egl_context);
+            eglTerminate(app->egl_display);
+        }
     }
     if (app->egl_window)
         wl_egl_window_destroy(app->egl_window);
@@ -808,8 +1134,35 @@ static int parse_positive_arg(const char *arg, const char *prefix,
     return value > 0 ? value : fallback;
 }
 
+static int parse_nonnegative_arg(const char *arg, const char *prefix,
+                                 int fallback)
+{
+    size_t len = strlen(prefix);
+    int value;
+
+    if (strncmp(arg, prefix, len) != 0)
+        return fallback;
+    value = atoi(arg + len);
+    return value >= 0 ? value : fallback;
+}
+
+static int parse_size_arg(const char *arg, int *width, int *height)
+{
+    int w;
+    int h;
+
+    if (sscanf(arg, "--size=%dx%d", &w, &h) != 2)
+        return -1;
+    if (w < WINDOW_MIN_W || h < WINDOW_MIN_H)
+        return -1;
+    *width = w;
+    *height = h;
+    return 0;
+}
+
 static int run_client(int loop, int frames, int resize_every, int api_smoke,
-                      int sphere_demo, int software_demo)
+                      int sphere_demo, int software_demo, int initial_width,
+                      int initial_height)
 {
     struct app_state app;
     int rc = 0;
@@ -823,12 +1176,20 @@ static int run_client(int loop, int frames, int resize_every, int api_smoke,
     app.running = 1;
     app.max_frames = frames;
     app.resize_every = resize_every;
-    app.width = WINDOW_W;
-    app.height = WINDOW_H;
+    app.width = initial_width;
+    app.height = initial_height;
     app.loop = loop;
     app.api_smoke = api_smoke;
     app.sphere_demo = sphere_demo;
     app.software_demo = software_demo;
+    app.throttle_frames = !sphere_demo || software_demo;
+    app.render_divisor = 1;
+    if (sphere_demo && !software_demo && using_d3d12_driver())
+        app.render_divisor =
+            env_int_value("XV6_MESAWLEGL_RENDER_DIV", 1);
+    if (sphere_demo && !software_demo && using_d3d12_driver())
+        app.pace_us = env_int_range("XV6_MESAWLEGL_PACE_US", 0,
+                                    0, 50000);
     if (sphere_demo && software_demo) {
         app.width = SOFTWARE_DEMO_W;
         app.height = SOFTWARE_DEMO_H;
@@ -838,7 +1199,11 @@ static int run_client(int loop, int frames, int resize_every, int api_smoke,
     app.fps_start_sec = 0.0;
     app.fps_frame_count = 0;
     app.fps_value = 0.0;
-    snprintf(app.fps_text, sizeof(app.fps_text), "FPS --.-");
+    app.visible_fps_start_sec = 0.0;
+    app.visible_fps_frame_count = 0;
+    app.visible_fps_value = 0.0;
+    app.callback_fps_value = 0.0;
+    snprintf(app.fps_text, sizeof(app.fps_text), "VIS --.- FPS");
 
     if (init_wayland(&app) < 0) {
         cleanup(&app);
@@ -850,17 +1215,18 @@ static int run_client(int loop, int frames, int resize_every, int api_smoke,
         ;
     if (app.configured && recreate_window_surface(&app) < 0)
         rc = 1;
-    start_sec = monotonic_seconds();
-    for (app.frame = 0; rc == 0 && app.running && app.frame < app.max_frames;
+    start_sec = rtc_seconds();
+    for (app.frame = 0; rc == 0 && app.running &&
+         (app.max_frames <= 0 || app.frame < app.max_frames);
          app.frame++) {
         if (app.resize_every > 0 && app.frame > 0 &&
             app.frame % app.resize_every == 0) {
-            if (app.width == WINDOW_W) {
+            if (app.width == initial_width && app.height == initial_height) {
                 app.width = 360;
                 app.height = 260;
             } else {
-                app.width = WINDOW_W;
-                app.height = WINDOW_H;
+                app.width = initial_width;
+                app.height = initial_height;
             }
             if (recreate_window_surface(&app) < 0) {
                 rc = 1;
@@ -871,17 +1237,60 @@ static int run_client(int loop, int frames, int resize_every, int api_smoke,
             rc = 1;
             break;
         }
-        wl_display_dispatch_pending(app.display);
-        sleep_frame();
+        {
+            double t0 = monotonic_seconds();
+            double t1;
+
+            pace_frame_if_needed(&app);
+            t1 = monotonic_seconds();
+            if (t1 >= t0)
+                app.pace_total_sec += t1 - t0;
+        }
+        if (app.sphere_demo || (app.frame & 3) == 0) {
+            double t0 = monotonic_seconds();
+            double t1;
+
+            if (dispatch_wayland_nonblocking(&app) < 0) {
+                app.running = 0;
+                rc = 1;
+            }
+            t1 = monotonic_seconds();
+            if (t1 >= t0)
+                app.dispatch_total_sec += t1 - t0;
+        }
+        {
+            double t0 = monotonic_seconds();
+            double t1;
+
+            sleep_frame_if_needed(&app);
+            t1 = monotonic_seconds();
+            if (t1 >= t0)
+                app.sleep_total_sec += t1 - t0;
+        }
     }
-    elapsed_sec = monotonic_seconds() - start_sec;
+    elapsed_sec = rtc_seconds() - start_sec;
     if (!app.configured)
         rc = 1;
     cleanup(&app);
     fprintf(stderr,
-            "mesawlegl[%d]: complete frames=%d status=%d elapsed=%.3fs fps=%.1f\n",
+            "mesawlegl[%d]: complete frames=%d status=%d rtc_elapsed=%.3fs rtc_fps=%.1f\n",
             loop, app.frame, rc, elapsed_sec,
             elapsed_sec > 0.0 ? (double)app.frame / elapsed_sec : 0.0);
+    if (app.frame > 0) {
+        double frames = (double)app.frame;
+
+        fprintf(stderr,
+                "mesawlegl[%d]: timing avg_ms draw=%.3f swap=%.3f dispatch=%.3f pace=%.3f sleep=%.3f other=%.3f\n",
+                loop,
+                app.draw_total_sec * 1000.0 / frames,
+                app.swap_total_sec * 1000.0 / frames,
+                app.dispatch_total_sec * 1000.0 / frames,
+                app.pace_total_sec * 1000.0 / frames,
+                app.sleep_total_sec * 1000.0 / frames,
+                (elapsed_sec - app.draw_total_sec - app.swap_total_sec -
+                 app.dispatch_total_sec - app.pace_total_sec -
+                 app.sleep_total_sec) * 1000.0 / frames);
+    }
     return rc;
 }
 
@@ -892,9 +1301,45 @@ int main(int argc, char **argv)
     int resize_every = 0;
     int api_smoke = 1;
     int sphere_demo = 0;
+    int initial_width = WINDOW_W;
+    int initial_height = WINDOW_H;
     int software_demo;
     int accel_requested;
     int rc = 0;
+
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--d3d12") == 0) {
+            setenv("XDG_RUNTIME_DIR", "/tmp", 0);
+            setenv("WAYLAND_DISPLAY", "wayland-0", 0);
+            setenv("LIBGL_ALWAYS_SOFTWARE", "0", 1);
+            setenv("GALLIUM_DRIVER", "d3d12", 1);
+            setenv("LIBGL_DRIVERS_PATH", "/lib/dri", 0);
+            setenv("EGL_PLATFORM", "wayland", 0);
+            setenv("XV6_MESA_WAYLAND_THROTTLE", "0", 0);
+            setenv("XV6_MESA_WAYLAND_XV6GPU", "1", 0);
+            setenv("XV6_MESA_WAYLAND_INPLACE_PRESENT", "1", 0);
+            setenv("XV6_D3D12_PRESENT_INTERVAL", "1", 0);
+            setenv("vblank_mode", "0", 0);
+        } else if (strcmp(argv[i], "--perf-log") == 0) {
+            setenv("XV6_MESA_PERF_LOG", "1", 1);
+        } else if (strcmp(argv[i], "--no-inplace") == 0) {
+            setenv("XV6_MESA_WAYLAND_INPLACE_PRESENT", "0", 1);
+        } else if (strcmp(argv[i], "--direct-backbuffer") == 0) {
+            setenv("XV6_D3D12_DIRECT_BACKBUFFER", "1", 1);
+        } else if (strcmp(argv[i], "--prefence") == 0) {
+            setenv("XV6_D3D12_SWRAST_NO_PREFENCE", "0", 1);
+        } else if (strcmp(argv[i], "--no-front-flush") == 0) {
+            setenv("XV6_D3D12_SWRAST_NO_FRONT_FLUSH", "1", 1);
+        } else if (strcmp(argv[i], "--sync-frontbuffer") == 0) {
+            setenv("XV6_D3D12_ASYNC_FRONTBUFFER", "0", 1);
+        } else if (strncmp(argv[i], "--render-div=", 13) == 0) {
+            setenv("XV6_MESAWLEGL_RENDER_DIV", argv[i] + 13, 1);
+        } else if (strncmp(argv[i], "--present-interval=", 19) == 0) {
+            setenv("XV6_D3D12_PRESENT_INTERVAL", argv[i] + 19, 1);
+        } else if (strncmp(argv[i], "--pace-us=", 10) == 0) {
+            setenv("XV6_MESAWLEGL_PACE_US", argv[i] + 10, 1);
+        }
+    }
 
     accel_requested = env_is_zero("LIBGL_ALWAYS_SOFTWARE") ||
         getenv("GALLIUM_DRIVER") != NULL;
@@ -907,7 +1352,7 @@ int main(int argc, char **argv)
 
     for (int i = 1; i < argc; i++) {
         if (strncmp(argv[i], "--frames=", 9) == 0) {
-            frames = parse_positive_arg(argv[i], "--frames=", frames);
+            frames = parse_nonnegative_arg(argv[i], "--frames=", frames);
         } else if (strncmp(argv[i], "--loops=", 8) == 0) {
             loops = parse_positive_arg(argv[i], "--loops=", loops);
         } else if (strncmp(argv[i], "--resize-every=", 15) == 0) {
@@ -920,13 +1365,31 @@ int main(int argc, char **argv)
             api_smoke = 1;
             sphere_demo = 0;
         } else if (strcmp(argv[i], "--demo") == 0) {
-            frames = 3600;
+            frames = 0;
             resize_every = 0;
             api_smoke = 0;
             sphere_demo = 1;
+        } else if (strncmp(argv[i], "--size=", 7) == 0) {
+            if (parse_size_arg(argv[i], &initial_width, &initial_height) != 0) {
+                fprintf(stderr,
+                        "mesawlegl: invalid size '%s' (minimum %dx%d)\n",
+                        argv[i], WINDOW_MIN_W, WINDOW_MIN_H);
+                return 2;
+            }
+        } else if (strcmp(argv[i], "--d3d12") == 0 ||
+                   strcmp(argv[i], "--perf-log") == 0 ||
+                   strcmp(argv[i], "--no-inplace") == 0 ||
+                   strcmp(argv[i], "--direct-backbuffer") == 0 ||
+                   strcmp(argv[i], "--prefence") == 0 ||
+                   strcmp(argv[i], "--no-front-flush") == 0 ||
+                   strcmp(argv[i], "--sync-frontbuffer") == 0 ||
+                   strncmp(argv[i], "--render-div=", 13) == 0 ||
+                   strncmp(argv[i], "--present-interval=", 19) == 0 ||
+                   strncmp(argv[i], "--pace-us=", 10) == 0) {
+            continue;
         } else if (strcmp(argv[i], "--help") == 0) {
             fprintf(stderr,
-                    "usage: %s [--frames=N] [--loops=N] [--resize-every=N] [--api-smoke|--simple|--demo]\n",
+                    "usage: %s [--frames=N] [--loops=N] [--resize-every=N] [--size=WxH] [--api-smoke|--simple|--demo] [--d3d12] [--perf-log] [--no-inplace] [--direct-backbuffer] [--prefence] [--no-front-flush] [--sync-frontbuffer] [--render-div=N] [--present-interval=N] [--pace-us=N]\n",
                     argv[0]);
             return 0;
         } else {
@@ -937,7 +1400,7 @@ int main(int argc, char **argv)
 
     for (int loop = 1; loop <= loops; loop++) {
         rc = run_client(loop, frames, resize_every, api_smoke, sphere_demo,
-                        software_demo);
+                        software_demo, initial_width, initial_height);
         if (rc != 0)
             break;
     }

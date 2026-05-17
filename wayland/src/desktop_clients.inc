@@ -864,7 +864,7 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
         if (is_webkit)
             disable_child_coredumps();
 
-        if (is_netsurf || is_webkit) {
+        if (is_netsurf || is_webkit || is_mesa_gl) {
             const char *log_path = "/tmp/app_log.txt";
             int log_flags = O_WRONLY | O_CREAT | O_TRUNC;
 
@@ -1302,6 +1302,29 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             "EGL_PLATFORM=wayland",
             NULL
         };
+        char *envp_mesa_dxg[] = {
+            "HOME=/",
+            "PATH=/bin:/usr/bin",
+            "XDG_RUNTIME_DIR=/tmp",
+            "XDG_CACHE_HOME=/tmp/.cache",
+            "XDG_DATA_DIRS=/share:/usr/share",
+            "WAYLAND_DISPLAY=wayland-0",
+            "GDK_BACKEND=wayland",
+            "XCURSOR_PATH=/share/icons",
+            "XCURSOR_THEME=Adwaita",
+            "LIBGL_ALWAYS_SOFTWARE=0",
+            "GALLIUM_DRIVER=d3d12",
+            "LIBGL_DRIVERS_PATH=/lib/dri",
+            "EGL_PLATFORM=wayland",
+            "XV6_MESA_WAYLAND_THROTTLE=0",
+            "XV6_MESA_WAYLAND_XV6GPU=1",
+            "XV6_MESA_PERF_LOG=0",
+            "XV6_MESA_WAYLAND_INPLACE_PRESENT=1",
+            "XV6_D3D12_PRESENT_INTERVAL=1",
+            "XV6_MESAWLEGL_RENDER_DIV=2",
+            "vblank_mode=0",
+            NULL
+        };
         char *envp_mesa_accel_sw[] = {
             "HOME=/",
             "PATH=/bin:/usr/bin",
@@ -1415,7 +1438,8 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
                          envp_minibrowser) :
                     (is_mesa_gl ?
                     (opengl_submit_available ? envp_mesa_accel :
-                                          envp_mesa_accel_sw) :
+                     (dxg_transport_available && render_node_available ?
+                          envp_mesa_dxg : envp_mesa_accel_sw)) :
                          envp_default));
         fprintf(stderr, "%s: execve failed errno=%d (%s)\n", path, errno,
                 errno ? strerror(errno) : "no errno from kernel");

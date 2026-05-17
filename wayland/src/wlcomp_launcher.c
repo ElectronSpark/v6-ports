@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/ioctl.h>
 #include <sys/resource.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
@@ -16,6 +17,11 @@
 #define MAX_CHILDREN 16
 #define WEBKIT_NET_WAIT_US 35000000
 #define WEBKIT_DEFAULT_URL "https://www.google.com/search?q=xv6&gbv=1"
+#define XV6_DRM_RENDER_NODE "/dev/dri/renderD128"
+#define FB_GPU_BACKEND_QUERY 0x462C
+#define FB_GPU_BACKEND_HYPERV_DXG 2
+#define FB_GPU_BACKEND_F_RENDER_NODE 0x0001
+#define FB_GPU_BACKEND_F_DXG_TRANSPORT 0x0008
 static const char *webkit_feature_flags =
     "--features=+OffscreenCanvas,+OffscreenCanvasInWorkers,+requestIdleCallback";
 static const char *webkit_youtube_compat_user_agent =
@@ -53,6 +59,41 @@ static int launcher_cmdline_int_value(const char *key, int fallback)
 static int launcher_virgl_available(void)
 {
     return g_ops.virgl_available ? g_ops.virgl_available() : 0;
+}
+
+struct launcher_fb_gpu_backend_info {
+    uint32_t backend;
+    uint32_t flags;
+    uint32_t capset_id;
+    uint32_t capset_version;
+    uint32_t capset_size;
+    uint32_t dxg_global_open;
+    uint32_t dxg_vgpu_open;
+    uint32_t dxg_d3dkmt;
+    uint32_t dxg_global_status;
+    uint32_t dxg_vgpu_status;
+    uint32_t dxg_global_rx;
+    uint32_t dxg_vgpu_rx;
+    char name[32];
+    char renderer[64];
+};
+
+static int launcher_dxg_render_node_available(void)
+{
+    struct launcher_fb_gpu_backend_info info;
+    int fd;
+    int ok;
+
+    memset(&info, 0, sizeof(info));
+    fd = open(XV6_DRM_RENDER_NODE, O_RDWR | O_CLOEXEC);
+    if (fd < 0)
+        return 0;
+    ok = ioctl(fd, FB_GPU_BACKEND_QUERY, &info) == 0 &&
+         info.backend == FB_GPU_BACKEND_HYPERV_DXG &&
+         (info.flags & FB_GPU_BACKEND_F_RENDER_NODE) != 0 &&
+         (info.flags & FB_GPU_BACKEND_F_DXG_TRANSPORT) != 0;
+    close(fd);
+    return ok;
 }
 
 static void launcher_destroy_surfaces_for_pid(pid_t pid)
@@ -416,6 +457,28 @@ void wlcomp_launcher_launch(const char *path, const char *name,
             "EGL_PLATFORM=wayland",
             NULL
         };
+        char *envp_mesa_dxg[] = {
+            "HOME=/",
+            "PATH=/bin:/usr/bin",
+            "XDG_RUNTIME_DIR=/tmp",
+            "XDG_CACHE_HOME=/tmp/.cache",
+            "XDG_DATA_DIRS=/share:/usr/share",
+            "WAYLAND_DISPLAY=wayland-0",
+            "GDK_BACKEND=wayland",
+            "XCURSOR_PATH=/share/icons",
+            "XCURSOR_THEME=Adwaita",
+            "LIBGL_ALWAYS_SOFTWARE=0",
+            "GALLIUM_DRIVER=d3d12",
+            "LIBGL_DRIVERS_PATH=/lib/dri",
+            "EGL_PLATFORM=wayland",
+            "XV6_MESA_WAYLAND_THROTTLE=0",
+            "XV6_MESA_WAYLAND_XV6GPU=1",
+            "XV6_MESA_PERF_LOG=0",
+            "XV6_MESA_WAYLAND_INPLACE_PRESENT=1",
+            "XV6_D3D12_PRESENT_INTERVAL=1",
+            "vblank_mode=0",
+            NULL
+        };
         char *envp_mesa_accel_sw[] = {
             "HOME=/",
             "PATH=/bin:/usr/bin",
@@ -434,6 +497,7 @@ void wlcomp_launcher_launch(const char *path, const char *name,
         };
         char **envp = envp_default;
         int virgl_available = launcher_virgl_available();
+        int dxg_available = launcher_dxg_render_node_available();
         if (is_webkit) {
             int accel = launcher_cmdline_flag_enabled("webkit_accel");
             int js = launcher_cmdline_int_value("webkit_js", 1) != 0;
@@ -457,7 +521,8 @@ void wlcomp_launcher_launch(const char *path, const char *name,
                                    envp_minibrowser_accel_sw) :
                 envp_minibrowser;
         } else if (is_mesa_gl) {
-            envp = virgl_available ? envp_mesa_accel : envp_mesa_accel_sw;
+            envp = virgl_available ? envp_mesa_accel :
+                (dxg_available ? envp_mesa_dxg : envp_mesa_accel_sw);
         }
         execve(path, argv, envp);
         _exit(127);

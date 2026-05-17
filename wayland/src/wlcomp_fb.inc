@@ -357,8 +357,15 @@ static int alloc_framebuffer_backing(void)
     size_t bytes = (size_t)g_fb_w * g_fb_h * 4;
     const char *use_direct = getenv("XV6_WLCOMP_FB_DIRECT");
     const char *use_bo = getenv("XV6_WLCOMP_FB_BO");
+    int direct_requested =
+        (use_direct && strcmp(use_direct, "1") == 0) ||
+        cmdline_flag_enabled("wlcomp_gpu_direct_scanout") ||
+        cmdline_flag_enabled("wlcomp_fb_direct");
+    int bo_requested =
+        (use_bo && strcmp(use_bo, "1") == 0) ||
+        cmdline_flag_enabled("wlcomp_fb_bo");
 
-    if (use_direct && strcmp(use_direct, "1") == 0) {
+    if (direct_requested) {
         int ret;
 
         memset(&scanout, 0, sizeof(scanout));
@@ -382,7 +389,7 @@ static int alloc_framebuffer_backing(void)
                 scanout.pitch, scanout.width, scanout.height);
     }
 
-    if (use_bo && strcmp(use_bo, "1") == 0) {
+    if (bo_requested) {
         memset(&bo, 0, sizeof(bo));
         bo.width = g_fb_w;
         bo.height = g_fb_h;
@@ -527,4 +534,3 @@ static void damage_taskbar(void)
         damage_rect(0, (int32_t)g_fb_h - TASKBAR_H,
                     (int32_t)g_fb_w, TASKBAR_H);
 }
-

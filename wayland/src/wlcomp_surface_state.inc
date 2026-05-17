@@ -191,7 +191,8 @@ static void cancel_surface_grab(struct wlcomp_surface *surf)
 
 static int surface_is_demo_window(const struct wlcomp_surface *surf)
 {
-    return surf && strcmp(surf->app_id, "mesaglsmoke") == 0;
+    return surf && (strcmp(surf->app_id, "mesaglsmoke") == 0 ||
+                    strcmp(surf->app_id, "mesawlegl") == 0);
 }
 
 static int surface_is_webkit_window(const struct wlcomp_surface *surf)
@@ -515,6 +516,12 @@ static int damage_surface_pending(struct wlcomp_surface *surf)
         return 0;
 
     surface_window_geometry(surf, &gx, &gy, &gw, &gh);
+    if (surf->has_window_geometry &&
+        (gw != surf->committed_buf->width ||
+         gh != surf->committed_buf->height)) {
+        damage_surface_self(surf);
+        return 1;
+    }
     surface_absolute_position(surf, &ax, &ay);
     draw_x = ax - gx;
     draw_y = ay - gy;
@@ -614,4 +621,3 @@ static struct wlcomp_surface *surface_at(int32_t px, int32_t py,
     }
     return NULL;
 }
-

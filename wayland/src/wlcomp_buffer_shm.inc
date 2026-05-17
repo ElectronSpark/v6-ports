@@ -233,6 +233,19 @@ static void buffer_send_release_events(struct wlcomp_buffer *buf)
     }
 }
 
+static void buffer_send_immediate_release_events(struct wlcomp_buffer *buf)
+{
+    if (!buf)
+        return;
+    if (buf->resource)
+        wl_buffer_send_release(buf->resource);
+    if (buf->explicit_release) {
+        zwp_linux_buffer_release_v1_send_immediate_release(
+            buf->explicit_release);
+        buf->explicit_release = NULL;
+    }
+}
+
 static void queue_buffer_release(struct wlcomp_buffer *buf)
 {
     if (!buf || buf->release_pending)
@@ -358,7 +371,7 @@ static void *buffer_plane_data(struct wlcomp_buffer *buf, uint32_t plane)
 static int gpu_compose_enabled(void)
 {
     static int initialized;
-    static int enabled;
+    static int enabled = 1;
     const char *env;
 
     if (initialized)
@@ -370,6 +383,71 @@ static int gpu_compose_enabled(void)
     if (cmdline_flag_enabled("wlcomp_gpu_compose"))
         enabled = 1;
     return enabled;
+}
+
+static int gpu_compose_present_direct_scanout(struct wlcomp_buffer *buf,
+                                              uint32_t x, uint32_t y,
+                                              uint32_t w, uint32_t h,
+                                              uint64_t src_off,
+                                              uint32_t src_pitch)
+{
+    uint8_t *src;
+    uint8_t *dst;
+    uint32_t bytes;
+    static uint64_t direct_total_us;
+    static uint64_t direct_copy_us;
+    static uint64_t direct_frames;
+    int perf_log = cmdline_flag_enabled("wlcomp_gpu_perf");
+    uint64_t t0 = 0;
+    uint64_t t_copy = 0;
+    const char *enable = getenv("XV6_WLCOMP_GPU_DIRECT_SCANOUT");
+
+    if ((!enable || strcmp(enable, "1") != 0) &&
+        !cmdline_flag_enabled("wlcomp_gpu_direct_scanout"))
+        return 0;
+    if (
+        !g_fb_direct_scanout || !g_fb_buf || g_fb_pitch == 0 ||
+        !buf || !buf->is_gpu_bo || buf->plane_gpu_addr[0] == 0)
+        return 0;
+    if ((uint64_t)y * g_fb_pitch + (uint64_t)x * 4 >= g_fb_bo_size)
+        return 0;
+    if (src_off >= buf->plane_gpu_size[0])
+        return 0;
+
+    bytes = w * 4;
+    src = (uint8_t *)(uintptr_t)buf->plane_gpu_addr[0] + src_off;
+    dst = (uint8_t *)g_fb_buf + (uint64_t)y * g_fb_pitch + (uint64_t)x * 4;
+    if (perf_log)
+        t0 = get_time_us();
+    if (src_pitch == bytes && g_fb_pitch == bytes) {
+        memcpy(dst, src, (size_t)bytes * h);
+    } else {
+        for (uint32_t row = 0; row < h; row++) {
+            memcpy(dst, src, bytes);
+            src += src_pitch;
+            dst += g_fb_pitch;
+        }
+    }
+    if (perf_log)
+        t_copy = get_time_us();
+
+    if (perf_log) {
+        direct_frames++;
+        direct_copy_us += t_copy - t0;
+        direct_total_us += t_copy - t0;
+    }
+    if (perf_log && direct_frames >= 20) {
+        fprintf(stderr,
+                "wlcomp: gpu-compose-direct-copy avg_us=%lu copy=%lu frames=%lu rect=%u,%u %ux%u\n",
+                (unsigned long)(direct_total_us / direct_frames),
+                (unsigned long)(direct_copy_us / direct_frames),
+                (unsigned long)direct_frames, x, y, w, h);
+        fflush(stderr);
+        direct_frames = 0;
+        direct_copy_us = 0;
+        direct_total_us = 0;
+    }
+    return 1;
 }
 
 static int gpu_compose_present_buffer(struct wlcomp_buffer *buf,
@@ -384,18 +462,49 @@ static int gpu_compose_present_buffer(struct wlcomp_buffer *buf,
     uint32_t h;
     static int log_count;
     static int fail_log_count;
+    static int skip_log_count;
+    static uint64_t present_total_us;
+    static uint64_t present_frames;
+    int perf_log = cmdline_flag_enabled("wlcomp_gpu_perf");
+    uint64_t present_t0;
+    uint64_t present_dt;
 
-    if (!gpu_compose_enabled() || !g_fb_direct_scanout || g_fb_fd < 0)
+    if (!gpu_compose_enabled() || !g_fb_direct_scanout || g_fb_fd < 0) {
+        if (skip_log_count < 8) {
+            fprintf(stderr,
+                    "wlcomp: gpu-compose skip enabled=%d direct=%d fb_fd=%d\n",
+                    gpu_compose_enabled(), g_fb_direct_scanout, g_fb_fd);
+            skip_log_count++;
+        }
         return 0;
+    }
     if (!buf || !buf->is_gpu_bo ||
-        (buf->format != WL_SHM_FORMAT_XRGB8888 &&
+        (buf->format != WL_SHM_FORMAT_ARGB8888 &&
+         buf->format != WL_SHM_FORMAT_XRGB8888 &&
+         buf->format != DRM_FORMAT_ARGB8888 &&
          buf->format != DRM_FORMAT_XRGB8888) ||
-        buf->y_inverted || row0 >= row1 || col0 >= col1)
+        buf->y_inverted || row0 >= row1 || col0 >= col1) {
+        if (skip_log_count < 8) {
+            fprintf(stderr,
+                    "wlcomp: gpu-compose skip buf=%p gpu=%d fmt=0x%x yinv=%d rows=%d..%d cols=%d..%d\n",
+                    (void *)buf, buf ? buf->is_gpu_bo : 0,
+                    buf ? buf->format : 0, buf ? buf->y_inverted : 0,
+                    row0, row1, col0, col1);
+            skip_log_count++;
+        }
         return 0;
+    }
     handle = buf->plane_gpu_handle[0] ? buf->plane_gpu_handle[0] :
                                         buf->gpu_handle;
-    if (handle == 0 || buf->plane_stride[0] <= 0)
+    if (handle == 0 || buf->plane_stride[0] <= 0) {
+        if (skip_log_count < 8) {
+            fprintf(stderr,
+                    "wlcomp: gpu-compose skip handle=%u stride=%d\n",
+                    handle, buf->plane_stride[0]);
+            skip_log_count++;
+        }
         return 0;
+    }
 
     w = (uint32_t)(col1 - col0);
     h = (uint32_t)(row1 - row0);
@@ -410,6 +519,14 @@ static int gpu_compose_present_buffer(struct wlcomp_buffer *buf,
     cmd.src_pitch = (uint32_t)buf->plane_stride[0];
     cmd.pixels = offset;
     cmd.handle = handle;
+    if (gpu_compose_present_direct_scanout(buf, cmd.x, cmd.y, w, h,
+                                           offset, cmd.src_pitch)) {
+        g_damage_stats.gpu_compose_presents++;
+        g_damage_stats.gpu_compose_pixels += (uint64_t)w * h;
+        return 1;
+    }
+
+    present_t0 = perf_log ? get_time_us() : 0;
     if (ioctl(g_fb_fd, FB_GPU_BO_PRESENT, &cmd) != 0) {
         if (fail_log_count < 8) {
             fprintf(stderr,
@@ -419,6 +536,20 @@ static int gpu_compose_present_buffer(struct wlcomp_buffer *buf,
             fail_log_count++;
         }
         return 0;
+    }
+    present_dt = perf_log ? get_time_us() - present_t0 : 0;
+    if (perf_log) {
+        present_total_us += present_dt;
+        present_frames++;
+    }
+    if (perf_log && present_frames >= 20) {
+        fprintf(stderr,
+                "wlcomp: gpu-compose-present avg_us=%lu frames=%lu rect=%u,%u %ux%u\n",
+                (unsigned long)(present_total_us / present_frames),
+                (unsigned long)present_frames, cmd.x, cmd.y, w, h);
+        fflush(stderr);
+        present_total_us = 0;
+        present_frames = 0;
     }
 
     g_damage_stats.gpu_compose_presents++;
@@ -431,6 +562,32 @@ static int gpu_compose_present_buffer(struct wlcomp_buffer *buf,
         log_count++;
     }
     return 1;
+}
+
+static int gpu_compose_can_present_surface(struct wlcomp_surface *surf,
+                                           struct wlcomp_buffer *buf)
+{
+    int32_t gx;
+    int32_t gy;
+    int32_t gw;
+    int32_t gh;
+
+    if (!surf || !buf || !surf->has_window_geometry)
+        return 1;
+
+    surface_window_geometry(surf, &gx, &gy, &gw, &gh);
+    (void)gx;
+    (void)gy;
+    if (gw <= 0 || gh <= 0)
+        return 1;
+
+    /*
+     * FB_GPU_BO_PRESENT and the direct scanout copy consume source pixel
+     * coordinates one-to-one.  Window geometry scaling must stay on the CPU
+     * paint path until the GPU present ABI grows explicit source/destination
+     * rectangles.
+     */
+    return buf->width == gw && buf->height == gh;
 }
 
 static void buffer_destroy_handler(struct wl_resource *resource)
@@ -599,4 +756,3 @@ static void shm_bind(struct wl_client *client, void *data,
     wl_shm_send_format(res, WL_SHM_FORMAT_ARGB8888);
     wl_shm_send_format(res, WL_SHM_FORMAT_XRGB8888);
 }
-

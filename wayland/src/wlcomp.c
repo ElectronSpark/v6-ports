@@ -194,6 +194,7 @@ static struct wl_display *g_display;
 static int cmdline_flag_enabled(const char *key);
 static int cmdline_int_value(const char *key, int fallback);
 static uint32_t get_time_ms(void);
+static uint64_t get_time_us(void);
 static int framebuffer_display_completion_query(uint64_t wait_for,
                                                 int wait,
                                                 uint64_t *presented,
@@ -224,6 +225,15 @@ static void wlcomp_wayland_log(const char *fmt, va_list args)
     if (strstr(buf, "failed to read client connection") != NULL)
         return;
     fputs(buf, stderr);
+}
+
+static uint64_t get_time_us(void)
+{
+    struct timespec ts;
+
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000ULL +
+           (uint64_t)ts.tv_nsec / 1000ULL;
 }
 
 #include "wlcomp_fb.inc"

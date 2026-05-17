@@ -36,7 +36,9 @@ static void toplevel_set_title(struct wl_client *c, struct wl_resource *r,
             close(fd);
         }
     }
-    fprintf(stderr, "wlcomp: client title: %s\n", title);
+    const char *title_log = getenv("XV6_WLCOMP_TITLE_LOG");
+    if (title_log && title_log[0] && strcmp(title_log, "0") != 0)
+        fprintf(stderr, "wlcomp: client title: %s\n", title);
 }
 
 static void toplevel_set_app_id(struct wl_client *c, struct wl_resource *r,
@@ -49,6 +51,28 @@ static void toplevel_set_app_id(struct wl_client *c, struct wl_resource *r,
         for (i = 0; i < 63 && app_id[i]; i++)
             surf->app_id[i] = app_id[i];
         surf->app_id[i] = '\0';
+    }
+    if (surf && app_id && strcmp(app_id, "mesawlegl") == 0 &&
+        !surf->xdg_initial_configure_sent) {
+        int32_t w = 640;
+        int32_t h = 480;
+        int32_t max_w = (int32_t)g_fb_w - 32;
+        int32_t max_h = (int32_t)g_fb_h - TASKBAR_H - 32;
+
+        if (max_w < 320)
+            max_w = (int32_t)g_fb_w;
+        if (max_h < 240)
+            max_h = (int32_t)g_fb_h - TASKBAR_H;
+        if (w > max_w)
+            w = max_w;
+        if (h > max_h)
+            h = max_h;
+        surf->pending_configure_w = w;
+        surf->pending_configure_h = h;
+        surf->saved_w = w;
+        surf->saved_h = h;
+        surf->saved_x = ((int32_t)g_fb_w - w) / 2;
+        surf->saved_y = ((int32_t)g_fb_h - TASKBAR_H - h) / 2;
     }
     fprintf(stderr, "wlcomp: client app_id: %s\n", app_id);
 }
@@ -527,4 +551,3 @@ static void xdg_wm_bind(struct wl_client *client, void *data,
     }
     wl_resource_set_implementation(res, &xdg_wm_impl, NULL, NULL);
 }
-
