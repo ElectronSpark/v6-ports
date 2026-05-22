@@ -3,9 +3,8 @@ project(xv6-port-libdrm LANGUAGES NONE)
 include(${CMAKE_CURRENT_LIST_DIR}/../cmake/AddPort.cmake)
 
 # Mesa's software DRI/EGL path expects the libdrm userspace ABI library and
-# headers even before xv6 grows a DRM/KMS kernel interface.  Keep this port to
-# the common libdrm core; hardware-specific helper libraries can be enabled
-# later with matching kernel support.
+# headers.  Nouveau is enabled now that xv6 exposes a fail-closed Nouveau DRM
+# UAPI skeleton for native NVIDIA PCI devices.
 xv6_port(
     NAME            libdrm
     SOURCE_DIR      ${CMAKE_CURRENT_SOURCE_DIR}/src
@@ -15,14 +14,20 @@ xv6_port(
                     lib/libdrm.so
                     lib/libdrm.so.2
                     lib/libdrm.so.2.133.0
+                    lib/libdrm_nouveau.a
+                    lib/libdrm_nouveau.so
+                    lib/libdrm_nouveau.so.2
+                    lib/libdrm_nouveau.so.2.133.0
                     lib/pkgconfig/libdrm.pc
+                    lib/pkgconfig/libdrm_nouveau.pc
                     include/xf86drm.h
                     include/libdrm/drm.h
+                    include/libdrm/nouveau/nouveau.h
     CMAKE_ARGS
         -Dintel=disabled
         -Dradeon=disabled
         -Damdgpu=disabled
-        -Dnouveau=disabled
+        -Dnouveau=enabled
         -Dvmwgfx=disabled
         -Domap=disabled
         -Dexynos=disabled
