@@ -17,6 +17,7 @@ static volatile int g_running = 1;
 #define MAX_SURFACES 32
 #define MAX_SURFACE_DAMAGE_RECTS 16
 #define WAYLAND_CLIENT_BUFFER_LIMIT (1024 * 1024)
+#define XV6_D3D12_PRESENT_MAX_ALLOCATIONS 64
 
 struct wlcomp_shm_pool;
 
@@ -24,10 +25,59 @@ struct wlcomp_buffer {
     struct wl_resource *resource;  /* wl_buffer resource */
     struct wlcomp_shm_pool *pool;
     int                  is_gpu_bo;
+    int                  is_d3d12_shared;
     uint64_t             gpu_addr;
     uint64_t             gpu_size;
     uint32_t             gpu_handle;
     int                  owns_gpu_handle;
+    int                  d3d12_resource_fd;
+    int                  d3d12_fence_fd;
+    int                  d3d12_dxg_fd;
+    pid_t                d3d12_client_pid;
+    uint32_t             d3d12_client_buffer_id;
+    uint32_t             d3d12_manager_resource_id;
+    uint64_t             d3d12_buffer_generation;
+    uint32_t             d3d12_adapter;
+    uint32_t             d3d12_source_luid_a;
+    uint32_t             d3d12_source_luid_b;
+    uint32_t             d3d12_matched_luid_a;
+    uint32_t             d3d12_matched_luid_b;
+    int                  d3d12_source_luid_valid;
+    uint32_t             d3d12_device;
+    uint32_t             d3d12_opened_resource;
+    uint32_t             d3d12_opened_fence;
+    uint32_t             d3d12_allocation_count;
+    uint32_t             d3d12_opened_allocation_count;
+    uint32_t             d3d12_opened_allocations[
+        XV6_D3D12_PRESENT_MAX_ALLOCATIONS];
+    uint32_t             d3d12_total_priv_size;
+    uint64_t             d3d12_fence_cpu_va;
+    uint64_t             d3d12_fence_gpu_va;
+    uint64_t             d3d12_fence_value;
+    int                  d3d12_fence_value_valid;
+    uint32_t             d3d12_fence_wait_start_ms;
+    uint64_t             d3d12_present_sequence;
+    uint64_t             d3d12_present_fence_value;
+    uint64_t             d3d12_native_present_attempt_id;
+    uint64_t             d3d12_native_present_completion_id;
+    uint64_t             d3d12_fb_blit_attempts_at_present;
+    uint64_t             d3d12_fb_blit_successes_at_present;
+    uint64_t             d3d12_cpu_map_rejects_at_present;
+    uint64_t             d3d12_cpu_plane_rejects_at_present;
+    int                  d3d12_present_complete;
+    int                  d3d12_present_wait_confirmed;
+    int                  d3d12_gpu_copy_complete;
+    int                  d3d12_present_evidence_pending;
+    uint64_t             d3d12_gpu_present_start_time;
+    uint64_t             d3d12_gpu_copy_complete_time;
+    int32_t              d3d12_present_dst_x;
+    int32_t              d3d12_present_dst_y;
+    uint32_t             d3d12_present_dst_w;
+    uint32_t             d3d12_present_dst_h;
+    int32_t              d3d12_present_src_x;
+    int32_t              d3d12_present_src_y;
+    uint32_t             d3d12_present_src_w;
+    uint32_t             d3d12_present_src_h;
     uint64_t             plane_gpu_addr[4];
     uint64_t             plane_gpu_size[4];
     uint32_t             plane_gpu_handle[4];
@@ -46,7 +96,12 @@ struct wlcomp_buffer {
     struct wl_resource *explicit_release;
 };
 
+struct wlcomp_surface;
+
 static void *buffer_plane_data(struct wlcomp_buffer *buf, uint32_t plane);
+static void xv6_d3d12_observe_buffer_release(struct wlcomp_buffer *buf);
+static void xv6_d3d12_observe_frame_callback(struct wlcomp_surface *surf,
+                                             uint32_t now);
 
 struct wlcomp_frame_callback {
     struct wl_resource *resource;
@@ -91,6 +146,12 @@ struct wlcomp_surface {
 };
 
 static struct wl_list g_surfaces;  /* list of wlcomp_surface */
+static uint64_t g_d3d12_present_start_count;
+static uint64_t g_d3d12_present_copy_complete_count;
+static uint64_t g_d3d12_present_display_complete_count;
+static uint64_t g_d3d12_present_reject_count;
+static uint64_t g_d3d12_cpu_map_reject_count;
+static uint64_t g_d3d12_cpu_plane_reject_count;
 static struct wlcomp_surface *g_focused;  /* pointer-focused Wayland surface */
 static struct wlcomp_surface *g_kbd_focused; /* keyboard-focused (click-to-focus) */
 static int g_kbd_enter_pending; /* deferred keyboard enter for g_kbd_focused */
@@ -235,6 +296,13 @@ static int frame_callbacks_due(uint32_t now)
     return 0;
 }
 
+static int surface_has_unpresented_d3d12_buffer(struct wlcomp_surface *surf)
+{
+    return surf && surf->committed_buf &&
+           surf->committed_buf->is_d3d12_shared &&
+           !surf->committed_buf->d3d12_present_complete;
+}
+
 static void damage_all_frame_callbacks(uint32_t now)
 {
     struct wlcomp_surface *cb_surf;
@@ -246,7 +314,10 @@ static void damage_all_frame_callbacks(uint32_t now)
         struct wlcomp_frame_callback *cb;
         struct wlcomp_frame_callback *tmp;
 
+        if (surface_has_unpresented_d3d12_buffer(cb_surf))
+            continue;
         wl_list_for_each_safe(cb, tmp, &cb_surf->frame_callbacks, link) {
+            xv6_d3d12_observe_frame_callback(cb_surf, now);
             wl_callback_send_done(cb->resource, now);
             wl_resource_destroy(cb->resource);
             wl_list_remove(&cb->link);

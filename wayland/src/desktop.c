@@ -32,10 +32,15 @@
 #define WEBKIT_DEFAULT_URL   "https://www.google.com/search?q=xv6&gbv=1"
 #define WEBKIT_URL_MAX       768
 #define XV6_DRM_RENDER_NODE  "/dev/dri/renderD128"
+#define XV6_D3D12_PRESENT_EVIDENCE_PATH "/tmp/wlcomp-d3d12-present"
+#define XV6_D3D12_PRESENT_EVIDENCE_MAX_AGE_SEC 120
 #define FB_GPU_BACKEND_QUERY 0x462C
+#define FB_GPU_BACKEND_VIRGL 1
 #define FB_GPU_BACKEND_HYPERV_DXG 2
 #define FB_GPU_BACKEND_F_RENDER_NODE 0x0001
+#define FB_GPU_BACKEND_F_VIRGL_OPENGL 0x0004
 #define FB_GPU_BACKEND_F_DXG_TRANSPORT 0x0008
+#define FB_GPU_BACKEND_F_D3DKMT 0x0010
 #define FB_GPU_BACKEND_F_OPENGL_SUBMIT 0x0020
 #define DRM_IOCTL_VIRTGPU_GETPARAM 0xc0106443UL
 #define VIRTGPU_PARAM_3D_FEATURES  1
@@ -80,6 +85,25 @@ struct netconf_req_compat {
     char hostname[NETCONF_HOSTNAME_MAX];
 };
 
+struct webkit_gpu_contract {
+    int have_backend;
+    int virgl_opengl;
+    int render_node;
+    int dxg_transport;
+    int d3dkmt;
+    int opengl_submit;
+    int validated_shared_surface;
+    int shared_surface;
+    int d3d12_present;
+    int d3d12_contract_evidence;
+    int d3d12_same_adapter;
+    int d3d12_no_readback;
+    int d3d12_shared_resource;
+    int d3d12_fence;
+    uint64_t d3d12_present_complete;
+    uint64_t d3d12_release_fence;
+};
+
 static volatile sig_atomic_t g_running = 1;
 static pid_t wlcomp_pid;
 static pid_t client_pid;
@@ -109,9 +133,15 @@ static int webkit_disable_gdk_gl_by_cmdline(void);
 static int webkit_dmabuf_enabled_by_cmdline(void);
 static int webkit_reopen_count_from_cmdline(void);
 static int webkit_timeout_ms_from_cmdline(int fallback);
+static int webkit_contract_wait_ms_from_cmdline(int fallback);
 static int gpu_validate_enabled_by_cmdline(void);
 static int desktop_disabled_by_cmdline(void);
 static int desktop_exit_after_smoke_by_cmdline(void);
+static void xv6_webkit_gpu_contract(struct webkit_gpu_contract *contract);
+static int webkit_gpu_contract_allows_accel(
+    const struct webkit_gpu_contract *contract);
+static void webkit_wait_for_gpu_contract(int wait_ms);
+static long long monotonic_ms(void);
 static int cmdline_int_value(const char *cmdline, const char *key,
                              int fallback);
 static int read_cmdline(char *buf, size_t buf_size);
@@ -123,10 +153,9 @@ static void http_smoke_self_probe(const char *path);
 static void webkit_print_runtime_probe(void);
 static void write_webkit_gpu_policy_file(const char *name, int requested_accel,
                                          int effective_accel,
-                                         int opengl_submit_available,
-                                         int dxg_transport_available,
-                                         int render_node_available,
-                                         int dmabuf_requested);
+                                         const struct webkit_gpu_contract *c,
+                                         int dmabuf_requested,
+                                         int dmabuf_effective);
 
 static int xv6_virgl_available(void)
 {
@@ -184,6 +213,240 @@ static int xv6_dxg_transport_available(void)
     return xv6_gpu_backend_info(&info) &&
            info.backend == FB_GPU_BACKEND_HYPERV_DXG &&
            (info.flags & FB_GPU_BACKEND_F_DXG_TRANSPORT) != 0;
+}
+
+static int webkit_evidence_key_u64(const char *text, const char *key,
+                                   uint64_t *out)
+{
+    char needle[80];
+    const char *p;
+    char *end = NULL;
+
+    if (!text || !key || !out)
+        return 0;
+    snprintf(needle, sizeof(needle), "%s=", key);
+    p = strstr(text, needle);
+    if (!p)
+        return 0;
+    p += strlen(needle);
+    errno = 0;
+    *out = strtoull(p, &end, 0);
+    return errno == 0 && end != p;
+}
+
+static int webkit_evidence_key_string(const char *text, const char *key,
+                                      char *out, size_t out_size)
+{
+    char needle[80];
+    const char *p;
+    size_t n = 0;
+
+    if (!text || !key || !out || out_size == 0)
+        return 0;
+    out[0] = '\0';
+    snprintf(needle, sizeof(needle), "%s=", key);
+    p = strstr(text, needle);
+    if (!p)
+        return 0;
+    p += strlen(needle);
+    while (p[n] && p[n] != '\n' && p[n] != '\r' && n + 1 < out_size)
+        n++;
+    memcpy(out, p, n);
+    out[n] = '\0';
+    return n != 0;
+}
+
+static int xv6_d3d12_present_evidence_fresh(void)
+{
+    struct stat st;
+    time_t now;
+
+    if (stat(XV6_D3D12_PRESENT_EVIDENCE_PATH, &st) != 0 ||
+        st.st_size <= 0)
+        return 0;
+    now = time(NULL);
+    if (now == (time_t)-1)
+        return 1;
+    if (st.st_mtime > now)
+        return 1;
+    return now - st.st_mtime <= XV6_D3D12_PRESENT_EVIDENCE_MAX_AGE_SEC;
+}
+
+static int webkit_read_file(const char *path, char *buf, size_t buf_size)
+{
+    int fd;
+    ssize_t n;
+
+    if (!path || !buf || buf_size == 0)
+        return 0;
+    buf[0] = '\0';
+    fd = open(path, O_RDONLY);
+    if (fd < 0)
+        return 0;
+    n = read(fd, buf, buf_size - 1);
+    close(fd);
+    if (n <= 0)
+        return 0;
+    buf[n] = '\0';
+    return 1;
+}
+
+static void xv6_webkit_d3d12_present_evidence(
+    struct webkit_gpu_contract *contract)
+{
+    char evidence[2048];
+    char source_luid[32];
+    char matched_luid[32];
+    uint64_t resource = 0;
+    uint64_t allocations = 0;
+    uint64_t fence = 0;
+    uint64_t fence_target = 0;
+    uint64_t release_fence = 0;
+    uint64_t present_complete = 0;
+    uint64_t cpu_readback = 1;
+    uint64_t cpu_mapping = 1;
+    uint64_t cpu_copy = 1;
+
+    if (!contract ||
+        !xv6_d3d12_present_evidence_fresh() ||
+        !webkit_read_file(XV6_D3D12_PRESENT_EVIDENCE_PATH, evidence,
+                          sizeof(evidence)))
+        return;
+    (void)webkit_evidence_key_u64(evidence, "d3d12_present_resource",
+                                  &resource);
+    (void)webkit_evidence_key_u64(evidence,
+                                  "d3d12_present_allocation_count",
+                                  &allocations);
+    (void)webkit_evidence_key_u64(evidence, "d3d12_present_fence", &fence);
+    (void)webkit_evidence_key_u64(evidence, "d3d12_present_fence_target",
+                                  &fence_target);
+    (void)webkit_evidence_key_u64(evidence, "d3d12_present_release_fence",
+                                  &release_fence);
+    (void)webkit_evidence_key_u64(evidence, "d3d12_gpu_present_complete",
+                                  &present_complete);
+    (void)webkit_evidence_key_u64(evidence, "d3d12_cpu_readback",
+                                  &cpu_readback);
+    (void)webkit_evidence_key_u64(evidence, "d3d12_cpu_mapping",
+                                  &cpu_mapping);
+    (void)webkit_evidence_key_u64(evidence, "d3d12_cpu_copy", &cpu_copy);
+    contract->d3d12_same_adapter =
+        webkit_evidence_key_string(evidence, "d3d12_present_luid",
+                                   source_luid, sizeof(source_luid)) &&
+        webkit_evidence_key_string(evidence, "d3d12_present_matched_luid",
+                                   matched_luid, sizeof(matched_luid)) &&
+        strcmp(source_luid, matched_luid) == 0;
+    contract->d3d12_no_readback =
+        cpu_readback == 0 && cpu_mapping == 0 && cpu_copy == 0;
+    contract->d3d12_shared_resource =
+        resource != 0 && allocations != 0;
+    contract->d3d12_fence =
+        fence != 0 && fence_target != 0 && release_fence != 0;
+    contract->d3d12_present_complete = present_complete;
+    contract->d3d12_release_fence = release_fence;
+    contract->d3d12_contract_evidence =
+        contract->d3d12_same_adapter &&
+        contract->d3d12_no_readback &&
+        contract->d3d12_shared_resource &&
+        contract->d3d12_fence &&
+        present_complete != 0;
+}
+
+static void xv6_webkit_gpu_contract(struct webkit_gpu_contract *contract)
+{
+    struct fb_gpu_backend_info_compat info;
+    int virgl;
+    int d3d12;
+
+    if (!contract)
+        return;
+    memset(contract, 0, sizeof(*contract));
+    if (!xv6_gpu_backend_info(&info))
+        return;
+
+    contract->have_backend = 1;
+    contract->render_node =
+        (info.flags & FB_GPU_BACKEND_F_RENDER_NODE) != 0;
+    contract->dxg_transport =
+        info.backend == FB_GPU_BACKEND_HYPERV_DXG &&
+        (info.flags & FB_GPU_BACKEND_F_DXG_TRANSPORT) != 0;
+    contract->d3dkmt =
+        info.backend == FB_GPU_BACKEND_HYPERV_DXG &&
+        (info.flags & FB_GPU_BACKEND_F_D3DKMT) != 0;
+    contract->opengl_submit =
+        (info.flags & FB_GPU_BACKEND_F_OPENGL_SUBMIT) != 0;
+    virgl = info.backend == FB_GPU_BACKEND_VIRGL &&
+            (info.flags & FB_GPU_BACKEND_F_VIRGL_OPENGL) != 0;
+    contract->virgl_opengl = virgl;
+    d3d12 = contract->dxg_transport && contract->d3dkmt;
+    if (d3d12)
+        xv6_webkit_d3d12_present_evidence(contract);
+    contract->d3d12_present = d3d12 && contract->render_node &&
+                              contract->opengl_submit &&
+                              contract->d3d12_contract_evidence;
+    contract->validated_shared_surface =
+        contract->render_node && contract->opengl_submit &&
+        (virgl || contract->d3d12_present);
+    contract->shared_surface = contract->validated_shared_surface;
+}
+
+static int webkit_gpu_contract_allows_accel(
+    const struct webkit_gpu_contract *contract)
+{
+    if (!contract || !contract->validated_shared_surface ||
+        !contract->shared_surface || !contract->opengl_submit)
+        return 0;
+    if (contract->virgl_opengl)
+        return 1;
+    return contract->render_node && contract->dxg_transport &&
+           contract->d3dkmt && contract->d3d12_present;
+}
+
+static void webkit_wait_for_gpu_contract(int wait_ms)
+{
+    long long deadline;
+    long long next_log_ms = 0;
+    struct webkit_gpu_contract contract;
+
+    if (wait_ms <= 0)
+        return;
+    deadline = monotonic_ms() + wait_ms;
+    do {
+        long long now_ms = monotonic_ms();
+
+        xv6_webkit_gpu_contract(&contract);
+        if (webkit_gpu_contract_allows_accel(&contract)) {
+            fprintf(stderr,
+                    "[desktop] WebKit D3D12 shared-surface contract "
+                    "evidence ready same_adapter=%d no_readback=%d "
+                    "shared_resource=%d fence=%d complete=%lu "
+                    "release=%lu\n",
+                    contract.d3d12_same_adapter,
+                    contract.d3d12_no_readback,
+                    contract.d3d12_shared_resource,
+                    contract.d3d12_fence,
+                    (unsigned long)contract.d3d12_present_complete,
+                    (unsigned long)contract.d3d12_release_fence);
+            fflush(stderr);
+            return;
+        }
+        if (!contract.dxg_transport || !contract.opengl_submit)
+            return;
+        if (contract.dxg_transport && !contract.d3d12_contract_evidence &&
+            now_ms >= next_log_ms) {
+            fprintf(stderr,
+                    "[desktop] waiting for WebKit D3D12 shared-surface "
+                    "contract evidence same_adapter=%d no_readback=%d "
+                    "shared_resource=%d fence=%d complete=%lu\n",
+                    contract.d3d12_same_adapter,
+                    contract.d3d12_no_readback,
+                    contract.d3d12_shared_resource,
+                    contract.d3d12_fence,
+                    (unsigned long)contract.d3d12_present_complete);
+            fflush(stderr);
+            next_log_ms = now_ms + 1000;
+        }
+        usleep(100000);
+    } while (monotonic_ms() < deadline);
 }
 
 static void disable_child_coredumps(void)
@@ -454,29 +717,76 @@ static void write_child_status_file(const char *path, const char *label,
 
 static void write_webkit_gpu_policy_file(const char *name, int requested_accel,
                                          int effective_accel,
-                                         int opengl_submit_available,
-                                         int dxg_transport_available,
-                                         int render_node_available,
-                                         int dmabuf_requested)
+                                         const struct webkit_gpu_contract *c,
+                                         int dmabuf_requested,
+                                         int dmabuf_effective)
 {
     const char *fallback = "none";
-    char buf[256];
+    const char *contract = "none";
+    int d3d12_contract = 0;
+    char buf[1200];
     int fd;
     int n;
 
-    if (requested_accel && !effective_accel && !dmabuf_requested)
-        fallback = opengl_submit_available ? "disabled" :
-                                            "opengl_submit_unavailable";
-    else if (dmabuf_requested && !render_node_available)
+    if (effective_accel && c && c->d3d12_present) {
+        contract = "d3d12-shared-surface";
+        d3d12_contract = 1;
+    } else if (effective_accel && c && c->virgl_opengl) {
+        contract = "virgl-opengl-submit";
+    }
+
+    if (requested_accel && !effective_accel && !dmabuf_effective) {
+        if (!c || !c->opengl_submit)
+            fallback = "opengl_submit_unavailable";
+        else if (!c->render_node)
+            fallback = "render_node_unavailable";
+        else if (c->dxg_transport && !c->d3d12_contract_evidence)
+            fallback = "d3d12_contract_evidence_unavailable";
+        else
+            fallback = "shared_surface_unavailable";
+    } else if (dmabuf_requested && !dmabuf_effective &&
+               (!c || !c->render_node)) {
         fallback = "render_node_unavailable";
+    } else if (dmabuf_requested && !dmabuf_effective &&
+               (!c || !c->opengl_submit)) {
+        fallback = "opengl_submit_unavailable";
+    } else if (dmabuf_requested && !dmabuf_effective &&
+               (!c || !c->shared_surface)) {
+        fallback = "shared_surface_unavailable";
+    }
 
     n = snprintf(buf, sizeof(buf),
                  "webkit_gpu_policy name=%s requested_accel=%d "
-                 "effective_accel=%d opengl_submit=%d dxg_transport=%d "
-                 "render_node=%d dmabuf=%d fallback=%s\n",
+                 "effective_accel=%d render_node=%d shared_surface=%d "
+                 "validated_shared_surface=%d "
+                 "d3d12_present=%d opengl_submit=%d dxg_transport=%d "
+                 "d3dkmt=%d virgl_opengl=%d "
+                 "d3d12_contract_evidence=%d d3d12_same_adapter=%d "
+                 "d3d12_no_readback=%d d3d12_shared_resource=%d "
+                 "d3d12_fence=%d d3d12_present_complete=%lu "
+                 "d3d12_release_fence=%lu "
+                 "dmabuf=%d requested_dmabuf=%d gpu_contract=%s "
+                 "d3d12_native_present_required=%d "
+                 "d3d12_copy_export=%d d3d12_readback=0 "
+                 "fallback=%s\n",
                  name, requested_accel, effective_accel,
-                 opengl_submit_available, dxg_transport_available,
-                 render_node_available, dmabuf_requested, fallback);
+                 c ? c->render_node : 0,
+                 c ? c->shared_surface : 0,
+                 c ? c->validated_shared_surface : 0,
+                 c ? c->d3d12_present : 0,
+                 c ? c->opengl_submit : 0,
+                 c ? c->dxg_transport : 0,
+                 c ? c->d3dkmt : 0,
+                 c ? c->virgl_opengl : 0,
+                 c ? c->d3d12_contract_evidence : 0,
+                 c ? c->d3d12_same_adapter : 0,
+                 c ? c->d3d12_no_readback : 0,
+                 c ? c->d3d12_shared_resource : 0,
+                 c ? c->d3d12_fence : 0,
+                 (unsigned long)(c ? c->d3d12_present_complete : 0),
+                 (unsigned long)(c ? c->d3d12_release_fence : 0),
+                 dmabuf_effective, dmabuf_requested, contract,
+                 d3d12_contract, 0, fallback);
     if (n > 0) {
         fputs(buf, stderr);
         fflush(stderr);
@@ -849,6 +1159,20 @@ static int webkit_timeout_ms_from_cmdline(int fallback)
     if (timeout_ms > 600000)
         timeout_ms = 600000;
     return timeout_ms;
+}
+
+static int webkit_contract_wait_ms_from_cmdline(int fallback)
+{
+    char buf[512];
+    int wait_ms = fallback;
+
+    if (read_cmdline(buf, sizeof(buf)) == 0)
+        wait_ms = cmdline_int_value(buf, "webkit_contract_wait_ms", wait_ms);
+    if (wait_ms < 0)
+        wait_ms = 0;
+    if (wait_ms > 600000)
+        wait_ms = 600000;
+    return wait_ms;
 }
 
 static int webkit_url_has_scheme(const char *s)
@@ -1277,6 +1601,9 @@ int main(void)
             sync_resolv_conf_from_netconf(WEBKIT_NET_WAIT_US);
         }
         wait_for_gst_registry_warmup(WEBKIT_GST_WAIT_US);
+        if (accel)
+            webkit_wait_for_gpu_contract(
+                webkit_contract_wait_ms_from_cmdline(0));
         client_pid = launch_client(webkit_path, webkit_name, webkit_url,
                                    webkit_timeout, NULL);
         if (client_pid < 0) {

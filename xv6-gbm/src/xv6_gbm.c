@@ -595,7 +595,10 @@ void *gbm_bo_map(struct gbm_bo *bo, uint32_t x, uint32_t y, uint32_t width,
         return NULL;
     }
 
-    offset = (uint64_t)y * bo->stride + (uint64_t)x * 4;
+    if (bo->format == GBM_FORMAT_NV12)
+        offset = (uint64_t)y * bo->stride + (uint64_t)x;
+    else
+        offset = (uint64_t)y * bo->stride + (uint64_t)x * 4;
     if (offset >= bo->size) {
         errno = EINVAL;
         return NULL;

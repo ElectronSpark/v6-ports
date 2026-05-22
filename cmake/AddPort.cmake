@@ -62,6 +62,7 @@ function(xv6_port)
     set(opts)
     set(one_value NAME SOURCE_DIR BUILD_SYSTEM JOBS MESON_DEFAULT_LIBRARY)
     set(multi_value DEPENDS
+                    SOURCE_DEPENDS
                     OUTPUT_FILES
                     CMAKE_ARGS
                     CONFIGURE_ARGS
@@ -363,7 +364,7 @@ function(xv6_port)
         COMMAND ${_cmake_configure}
         COMMAND ${_build_cmd}
         COMMAND ${_install_cmd}
-        DEPENDS ${_dep_targets} ${_patch_deps}
+        DEPENDS ${_dep_targets} ${_patch_deps} ${P_SOURCE_DEPENDS}
         WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
         COMMENT "Building port ${_name}"
         VERBATIM)

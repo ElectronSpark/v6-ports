@@ -838,25 +838,24 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
         int requested_accel = webkit_accel_enabled_by_cmdline();
         int dmabuf_requested = is_minibrowser &&
             webkit_dmabuf_enabled_by_cmdline();
-        int opengl_submit_available = xv6_opengl_submit_available();
-        int dxg_transport_available = xv6_dxg_transport_available();
-        int render_node_available = xv6_render_node_available();
+        int dmabuf_effective = dmabuf_requested;
+        struct webkit_gpu_contract contract;
         int effective_accel = requested_accel;
 
-        if (dmabuf_requested && !render_node_available)
-            dmabuf_requested = 0;
-        if (dmabuf_requested && !opengl_submit_available)
-            dmabuf_requested = 0;
-        if (effective_accel && !opengl_submit_available && !dmabuf_requested)
+        xv6_webkit_gpu_contract(&contract);
+        if (dmabuf_effective &&
+            !webkit_gpu_contract_allows_accel(&contract))
+            dmabuf_effective = 0;
+        if (effective_accel &&
+            !webkit_gpu_contract_allows_accel(&contract) &&
+            !dmabuf_effective)
             effective_accel = 0;
-        if (dmabuf_requested)
+        if (dmabuf_effective)
             effective_accel = 1;
 
         write_webkit_gpu_policy_file(app_name, requested_accel, effective_accel,
-                                     opengl_submit_available,
-                                     dxg_transport_available,
-                                     render_node_available,
-                                     dmabuf_requested);
+                                     &contract,
+                                     dmabuf_requested, dmabuf_effective);
     }
 
     pid_t pid = fork();
@@ -1188,10 +1187,69 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             "WEBKIT_DISABLE_NETWORK_CACHE=1",
             "WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS=1",
             "WEBKIT_DMABUF_RENDERER_DISABLE_GBM=1",
+            "WEBKIT_XV6_GPU_CONTRACT=virgl-opengl-submit",
+            "WEBKIT_XV6_REQUIRE_GPU_CONTRACT=1",
+            "WEBKIT_XV6_FORCE_COMPOSITING_MODE=1",
             "LIBGL_ALWAYS_SOFTWARE=0",
             "LIBGL_DRIVERS_PATH=/lib/dri",
             "GALLIUM_DRIVER=virgl",
             "EGL_PLATFORM=wayland",
+            "ANGLE_DEFAULT_PLATFORM=gl",
+            "SOUP_FORCE_HTTP1=1",
+            "EPOXY_XV6_ALLOW_MISSING=1",
+            NULL
+        };
+        char *envp_minibrowser_dxg[] = {
+            "HOME=/",
+            "PATH=/bin:/usr/bin",
+            "LD_LIBRARY_PATH=/lib:/usr/lib:/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu",
+            "LD_PRELOAD=/lib/libpng16.so.16:/lib/libxv6memshim.so",
+            "XDG_RUNTIME_DIR=/tmp",
+            "XDG_CACHE_HOME=/tmp/.cache",
+            "XDG_DATA_HOME=/tmp/.local/share",
+            "XDG_DATA_DIRS=/share:/usr/share",
+            "WAYLAND_DISPLAY=wayland-0",
+            "GDK_BACKEND=wayland",
+            webkit_gdk_gl_env,
+            "GDK_DPI_SCALE=1.0",
+            "XCURSOR_PATH=/share/icons",
+            "XCURSOR_THEME=Adwaita",
+            "SSL_CERT_FILE=/share/netsurf/ca-bundle",
+            "GIO_MODULE_DIR=/lib/gio/modules",
+            "GIO_USE_TLS=gnutls",
+            "GST_PLUGIN_SYSTEM_PATH_1_0=/lib/gstreamer-1.0:/usr/lib/gstreamer-1.0",
+            "GST_PLUGIN_PATH_1_0=/lib/gstreamer-1.0:/usr/lib/gstreamer-1.0",
+            "GST_PLUGIN_SCANNER=/libexec/gstreamer-1.0/gst-plugin-scanner",
+            "GST_PLUGIN_SCANNER_1_0=/libexec/gstreamer-1.0/gst-plugin-scanner",
+            "GST_GL_PLATFORM=egl",
+            "GST_GL_WINDOW=wayland",
+            "GST_REGISTRY=/tmp/gstreamer-registry.bin",
+            "GST_REGISTRY_REUSE_PLUGIN_SCANNER=1",
+            gst_registry_update_env,
+            "XV6_GUI_SESSION=1",
+            webkit_uri_log_env,
+            "WEBKIT_EXEC_PATH=/libexec/webkit2gtk-4.1",
+            "WEBKIT_INJECTED_BUNDLE_PATH=/lib/webkit2gtk-4.1/injected-bundle",
+            "WEBKIT_DISABLE_NETWORK_CACHE=1",
+            "WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS=1",
+            "WEBKIT_GST_DMABUF_SINK_DISABLED=1",
+            "WEBKIT_XV6_GPU_CONTRACT=d3d12-shared-surface",
+            "WEBKIT_XV6_REQUIRE_GPU_CONTRACT=1",
+            "WEBKIT_XV6_FORCE_COMPOSITING_MODE=1",
+            "LIBGL_ALWAYS_SOFTWARE=0",
+            "LIBGL_DRIVERS_PATH=/lib/dri",
+            "MESA_LOADER_DRIVER_OVERRIDE=d3d12",
+            "GALLIUM_DRIVER=d3d12",
+            "EGL_PLATFORM=wayland",
+            "XV6_MESA_WAYLAND_THROTTLE=0",
+            "XV6_MESA_WAYLAND_XV6GPU=1",
+            "XV6_MESA_PERF_LOG=0",
+            "XV6_MESA_WAYLAND_INPLACE_PRESENT=1",
+            "XV6_D3D12_ENABLE_NATIVE_PRESENT=1",
+            "XV6_D3D12_PRESENT_INTERVAL=1",
+            "XV6_D3D12_REQUIRE_NATIVE_PRESENT=1",
+            "XV6_D3D12_COPY_EXPORT=0",
+            "vblank_mode=0",
             "ANGLE_DEFAULT_PLATFORM=gl",
             "SOUP_FORCE_HTTP1=1",
             "EPOXY_XV6_ALLOW_MISSING=1",
@@ -1245,48 +1303,6 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             "EPOXY_XV6_ALLOW_MISSING=1",
             NULL
         };
-        char *envp_minibrowser_dmabuf_sw[] = {
-            "HOME=/",
-            "PATH=/bin:/usr/bin",
-            "LD_LIBRARY_PATH=/lib:/usr/lib:/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu",
-            "LD_PRELOAD=/lib/libpng16.so.16:/lib/libxv6memshim.so",
-            "XDG_RUNTIME_DIR=/tmp",
-            "XDG_CACHE_HOME=/tmp/.cache",
-            "XDG_DATA_HOME=/tmp/.local/share",
-            "XDG_DATA_DIRS=/share:/usr/share",
-            "WAYLAND_DISPLAY=wayland-0",
-            "GDK_BACKEND=wayland",
-            webkit_gdk_gl_env,
-            "GDK_DPI_SCALE=1.0",
-            "XCURSOR_PATH=/share/icons",
-            "XCURSOR_THEME=Adwaita",
-            "SSL_CERT_FILE=/share/netsurf/ca-bundle",
-            "GIO_MODULE_DIR=/lib/gio/modules",
-            "GIO_USE_TLS=gnutls",
-            "GST_PLUGIN_SYSTEM_PATH_1_0=/lib/gstreamer-1.0:/usr/lib/gstreamer-1.0",
-            "GST_PLUGIN_PATH_1_0=/lib/gstreamer-1.0:/usr/lib/gstreamer-1.0",
-            "GST_PLUGIN_SCANNER=/libexec/gstreamer-1.0/gst-plugin-scanner",
-            "GST_PLUGIN_SCANNER_1_0=/libexec/gstreamer-1.0/gst-plugin-scanner",
-            "GST_GL_PLATFORM=egl",
-            "GST_GL_WINDOW=wayland",
-            "GST_REGISTRY=/tmp/gstreamer-registry.bin",
-            "GST_REGISTRY_REUSE_PLUGIN_SCANNER=1",
-            gst_registry_update_env,
-            "XV6_GUI_SESSION=1",
-            webkit_uri_log_env,
-            "WEBKIT_EXEC_PATH=/libexec/webkit2gtk-4.1",
-            "WEBKIT_INJECTED_BUNDLE_PATH=/lib/webkit2gtk-4.1/injected-bundle",
-            "WEBKIT_DISABLE_NETWORK_CACHE=1",
-            "WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS=1",
-            "LIBGL_ALWAYS_SOFTWARE=1",
-            "EGL_PLATFORM=wayland",
-            "LIBGL_DRIVERS_PATH=/lib/dri",
-            "MESA_LOADER_DRIVER_OVERRIDE=swrast",
-            "ANGLE_DEFAULT_PLATFORM=gl",
-            "SOUP_FORCE_HTTP1=1",
-            "EPOXY_XV6_ALLOW_MISSING=1",
-            NULL
-        };
         char *envp_mesa_accel[] = {
             "HOME=/",
             "PATH=/bin:/usr/bin",
@@ -1313,6 +1329,7 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             "XCURSOR_PATH=/share/icons",
             "XCURSOR_THEME=Adwaita",
             "LIBGL_ALWAYS_SOFTWARE=0",
+            "MESA_LOADER_DRIVER_OVERRIDE=d3d12",
             "GALLIUM_DRIVER=d3d12",
             "LIBGL_DRIVERS_PATH=/lib/dri",
             "EGL_PLATFORM=wayland",
@@ -1320,8 +1337,10 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             "XV6_MESA_WAYLAND_XV6GPU=1",
             "XV6_MESA_PERF_LOG=0",
             "XV6_MESA_WAYLAND_INPLACE_PRESENT=1",
+            "XV6_D3D12_ENABLE_NATIVE_PRESENT=1",
             "XV6_D3D12_PRESENT_INTERVAL=1",
-            "XV6_MESAWLEGL_RENDER_DIV=2",
+            "XV6_D3D12_REQUIRE_NATIVE_PRESENT=1",
+            "XV6_D3D12_COPY_EXPORT=0",
             "vblank_mode=0",
             NULL
         };
@@ -1352,27 +1371,44 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
         int webkit_accel =
             (is_minibrowser && minibrowser_accel) ||
             (is_webkitgpusmoke && webkit_accel_enabled_by_cmdline());
-        int opengl_submit_available = xv6_opengl_submit_available();
-        int dxg_transport_available = xv6_dxg_transport_available();
-        int render_node_available = xv6_render_node_available();
+        struct webkit_gpu_contract contract;
         char **argv_exec = argv_default;
-        if (minibrowser_dmabuf && !render_node_available) {
+        char **envp_webkit = envp_minibrowser;
+        xv6_webkit_gpu_contract(&contract);
+        if (minibrowser_dmabuf && contract.dxg_transport) {
+            fprintf(stderr,
+                    "[desktop] WebKit dmabuf requested on Hyper-V, but the "
+                    "only accelerated contract is D3D12 shared-resource "
+                    "OpenGL-submit; using the stable WebKit compositor path\n");
+            minibrowser_dmabuf = 0;
+        }
+        if (minibrowser_dmabuf && !contract.render_node) {
             fprintf(stderr,
                     "[desktop] WebKit dmabuf requested, but no render node "
                     "is available; using the stable WebKit compositor path\n");
             minibrowser_dmabuf = 0;
         }
-        if (minibrowser_dmabuf && !opengl_submit_available) {
+        if (minibrowser_dmabuf && !contract.opengl_submit) {
             fprintf(stderr,
                     "[desktop] WebKit dmabuf requested, but OpenGL submit is "
                     "not available; using the stable WebKit compositor path\n");
             minibrowser_dmabuf = 0;
         }
-        if (webkit_accel && !opengl_submit_available && !minibrowser_dmabuf) {
-            if (dxg_transport_available) {
+        if (minibrowser_dmabuf && !contract.shared_surface) {
+            fprintf(stderr,
+                    "[desktop] WebKit dmabuf requested, but the shared-surface "
+                    "present contract is not available; using the stable "
+                    "WebKit compositor path\n");
+            minibrowser_dmabuf = 0;
+        }
+        if (webkit_accel &&
+            !webkit_gpu_contract_allows_accel(&contract) &&
+            !minibrowser_dmabuf) {
+            if (contract.dxg_transport) {
                 fprintf(stderr,
                         "[desktop] Hyper-V DXG GPU-PV transport is open, "
-                        "but the D3DKMT/OpenGL bridge is not available; "
+                        "but the D3D12 shared-surface/OpenGL-submit contract "
+                        "is not available; "
                         "using the stable WebKit compositor path\n");
             } else {
                 fprintf(stderr,
@@ -1389,10 +1425,18 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             write_webkit_gpu_policy_file(app_name,
                                          webkit_accel_enabled_by_cmdline(),
                                          webkit_accel,
-                                         opengl_submit_available,
-                                         dxg_transport_available,
-                                         render_node_available,
+                                         &contract,
+                                         is_minibrowser &&
+                                             webkit_dmabuf_enabled_by_cmdline(),
                                          minibrowser_dmabuf);
+        }
+        if (is_webkit && webkit_accel) {
+            if (contract.d3d12_present)
+                envp_webkit = envp_minibrowser_dxg;
+            else if (contract.virgl_opengl)
+                envp_webkit = envp_minibrowser_accel;
+            else
+                envp_webkit = envp_minibrowser_accel_sw;
         }
         if (is_minibrowser) {
             if (minibrowser_accel) {
@@ -1430,15 +1474,11 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
         errno = 0;
         execve(path,
                argv_exec,
-               is_webkit ?
-                    (webkit_accel ?
-                         (minibrowser_dmabuf ? envp_minibrowser_dmabuf_sw :
-                     (opengl_submit_available ? envp_minibrowser_accel :
-                                           envp_minibrowser_accel_sw)) :
-                         envp_minibrowser) :
+               is_webkit ? envp_webkit :
                     (is_mesa_gl ?
-                    (opengl_submit_available ? envp_mesa_accel :
-                     (dxg_transport_available && render_node_available ?
+                    (xv6_opengl_submit_available() ? envp_mesa_accel :
+                     (xv6_dxg_transport_available() &&
+                      xv6_render_node_available() ?
                           envp_mesa_dxg : envp_mesa_accel_sw)) :
                          envp_default));
         fprintf(stderr, "%s: execve failed errno=%d (%s)\n", path, errno,

@@ -226,9 +226,6 @@ static void paint_scene(int fb_w, int fb_h, int *acquire_blocked)
             *acquire_blocked = 1;
             continue;
         }
-        src_bytes = buffer_data(buf);
-        if (!src_bytes) continue;
-        src = (uint32_t *)src_bytes;
 
         int32_t bw = buf->width;
         int32_t bh = buf->height;
@@ -317,6 +314,21 @@ static void paint_scene(int fb_w, int fb_h, int *acquire_blocked)
         if (row0 >= row1 || col0 >= col1)
             continue;
 
+        if (buf->is_d3d12_shared) {
+            if (!xv6_d3d12_present_imported_buffer(
+                    surf, buf, draw_x + col0, draw_y + row0,
+                    col0, row0, (uint32_t)(col1 - col0),
+                    (uint32_t)(row1 - row0))) {
+                *acquire_blocked = 1;
+                continue;
+            }
+            continue;
+        }
+
+        src_bytes = buffer_data(buf);
+        if (!src_bytes) continue;
+        src = (uint32_t *)src_bytes;
+
         if (paint_scaled_window_geometry_buffer(surf, buf, draw_x, draw_y,
                                                 gw, gh))
             continue;
@@ -395,6 +407,8 @@ static void release_cpu_copied_buffers_after_paint(void)
         int32_t gx, gy, gw, gh;
 
         if (!buf || surf->buffer_released || buf->release_pending)
+            continue;
+        if (buf->is_d3d12_shared)
             continue;
         if (buf->is_gpu_bo) {
             surface_window_geometry(surf, &gx, &gy, &gw, &gh);
@@ -506,23 +520,27 @@ static void composite_and_flip(void)
     wlcomp_draw_clear_clip();
 
     release_cpu_copied_buffers_after_paint();
-    present_damage_rects(fb_w, now);
+    int display_present_ok = present_damage_rects(fb_w, now);
     if (acquire_blocked) {
         g_damage_stats.acquire_blocked_frames++;
         damage_full_reason(FULL_DAMAGE_ACQUIRE);
     }
 
-    flush_buffer_releases_after_present();
-
     /* Once the frame is copied into fb0 and the present fence has signaled,
      * release committed buffers so clients can recycle their storage.  The
      * buffer_released flag keeps replacement commits from sending duplicate
      * releases for the same wl_buffer. */
-    int present_ready = framebuffer_present_fence_ready();
+    int present_ready = display_present_ok && framebuffer_present_fence_ready();
     int callbacks_due = frame_callbacks_due(now);
+
+    if (present_ready)
+        xv6_d3d12_complete_pending_presents_after_display();
+    flush_buffer_releases_after_present();
+
     wl_list_for_each(surf, &g_surfaces, link) {
         int ready = !surf->committed_buf ||
-                    (present_ready &&
+                    (!surface_has_unpresented_d3d12_buffer(surf) &&
+                     present_ready &&
                      buffer_acquire_ready(surf->committed_buf));
 
         if (ready)
@@ -532,6 +550,7 @@ static void composite_and_flip(void)
             struct wlcomp_frame_callback *tmp;
 
             wl_list_for_each_safe(cb, tmp, &surf->frame_callbacks, link) {
+                xv6_d3d12_observe_frame_callback(surf, now);
                 wl_callback_send_done(cb->resource, now);
                 wl_resource_destroy(cb->resource);
                 wl_list_remove(&cb->link);

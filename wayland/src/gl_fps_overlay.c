@@ -108,15 +108,15 @@ void gl_fps_overlay_draw(const char *text, GLuint program,
     if (text == NULL || text[0] == '\0')
         return;
 
-    overlay_emit_rect(vertices, &count, -0.95f, 0.93f, 0.50f, 0.55f,
+    overlay_emit_rect(vertices, &count, -0.95f, 0.93f, 0.08f, 0.55f,
                       0.00f, 0.00f, 0.00f, 0.82f);
-    overlay_emit_rect(vertices, &count, -0.95f, 0.93f, 0.50f, 0.89f,
+    overlay_emit_rect(vertices, &count, -0.95f, 0.93f, 0.08f, 0.89f,
                       0.10f, 0.78f, 1.00f, 0.94f);
-    overlay_emit_rect(vertices, &count, -0.95f, 0.59f, 0.50f, 0.55f,
+    overlay_emit_rect(vertices, &count, -0.95f, 0.59f, 0.08f, 0.55f,
                       0.10f, 0.78f, 1.00f, 0.94f);
     overlay_emit_rect(vertices, &count, -0.95f, 0.93f, -0.91f, 0.55f,
                       0.10f, 0.78f, 1.00f, 0.94f);
-    overlay_emit_rect(vertices, &count, 0.46f, 0.93f, 0.50f, 0.55f,
+    overlay_emit_rect(vertices, &count, 0.04f, 0.93f, 0.08f, 0.55f,
                       0.10f, 0.78f, 1.00f, 0.94f);
 
     for (const char *p = text; *p && count + 42 < (int)(sizeof(vertices) / sizeof(vertices[0])); p++) {

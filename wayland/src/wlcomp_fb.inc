@@ -55,6 +55,8 @@ struct wlcomp_damage_stats {
 
 static struct wlcomp_damage_stats g_damage_stats;
 static uint64_t g_damage_interval_max_ms;
+static uint64_t g_fb_blit_present_attempt_count;
+static uint64_t g_fb_blit_present_success_count;
 
 #define MAX_RELEASE_QUEUE 64
 static struct wlcomp_buffer *g_release_queue[MAX_RELEASE_QUEUE];
@@ -357,13 +359,47 @@ static int alloc_framebuffer_backing(void)
     size_t bytes = (size_t)g_fb_w * g_fb_h * 4;
     const char *use_direct = getenv("XV6_WLCOMP_FB_DIRECT");
     const char *use_bo = getenv("XV6_WLCOMP_FB_BO");
+    const char *use_gpu_compose = getenv("XV6_WLCOMP_GPU_COMPOSE");
+    int gpu_compose_requested =
+        cmdline_flag_enabled("wlcomp_gpu_compose") ||
+        (use_gpu_compose && *use_gpu_compose &&
+         atoi(use_gpu_compose) != 0);
     int direct_requested =
         (use_direct && strcmp(use_direct, "1") == 0) ||
         cmdline_flag_enabled("wlcomp_gpu_direct_scanout") ||
         cmdline_flag_enabled("wlcomp_fb_direct");
     int bo_requested =
         (use_bo && strcmp(use_bo, "1") == 0) ||
-        cmdline_flag_enabled("wlcomp_fb_bo");
+        cmdline_flag_enabled("wlcomp_fb_bo") ||
+        gpu_compose_requested;
+
+    if (bo_requested) {
+        int ret;
+
+        memset(&bo, 0, sizeof(bo));
+        bo.width = g_fb_w;
+        bo.height = g_fb_h;
+        bo.flags = FB_GPU_BO_F_EXPORTABLE;
+        errno = 0;
+        ret = ioctl(g_fb_fd, FB_GPU_BO_CREATE, &bo);
+        if (ret == 0 && bo.addr && bo.size) {
+            g_fb_buf = (uint32_t *)(uintptr_t)bo.addr;
+            g_fb_pitch = bo.pitch;
+            g_fb_bo_size = bo.size;
+            g_fb_bo_handle = bo.handle;
+            g_fb_bo_backed = 1;
+            memset(g_fb_buf, 0, (size_t)bo.size);
+            fprintf(stderr,
+                    "wlcomp: using fb GPU buffer addr=0x%lx size=%lu pitch=%u handle=%u requested_by_gpu_compose=%d\n",
+                    (uint64_t)bo.addr, bo.size, bo.pitch, bo.handle,
+                    gpu_compose_requested);
+            return 0;
+        }
+        fprintf(stderr,
+                "wlcomp: FB_GPU_BO_CREATE backing failed ret=%d errno=%d (%s) addr=0x%lx size=%lu pitch=%u handle=%u requested_by_gpu_compose=%d d3d12_native_present_target=missing\n",
+                ret, errno, strerror(errno), (uint64_t)bo.addr, bo.size,
+                bo.pitch, bo.handle, gpu_compose_requested);
+    }
 
     if (direct_requested) {
         int ret;
@@ -389,24 +425,6 @@ static int alloc_framebuffer_backing(void)
                 scanout.pitch, scanout.width, scanout.height);
     }
 
-    if (bo_requested) {
-        memset(&bo, 0, sizeof(bo));
-        bo.width = g_fb_w;
-        bo.height = g_fb_h;
-        bo.flags = FB_GPU_BO_F_EXPORTABLE;
-        if (ioctl(g_fb_fd, FB_GPU_BO_CREATE, &bo) == 0 && bo.addr && bo.size) {
-            g_fb_buf = (uint32_t *)(uintptr_t)bo.addr;
-            g_fb_pitch = bo.pitch;
-            g_fb_bo_size = bo.size;
-            g_fb_bo_handle = bo.handle;
-            g_fb_bo_backed = 1;
-            memset(g_fb_buf, 0, (size_t)bo.size);
-            fprintf(stderr, "wlcomp: using fb GPU buffer addr=0x%lx size=%lu pitch=%u handle=%u\n",
-                    (uint64_t)bo.addr, bo.size, bo.pitch, bo.handle);
-            return 0;
-        }
-    }
-
     g_fb_buf = (uint32_t *)malloc(bytes);
     if (!g_fb_buf)
         return -1;
@@ -416,13 +434,14 @@ static int alloc_framebuffer_backing(void)
     return 0;
 }
 
-static void present_damage_rects(int fb_w, uint32_t now)
+static int present_damage_rects(int fb_w, uint32_t now)
 {
     static uint32_t last_present_ms;
     int stride = g_fb_pitch ? (int)(g_fb_pitch / 4) : fb_w;
     int rect_count = g_damage_count;
     uint64_t present_pixels = 0;
     int full_frame = 0;
+    int ok = 1;
 
     for (int i = 0; i < g_damage_count; i++) {
         struct damage_rect *r = &g_damage[i];
@@ -440,10 +459,13 @@ static void present_damage_rects(int fb_w, uint32_t now)
             cmd.y = (uint32_t)r->y1;
             cmd.w = w;
             cmd.h = h;
-            ioctl(g_fb_fd, FB_GPU_SCANOUT_FLUSH, &cmd);
+            if (ioctl(g_fb_fd, FB_GPU_SCANOUT_FLUSH, &cmd) != 0)
+                ok = 0;
         } else if (g_fb_bo_backed) {
             struct fb_gpu_bo_present cmd;
+            int ret;
 
+            memset(&cmd, 0, sizeof(cmd));
             cmd.x = (uint32_t)r->x1;
             cmd.y = (uint32_t)r->y1;
             cmd.w = w;
@@ -452,27 +474,38 @@ static void present_damage_rects(int fb_w, uint32_t now)
             cmd.pixels = (uint64_t)r->y1 * g_fb_pitch + (uint64_t)r->x1 * 4;
             cmd.handle = g_fb_bo_handle;
             cmd.flags = 0;
-            if (ioctl(g_fb_fd, FB_GPU_BO_PRESENT, &cmd) == 0 &&
-                cmd.fence > g_fb_bo_last_present_fence)
+            ret = ioctl(g_fb_fd, FB_GPU_BO_PRESENT, &cmd);
+            if (ret == 0 && cmd.fence > g_fb_bo_last_present_fence) {
                 g_fb_bo_last_present_fence = cmd.fence;
+            } else if (ret == 0) {
+                /* Synchronous BO presents may report an unchanged fence. */
+            } else {
+                ok = 0;
+            }
         } else {
             struct fb_gpu_blit cmd;
             uint64_t pixels =
                 (uint64_t)(uintptr_t)(g_fb_buf + r->y1 * stride + r->x1);
             static int blit_error_logs;
+            memset(&cmd, 0, sizeof(cmd));
             cmd.x = (uint32_t)r->x1;
             cmd.y = (uint32_t)r->y1;
             cmd.w = w;
             cmd.h = h;
             cmd.src_pitch = g_fb_pitch;
             cmd.pixels = pixels;
-            if (ioctl(g_fb_fd, FB_GPU_BLIT, &cmd) != 0 &&
-                blit_error_logs < 8) {
-                fprintf(stderr,
-                        "wlcomp: FB_GPU_BLIT failed errno=%d (%s) rect=%u,%u %ux%u pitch=%u pixels=0x%lx\n",
-                        errno, strerror(errno), cmd.x, cmd.y, cmd.w, cmd.h,
-                        cmd.src_pitch, cmd.pixels);
-                blit_error_logs++;
+            g_fb_blit_present_attempt_count++;
+            if (ioctl(g_fb_fd, FB_GPU_BLIT, &cmd) != 0) {
+                ok = 0;
+                if (blit_error_logs < 8) {
+                    fprintf(stderr,
+                            "wlcomp: FB_GPU_BLIT failed errno=%d (%s) rect=%u,%u %ux%u pitch=%u pixels=0x%lx\n",
+                            errno, strerror(errno), cmd.x, cmd.y, cmd.w,
+                            cmd.h, cmd.src_pitch, cmd.pixels);
+                    blit_error_logs++;
+                }
+            } else {
+                g_fb_blit_present_success_count++;
             }
         }
     }
@@ -500,6 +533,7 @@ static void present_damage_rects(int fb_w, uint32_t now)
                                              &g_fb_display_wait_sequence,
                                              &g_fb_display_last_complete) == 0)
         g_fb_display_stall_start_ms = 0;
+    return ok;
 }
 
 static void tune_damage_for_present(void)

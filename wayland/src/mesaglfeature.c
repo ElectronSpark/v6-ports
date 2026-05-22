@@ -11,9 +11,11 @@
 #include <GLES2/gl2.h>
 
 #include <stdint.h>
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #ifndef EGL_PLATFORM_SURFACELESS_MESA
 #define EGL_PLATFORM_SURFACELESS_MESA 0x31DD
@@ -51,6 +53,107 @@ static int check_gl(const char *where)
         fprintf(stderr, "mesaglfeature: GL error 0x%x at %s\n", err, where);
         return 1;
     }
+    return 0;
+}
+
+static int env_is(const char *name, const char *value)
+{
+    const char *env = getenv(name);
+
+    return env && strcmp(env, value) == 0;
+}
+
+static int env_truthy(const char *name)
+{
+    const char *env = getenv(name);
+
+    return env && env[0] && strcmp(env, "0") != 0;
+}
+
+static void report_runtime_file(const char *label, const char *path)
+{
+    int rc = access(path, F_OK);
+
+    fprintf(stderr,
+            "mesaglfeature: runtime path %s=%s present=%d errno=%d\n",
+            label, path, rc == 0, rc == 0 ? 0 : errno);
+}
+
+static void report_runtime_env(void)
+{
+    fprintf(stderr,
+            "mesaglfeature: env GALLIUM_DRIVER=%s MESA_LOADER_DRIVER_OVERRIDE=%s LIBGL_DRIVERS_PATH=%s LD_LIBRARY_PATH=%s LIBGL_ALWAYS_SOFTWARE=%s MESA_D3D12_DEFAULT_ADAPTER_NAME=%s\n",
+            getenv("GALLIUM_DRIVER") ? getenv("GALLIUM_DRIVER") : "(unset)",
+            getenv("MESA_LOADER_DRIVER_OVERRIDE") ?
+                getenv("MESA_LOADER_DRIVER_OVERRIDE") : "(unset)",
+            getenv("LIBGL_DRIVERS_PATH") ? getenv("LIBGL_DRIVERS_PATH") :
+                "(unset)",
+            getenv("LD_LIBRARY_PATH") ? getenv("LD_LIBRARY_PATH") :
+                "(unset)",
+            getenv("LIBGL_ALWAYS_SOFTWARE") ?
+                getenv("LIBGL_ALWAYS_SOFTWARE") : "(unset)",
+            getenv("MESA_D3D12_DEFAULT_ADAPTER_NAME") ?
+                getenv("MESA_D3D12_DEFAULT_ADAPTER_NAME") : "(unset)");
+    report_runtime_file("d3d12_dri", "/lib/dri/d3d12_dri.so");
+    report_runtime_file("d3d12_dri_multiarch",
+                        "/usr/lib/x86_64-linux-gnu/dri/d3d12_dri.so");
+    report_runtime_file("dxcore", "/lib/libdxcore.so");
+    report_runtime_file("d3d12", "/lib/libd3d12.so");
+}
+
+static int contains_ci(const char *haystack, const char *needle)
+{
+    size_t needle_len;
+
+    if (!haystack || !needle)
+        return 0;
+    needle_len = strlen(needle);
+    if (needle_len == 0)
+        return 1;
+
+    for (const char *p = haystack; *p; p++) {
+        size_t i;
+
+        for (i = 0; i < needle_len; i++) {
+            char a = p[i];
+            char b = needle[i];
+
+            if (!a)
+                return 0;
+            if (a >= 'A' && a <= 'Z')
+                a = (char)(a - 'A' + 'a');
+            if (b >= 'A' && b <= 'Z')
+                b = (char)(b - 'A' + 'a');
+            if (a != b)
+                break;
+        }
+        if (i == needle_len)
+            return 1;
+    }
+    return 0;
+}
+
+static int require_d3d12_renderer(const char *renderer)
+{
+    if (!env_truthy("XV6_MESAGLFEATURE_REQUIRE_D3D12") &&
+        !env_is("GALLIUM_DRIVER", "d3d12") &&
+        !env_is("MESA_LOADER_DRIVER_OVERRIDE", "d3d12"))
+        return 0;
+
+    if (!renderer ||
+        contains_ci(renderer, "softpipe") ||
+        contains_ci(renderer, "llvmpipe") ||
+        !contains_ci(renderer, "d3d12")) {
+        fprintf(stderr,
+                "mesaglfeature: required D3D12 renderer but got renderer=%s GALLIUM_DRIVER=%s MESA_LOADER_DRIVER_OVERRIDE=%s\n",
+                renderer ? renderer : "(null)",
+                getenv("GALLIUM_DRIVER") ? getenv("GALLIUM_DRIVER") : "(unset)",
+                getenv("MESA_LOADER_DRIVER_OVERRIDE") ?
+                    getenv("MESA_LOADER_DRIVER_OVERRIDE") : "(unset)");
+        return 1;
+    }
+
+    printf("mesaglfeature: D3D12 renderer confirmed renderer=%s\n", renderer);
     return 0;
 }
 
@@ -331,6 +434,8 @@ int main(void)
     EGLint major = 0;
     EGLint minor = 0;
     EGLint nconfigs = 0;
+    const char *renderer = NULL;
+    const char *version = NULL;
     GLuint prog = 0;
     GLuint vbo = 0;
     GLuint tex = 0;
@@ -339,6 +444,7 @@ int main(void)
     setenv("LIBGL_ALWAYS_SOFTWARE", "1", 0);
     setenv("MESA_LOADER_DRIVER_OVERRIDE", "softpipe", 0);
     setenv("LIBGL_DRIVERS_PATH", "/usr/lib/x86_64-linux-gnu/dri", 0);
+    report_runtime_env();
 
     display = get_surfaceless_display();
     if (display == EGL_NO_DISPLAY ||
@@ -359,8 +465,13 @@ int main(void)
         goto out;
     }
 
+    renderer = (const char *)glGetString(GL_RENDERER);
+    version = (const char *)glGetString(GL_VERSION);
     printf("mesaglfeature: EGL %d.%d renderer=%s version=%s\n",
-           major, minor, glGetString(GL_RENDERER), glGetString(GL_VERSION));
+           major, minor, renderer ? renderer : "(null)",
+           version ? version : "(null)");
+    if (require_d3d12_renderer(renderer) != 0)
+        goto out;
 
     fprintf(stderr, "mesaglfeature: create_program begin\n");
     prog = create_program();

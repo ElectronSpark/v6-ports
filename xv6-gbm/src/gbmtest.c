@@ -131,7 +131,6 @@ int main(void)
     nv12 = gbm_bo_create_with_modifiers2(dev, 64, 32, GBM_FORMAT_NV12,
                                          &linear_mod, 1,
                                          GBM_BO_USE_RENDERING |
-                                         GBM_BO_USE_LINEAR |
                                          GBM_BO_USE_WRITE);
     if (!nv12) {
         printf("gbmtest: NV12 modifier create failed: %s\n", strerror(errno));

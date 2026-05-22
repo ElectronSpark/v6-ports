@@ -3,6 +3,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <signal.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -10,6 +11,7 @@
 #include <sys/resource.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "wlcomp_iwin_text.h"
@@ -18,10 +20,16 @@
 #define WEBKIT_NET_WAIT_US 35000000
 #define WEBKIT_DEFAULT_URL "https://www.google.com/search?q=xv6&gbv=1"
 #define XV6_DRM_RENDER_NODE "/dev/dri/renderD128"
+#define XV6_D3D12_PRESENT_EVIDENCE_PATH "/tmp/wlcomp-d3d12-present"
+#define XV6_D3D12_PRESENT_EVIDENCE_MAX_AGE_SEC 120
 #define FB_GPU_BACKEND_QUERY 0x462C
+#define FB_GPU_BACKEND_VIRGL 1
 #define FB_GPU_BACKEND_HYPERV_DXG 2
 #define FB_GPU_BACKEND_F_RENDER_NODE 0x0001
+#define FB_GPU_BACKEND_F_VIRGL_OPENGL 0x0004
 #define FB_GPU_BACKEND_F_DXG_TRANSPORT 0x0008
+#define FB_GPU_BACKEND_F_D3DKMT 0x0010
+#define FB_GPU_BACKEND_F_OPENGL_SUBMIT 0x0020
 static const char *webkit_feature_flags =
     "--features=+OffscreenCanvas,+OffscreenCanvasInWorkers,+requestIdleCallback";
 static const char *webkit_youtube_compat_user_agent =
@@ -92,6 +100,175 @@ static int launcher_dxg_render_node_available(void)
          info.backend == FB_GPU_BACKEND_HYPERV_DXG &&
          (info.flags & FB_GPU_BACKEND_F_RENDER_NODE) != 0 &&
          (info.flags & FB_GPU_BACKEND_F_DXG_TRANSPORT) != 0;
+    close(fd);
+    return ok;
+}
+
+static int launcher_opengl_submit_available(void)
+{
+    struct launcher_fb_gpu_backend_info info;
+    int fd;
+    int ok;
+
+    memset(&info, 0, sizeof(info));
+    fd = open(XV6_DRM_RENDER_NODE, O_RDWR | O_CLOEXEC);
+    if (fd < 0)
+        return 0;
+    ok = ioctl(fd, FB_GPU_BACKEND_QUERY, &info) == 0 &&
+         (info.flags & FB_GPU_BACKEND_F_OPENGL_SUBMIT) != 0;
+    close(fd);
+    return ok;
+}
+
+static int launcher_evidence_key_u64(const char *text, const char *key,
+                                     uint64_t *out)
+{
+    char needle[80];
+    const char *p;
+    char *end = NULL;
+
+    if (!text || !key || !out)
+        return 0;
+    snprintf(needle, sizeof(needle), "%s=", key);
+    p = strstr(text, needle);
+    if (!p)
+        return 0;
+    p += strlen(needle);
+    errno = 0;
+    *out = strtoull(p, &end, 0);
+    return errno == 0 && end != p;
+}
+
+static int launcher_evidence_key_string(const char *text, const char *key,
+                                        char *out, size_t out_size)
+{
+    char needle[80];
+    const char *p;
+    size_t n = 0;
+
+    if (!text || !key || !out || out_size == 0)
+        return 0;
+    out[0] = '\0';
+    snprintf(needle, sizeof(needle), "%s=", key);
+    p = strstr(text, needle);
+    if (!p)
+        return 0;
+    p += strlen(needle);
+    while (p[n] && p[n] != '\n' && p[n] != '\r' && n + 1 < out_size)
+        n++;
+    memcpy(out, p, n);
+    out[n] = '\0';
+    return n != 0;
+}
+
+static int launcher_d3d12_present_evidence_fresh(void)
+{
+    struct stat st;
+    time_t now;
+
+    if (stat(XV6_D3D12_PRESENT_EVIDENCE_PATH, &st) != 0 ||
+        st.st_size <= 0)
+        return 0;
+    now = time(NULL);
+    if (now == (time_t)-1)
+        return 1;
+    if (st.st_mtime > now)
+        return 1;
+    return now - st.st_mtime <= XV6_D3D12_PRESENT_EVIDENCE_MAX_AGE_SEC;
+}
+
+static int launcher_read_file(const char *path, char *buf, size_t buf_size)
+{
+    int fd;
+    ssize_t n;
+
+    if (!path || !buf || buf_size == 0)
+        return 0;
+    buf[0] = '\0';
+    fd = open(path, O_RDONLY);
+    if (fd < 0)
+        return 0;
+    n = read(fd, buf, buf_size - 1);
+    close(fd);
+    if (n <= 0)
+        return 0;
+    buf[n] = '\0';
+    return 1;
+}
+
+static int launcher_d3d12_present_evidence_valid(void)
+{
+    char evidence[2048];
+    char source_luid[32];
+    char matched_luid[32];
+    uint64_t resource = 0;
+    uint64_t allocations = 0;
+    uint64_t fence = 0;
+    uint64_t fence_target = 0;
+    uint64_t release_fence = 0;
+    uint64_t present_complete = 0;
+    uint64_t cpu_readback = 1;
+    uint64_t cpu_mapping = 1;
+    uint64_t cpu_copy = 1;
+    int same_adapter;
+    int no_readback;
+    int shared_resource;
+    int fence_ok;
+
+    if (!launcher_d3d12_present_evidence_fresh() ||
+        !launcher_read_file(XV6_D3D12_PRESENT_EVIDENCE_PATH, evidence,
+                            sizeof(evidence)))
+        return 0;
+    (void)launcher_evidence_key_u64(evidence, "d3d12_present_resource",
+                                    &resource);
+    (void)launcher_evidence_key_u64(evidence,
+                                    "d3d12_present_allocation_count",
+                                    &allocations);
+    (void)launcher_evidence_key_u64(evidence, "d3d12_present_fence",
+                                    &fence);
+    (void)launcher_evidence_key_u64(evidence, "d3d12_present_fence_target",
+                                    &fence_target);
+    (void)launcher_evidence_key_u64(evidence, "d3d12_present_release_fence",
+                                    &release_fence);
+    (void)launcher_evidence_key_u64(evidence, "d3d12_gpu_present_complete",
+                                    &present_complete);
+    (void)launcher_evidence_key_u64(evidence, "d3d12_cpu_readback",
+                                    &cpu_readback);
+    (void)launcher_evidence_key_u64(evidence, "d3d12_cpu_mapping",
+                                    &cpu_mapping);
+    (void)launcher_evidence_key_u64(evidence, "d3d12_cpu_copy",
+                                    &cpu_copy);
+    same_adapter =
+        launcher_evidence_key_string(evidence, "d3d12_present_luid",
+                                     source_luid, sizeof(source_luid)) &&
+        launcher_evidence_key_string(evidence, "d3d12_present_matched_luid",
+                                     matched_luid, sizeof(matched_luid)) &&
+        strcmp(source_luid, matched_luid) == 0;
+    no_readback =
+        cpu_readback == 0 && cpu_mapping == 0 && cpu_copy == 0;
+    shared_resource = resource != 0 && allocations != 0;
+    fence_ok = fence != 0 && fence_target != 0 && release_fence != 0;
+    return same_adapter && no_readback && shared_resource && fence_ok &&
+           present_complete != 0;
+}
+
+static int launcher_d3d12_present_contract_available(void)
+{
+    struct launcher_fb_gpu_backend_info info;
+    int fd;
+    int ok;
+
+    memset(&info, 0, sizeof(info));
+    fd = open(XV6_DRM_RENDER_NODE, O_RDWR | O_CLOEXEC);
+    if (fd < 0)
+        return 0;
+    ok = ioctl(fd, FB_GPU_BACKEND_QUERY, &info) == 0 &&
+         info.backend == FB_GPU_BACKEND_HYPERV_DXG &&
+         (info.flags & FB_GPU_BACKEND_F_RENDER_NODE) != 0 &&
+         (info.flags & FB_GPU_BACKEND_F_DXG_TRANSPORT) != 0 &&
+         (info.flags & FB_GPU_BACKEND_F_D3DKMT) != 0 &&
+         (info.flags & FB_GPU_BACKEND_F_OPENGL_SUBMIT) != 0 &&
+         launcher_d3d12_present_evidence_valid();
     close(fd);
     return ok;
 }
@@ -390,10 +567,65 @@ void wlcomp_launcher_launch(const char *path, const char *name,
             "WEBKIT_INJECTED_BUNDLE_PATH=/lib/webkit2gtk-4.1/injected-bundle",
             "WEBKIT_DISABLE_NETWORK_CACHE=1",
             "WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS=1",
+            "WEBKIT_XV6_GPU_CONTRACT=virgl-opengl-submit",
+            "WEBKIT_XV6_REQUIRE_GPU_CONTRACT=1",
+            "WEBKIT_XV6_FORCE_COMPOSITING_MODE=1",
             "LIBGL_ALWAYS_SOFTWARE=0",
             "LIBGL_DRIVERS_PATH=/lib/dri",
             "GALLIUM_DRIVER=virgl",
             "EGL_PLATFORM=wayland",
+            "ANGLE_DEFAULT_PLATFORM=gl",
+            "SOUP_FORCE_HTTP1=1",
+            "EPOXY_XV6_ALLOW_MISSING=1",
+            NULL
+        };
+        char *envp_minibrowser_dxg[] = {
+            "HOME=/",
+            "PATH=/bin:/usr/bin",
+            "LD_LIBRARY_PATH=/lib:/usr/lib:/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu",
+            "LD_PRELOAD=/lib/libpng16.so.16:/lib/libxv6memshim.so",
+            "XDG_RUNTIME_DIR=/tmp",
+            "XDG_CACHE_HOME=/tmp/.cache",
+            "XDG_DATA_HOME=/tmp/.local/share",
+            "XDG_DATA_DIRS=/share:/usr/share",
+            "WAYLAND_DISPLAY=wayland-0",
+            "GDK_BACKEND=wayland",
+            "GDK_GL=gles",
+            "GDK_DPI_SCALE=1.0",
+            "XCURSOR_PATH=/share/icons",
+            "XCURSOR_THEME=Adwaita",
+            "SSL_CERT_FILE=/share/netsurf/ca-bundle",
+            "GIO_MODULE_DIR=/lib/gio/modules",
+            "GIO_USE_TLS=gnutls",
+            "GST_PLUGIN_SYSTEM_PATH_1_0=/lib/gstreamer-1.0:/usr/lib/gstreamer-1.0",
+            "GST_PLUGIN_PATH_1_0=/lib/gstreamer-1.0:/usr/lib/gstreamer-1.0",
+            "GST_PLUGIN_SCANNER=/libexec/gstreamer-1.0/gst-plugin-scanner",
+            "GST_PLUGIN_SCANNER_1_0=/libexec/gstreamer-1.0/gst-plugin-scanner",
+            "GST_REGISTRY=/tmp/gstreamer-registry.bin",
+            "GST_REGISTRY_REUSE_PLUGIN_SCANNER=1",
+            "XV6_GUI_SESSION=1",
+            "WEBKIT_EXEC_PATH=/libexec/webkit2gtk-4.1",
+            "WEBKIT_INJECTED_BUNDLE_PATH=/lib/webkit2gtk-4.1/injected-bundle",
+            "WEBKIT_DISABLE_NETWORK_CACHE=1",
+            "WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS=1",
+            "WEBKIT_GST_DMABUF_SINK_DISABLED=1",
+            "WEBKIT_XV6_GPU_CONTRACT=d3d12-shared-surface",
+            "WEBKIT_XV6_REQUIRE_GPU_CONTRACT=1",
+            "WEBKIT_XV6_FORCE_COMPOSITING_MODE=1",
+            "LIBGL_ALWAYS_SOFTWARE=0",
+            "LIBGL_DRIVERS_PATH=/lib/dri",
+            "MESA_LOADER_DRIVER_OVERRIDE=d3d12",
+            "GALLIUM_DRIVER=d3d12",
+            "EGL_PLATFORM=wayland",
+            "XV6_MESA_WAYLAND_THROTTLE=0",
+            "XV6_MESA_WAYLAND_XV6GPU=1",
+            "XV6_MESA_PERF_LOG=0",
+            "XV6_MESA_WAYLAND_INPLACE_PRESENT=1",
+            "XV6_D3D12_ENABLE_NATIVE_PRESENT=1",
+            "XV6_D3D12_PRESENT_INTERVAL=1",
+            "XV6_D3D12_REQUIRE_NATIVE_PRESENT=1",
+            "XV6_D3D12_COPY_EXPORT=0",
+            "vblank_mode=0",
             "ANGLE_DEFAULT_PLATFORM=gl",
             "SOUP_FORCE_HTTP1=1",
             "EPOXY_XV6_ALLOW_MISSING=1",
@@ -468,6 +700,7 @@ void wlcomp_launcher_launch(const char *path, const char *name,
             "XCURSOR_PATH=/share/icons",
             "XCURSOR_THEME=Adwaita",
             "LIBGL_ALWAYS_SOFTWARE=0",
+            "MESA_LOADER_DRIVER_OVERRIDE=d3d12",
             "GALLIUM_DRIVER=d3d12",
             "LIBGL_DRIVERS_PATH=/lib/dri",
             "EGL_PLATFORM=wayland",
@@ -475,7 +708,10 @@ void wlcomp_launcher_launch(const char *path, const char *name,
             "XV6_MESA_WAYLAND_XV6GPU=1",
             "XV6_MESA_PERF_LOG=0",
             "XV6_MESA_WAYLAND_INPLACE_PRESENT=1",
+            "XV6_D3D12_ENABLE_NATIVE_PRESENT=1",
             "XV6_D3D12_PRESENT_INTERVAL=1",
+            "XV6_D3D12_REQUIRE_NATIVE_PRESENT=1",
+            "XV6_D3D12_COPY_EXPORT=0",
             "vblank_mode=0",
             NULL
         };
@@ -498,13 +734,20 @@ void wlcomp_launcher_launch(const char *path, const char *name,
         char **envp = envp_default;
         int virgl_available = launcher_virgl_available();
         int dxg_available = launcher_dxg_render_node_available();
+        int opengl_submit_available = launcher_opengl_submit_available();
+        int d3d12_present_available =
+            launcher_d3d12_present_contract_available();
+        int webkit_accel_available =
+            opengl_submit_available &&
+            (virgl_available || d3d12_present_available);
         if (is_webkit) {
             int accel = launcher_cmdline_flag_enabled("webkit_accel");
             int js = launcher_cmdline_int_value("webkit_js", 1) != 0;
-            if (accel && !virgl_available && is_minibrowser) {
+            if (accel && !webkit_accel_available && is_minibrowser) {
                 fprintf(stderr,
-                        "wlcomp: WebKit acceleration requested, but virgl is "
-                        "unavailable; using the stable WebKit compositor path\n");
+                        "wlcomp: WebKit acceleration requested, but the "
+                        "shared-surface/OpenGL-submit contract is unavailable; "
+                        "using the stable WebKit compositor path\n");
                 accel = 0;
             }
             if (is_minibrowser) {
@@ -514,11 +757,11 @@ void wlcomp_launcher_launch(const char *path, const char *name,
                 else
                     argv = js ? argv_minibrowser_js : argv_minibrowser;
             }
-            if (is_webkitgpusmoke)
-                accel = 0;
             envp = accel ?
-                (virgl_available ? envp_minibrowser_accel :
-                                   envp_minibrowser_accel_sw) :
+                (d3d12_present_available ? envp_minibrowser_dxg :
+                 (virgl_available && opengl_submit_available ?
+                      envp_minibrowser_accel :
+                                   envp_minibrowser_accel_sw)) :
                 envp_minibrowser;
         } else if (is_mesa_gl) {
             envp = virgl_available ? envp_mesa_accel :

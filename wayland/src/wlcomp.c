@@ -24,6 +24,7 @@
 #include <time.h>
 #include <dirent.h>
 #include <stdarg.h>
+#include <dlfcn.h>
 
 #include <wayland/wayland-server-core.h>
 #include <wayland/wayland-server-protocol.h>
@@ -329,7 +330,7 @@ int main(int argc, char **argv)
                                     3, NULL, ddm_bind);
     g_xv6_gpu_global = wl_global_create(g_display,
                                         &xv6_gpu_buffer_manager_interface,
-                                        2, NULL, xv6_gpu_bind);
+                                        5, NULL, xv6_gpu_bind);
     if (dmabuf_enabled) {
         g_dmabuf_global = wl_global_create(g_display,
                                            &zwp_linux_dmabuf_v1_interface,

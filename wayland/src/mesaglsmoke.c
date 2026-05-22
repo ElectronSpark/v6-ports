@@ -684,7 +684,7 @@ static void registry_global(void *data, struct wl_registry *registry,
                !app->gpu_manager) {
         app->gpu_manager = wl_registry_bind(
             registry, name, &xv6_gpu_buffer_manager_interface,
-            version > 2 ? 2 : version);
+            version > 3 ? 3 : version);
     }
 }
 

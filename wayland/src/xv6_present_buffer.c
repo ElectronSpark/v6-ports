@@ -30,17 +30,32 @@ static const struct wl_interface *xv6_gpu_buffer_create_types[] = {
     NULL,
     NULL,
     NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
 };
 
 static const struct wl_message xv6_gpu_buffer_manager_requests[] = {
     { "create_buffer", "nuiiiu", xv6_gpu_buffer_create_types },
     { "create_buffer_with_fence", "nuiiiuh", xv6_gpu_buffer_create_types },
+    { "create_d3d12_resource_buffer", "nhiiuuu",
+      xv6_gpu_buffer_create_types },
+    { "create_d3d12_resource_buffer_with_fence", "nhhiiuuu",
+      xv6_gpu_buffer_create_types },
+    { "create_d3d12_resource_buffer_luid", "nhuuiiuuu",
+      xv6_gpu_buffer_create_types },
+    { "create_d3d12_resource_buffer_with_fence_luid", "nhhuuiiuuu",
+      xv6_gpu_buffer_create_types },
+    { "create_d3d12_resource_buffer_with_fence_value_luid",
+      "nhhuuuuiiuuu", xv6_gpu_buffer_create_types },
 };
 
 const struct wl_interface xv6_gpu_buffer_manager_interface = {
     "xv6_gpu_buffer_manager",
-    2,
-    2,
+    5,
+    7,
     xv6_gpu_buffer_manager_requests,
     0,
     NULL,

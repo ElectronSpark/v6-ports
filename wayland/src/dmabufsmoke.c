@@ -42,6 +42,10 @@ struct app {
     int release_seen;
     int release_fenced;
     int hold_ms;
+    char gbm_path[64];
+    char gbm_backend[32];
+    int gbm_plane_count;
+    uint64_t gbm_modifier;
 };
 
 static const char *g_phase = "startup";
@@ -208,6 +212,11 @@ static const struct zwp_linux_buffer_release_v1_listener release_listener = {
 
 static int create_dmabuf_buffer(struct app *app)
 {
+    static const char *const gpu_paths[] = {
+        "/dev/dri/renderD128",
+        "/dev/gpu0",
+        "/dev/fb0",
+    };
     struct gbm_device *gbm = NULL;
     struct gbm_bo *bo = NULL;
     struct zwp_linux_buffer_params_v1 *params = NULL;
@@ -221,40 +230,83 @@ static int create_dmabuf_buffer(struct app *app)
     uint32_t height = 160;
     uint32_t format = app->use_nv12 ? GBM_FORMAT_NV12 : GBM_FORMAT_XRGB8888;
     uint64_t modifier = DRM_FORMAT_MOD_LINEAR;
+    const char *selected_path = NULL;
+    const char *backend = NULL;
+    int create_errno = 0;
 
-    gpu_fd = open("/dev/dri/renderD128", O_RDWR | O_CLOEXEC);
-    if (gpu_fd < 0)
-        gpu_fd = open("/dev/gpu0", O_RDWR | O_CLOEXEC);
-    if (gpu_fd < 0)
-        gpu_fd = open("/dev/fb0", O_RDWR | O_CLOEXEC);
-    if (gpu_fd < 0) {
-        perror("dmabufsmoke: open gpu");
-        return -1;
-    }
-    gbm = gbm_create_device(gpu_fd);
-    if (!gbm) {
-        perror("dmabufsmoke: gbm_create_device");
+    for (size_t i = 0; i < sizeof(gpu_paths) / sizeof(gpu_paths[0]); i++) {
+        gpu_fd = open(gpu_paths[i], O_RDWR | O_CLOEXEC);
+        if (gpu_fd < 0)
+            continue;
+        gbm = gbm_create_device(gpu_fd);
+        if (!gbm) {
+            create_errno = errno;
+            fprintf(stderr,
+                    "dmabufsmoke: gbm_create_device path=%s failed: %s\n",
+                    gpu_paths[i], strerror(create_errno));
+            close(gpu_fd);
+            gpu_fd = -1;
+            continue;
+        }
+        backend = gbm_device_get_backend_name(gbm);
+        if (app->use_nv12)
+            bo = gbm_bo_create_with_modifiers2(gbm, width, height, format,
+                                               &modifier, 1,
+                                               GBM_BO_USE_RENDERING |
+                                               GBM_BO_USE_WRITE);
+        else
+            bo = gbm_bo_create(gbm, width, height, format,
+                               GBM_BO_USE_RENDERING | GBM_BO_USE_WRITE |
+                               GBM_BO_USE_LINEAR);
+        if (bo) {
+            selected_path = gpu_paths[i];
+            break;
+        }
+        create_errno = errno;
+        fprintf(stderr,
+                "dmabufsmoke: gbm_bo_create path=%s format=%s backend=%s failed: %s\n",
+                gpu_paths[i], app->use_nv12 ? "NV12" : "XRGB8888",
+                backend ? backend : "?", strerror(create_errno));
+        gbm_device_destroy(gbm);
+        gbm = NULL;
+        backend = NULL;
         close(gpu_fd);
-        return -1;
+        gpu_fd = -1;
     }
-    if (app->use_nv12)
-        bo = gbm_bo_create_with_modifiers2(gbm, width, height, format,
-                                           &modifier, 1,
-                                           GBM_BO_USE_RENDERING |
-                                           GBM_BO_USE_WRITE |
-                                           GBM_BO_USE_LINEAR);
-    else
-        bo = gbm_bo_create(gbm, width, height, format,
-                           GBM_BO_USE_RENDERING | GBM_BO_USE_WRITE |
-                           GBM_BO_USE_LINEAR);
     if (!bo) {
+        errno = create_errno ? create_errno : ENODEV;
         perror("dmabufsmoke: gbm_bo_create");
+        goto fail;
+    }
+    fprintf(stderr, "dmabufsmoke: using gbm path=%s format=%s backend=%s\n",
+            selected_path ? selected_path : "?",
+            app->use_nv12 ? "NV12" : "XRGB8888",
+            backend ? backend : "?");
+    snprintf(app->gbm_path, sizeof(app->gbm_path), "%s",
+             selected_path ? selected_path : "?");
+    snprintf(app->gbm_backend, sizeof(app->gbm_backend), "%s",
+             backend ? backend : "?");
+    app->gbm_plane_count = gbm_bo_get_plane_count(bo);
+    app->gbm_modifier = gbm_bo_get_modifier(bo);
+    if (app->use_nv12 && strcmp(app->gbm_backend, "xv6-gbm") != 0) {
+        fprintf(stderr,
+                "dmabufsmoke: NV12 requires xv6 GBM backend, got %s\n",
+                app->gbm_backend);
         goto fail;
     }
     if ((app->use_nv12 && gbm_bo_get_plane_count(bo) != 2) ||
         (!app->use_nv12 && gbm_bo_get_plane_count(bo) != 1)) {
         fprintf(stderr, "dmabufsmoke: unexpected GBM plane count\n");
         goto fail;
+    }
+    if (app->use_nv12) {
+        fprintf(stderr,
+                "dmabufsmoke: NV12 metadata planes=%d y_stride=%u uv_stride=%u uv_offset=%u modifier=0x%lx\n",
+                gbm_bo_get_plane_count(bo),
+                gbm_bo_get_stride_for_plane(bo, 0),
+                gbm_bo_get_stride_for_plane(bo, 1),
+                gbm_bo_get_offset(bo, 1),
+                (unsigned long)gbm_bo_get_modifier(bo));
     }
 
     stride = gbm_bo_get_stride_for_plane(bo, 0);
@@ -432,9 +484,16 @@ int main(int argc, char **argv)
     printf("dmabufsmoke: presented linux-dmabuf buffer format=%s planes=%d\n",
            app.use_nv12 ? "NV12" : "XRGB8888",
            app.use_nv12 ? 2 : 1);
+    if (app.use_nv12) {
+        printf("dmabufsmoke: linux-dmabuf NV12 xv6-gbm backend ok "
+               "path=%s backend=%s planes=%d modifier=0x%lx\n",
+               app.gbm_path, app.gbm_backend, app.gbm_plane_count,
+               (unsigned long)app.gbm_modifier);
+    }
     if (app.use_explicit_sync)
         printf("dmabufsmoke: explicit-sync release=%s\n",
                app.release_fenced ? "fenced" : "immediate");
+    fflush(stdout);
     wl_buffer_destroy(app.buffer);
     xdg_toplevel_destroy(app.toplevel);
     xdg_surface_destroy(app.xdg_surface);

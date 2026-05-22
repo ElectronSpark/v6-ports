@@ -11,6 +11,8 @@ endif()
 set(WAYLAND_SRC_DIR "${CMAKE_CURRENT_SOURCE_DIR}/src")
 set(XV6_REPO_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../..")
 set(XV6_FAULT_TRACE_SRC "${XV6_REPO_ROOT}/tools/xv6_glibc_fault_trace.c")
+set(DIRECTX_HEADERS_DIR
+    "${CMAKE_CURRENT_SOURCE_DIR}/../mesa/src/subprojects/DirectX-Headers-1.0/include")
 set(WLCOMP_INCLUDE_SRCS
     ${WAYLAND_SRC_DIR}/wlcomp_fb.inc
     ${WAYLAND_SRC_DIR}/wlcomp_surface_state.inc
@@ -26,7 +28,7 @@ set(WLCOMP_INCLUDE_SRCS
 set(DESKTOP_INCLUDE_SRCS
     ${WAYLAND_SRC_DIR}/desktop_clients.inc)
 
-foreach(_src wlcomp.c wlcomp_desktop.c wlcomp_desktop.h wlcomp_draw.c wlcomp_draw.h wlcomp_iwin.h wlcomp_iwin_calc.c wlcomp_iwin_calc.h wlcomp_iwin_demo.c wlcomp_iwin_demo.h wlcomp_iwin_filemgr.c wlcomp_iwin_filemgr.h wlcomp_iwin_terminal.c wlcomp_iwin_terminal.h wlcomp_iwin_text.c wlcomp_iwin_text.h wlcomp_keymap.c wlcomp_keymap.h wlcomp_launcher.c wlcomp_launcher.h wlcomp_swgl.c wlcomp_swgl.h desktop.c filemgr.c glsmoke.c mesaglsmoke.c mesawlegl.c mesademo.c gl_program.c gl_program.h gl_fps_overlay.c gl_fps_overlay.h mesawlegl_sphere.c mesawlegl_sphere.h pixel_fps_overlay.c pixel_fps_overlay.h xv6_present_buffer.c xv6_present_buffer.h mesaeglinfo.c mesaglfeature.c mesad3d12probe.c gpu_substrate_validate.c dmabufsmoke.c drmgpuprobe.c webkitgpusmoke.c xv6_egl_gles.c xv6memshim.c font8x16.h)
+foreach(_src wlcomp.c wlcomp_desktop.c wlcomp_desktop.h wlcomp_draw.c wlcomp_draw.h wlcomp_iwin.h wlcomp_iwin_calc.c wlcomp_iwin_calc.h wlcomp_iwin_demo.c wlcomp_iwin_demo.h wlcomp_iwin_filemgr.c wlcomp_iwin_filemgr.h wlcomp_iwin_terminal.c wlcomp_iwin_terminal.h wlcomp_iwin_text.c wlcomp_iwin_text.h wlcomp_keymap.c wlcomp_keymap.h wlcomp_launcher.c wlcomp_launcher.h wlcomp_swgl.c wlcomp_swgl.h desktop.c filemgr.c glsmoke.c mesaglsmoke.c mesawlegl.c mesademo.c gl_program.c gl_program.h gl_fps_overlay.c gl_fps_overlay.h mesawlegl_sphere.c mesawlegl_sphere.h pixel_fps_overlay.c pixel_fps_overlay.h xv6_present_buffer.c xv6_present_buffer.h mesaeglinfo.c mesaglfeature.c mesad3d12probe.c gpu_substrate_validate.c dmabufsmoke.c d3d12sharedsmoke.c drmgpuprobe.c webkitgpusmoke.c xv6_egl_gles.c xv6memshim.c font8x16.h)
     if(NOT EXISTS "${WAYLAND_SRC_DIR}/${_src}")
         message(FATAL_ERROR "ports/wayland: missing ${WAYLAND_SRC_DIR}/${_src}")
     endif()
@@ -43,6 +45,9 @@ foreach(_src ${DESKTOP_INCLUDE_SRCS})
 endforeach()
 if(NOT EXISTS "${XV6_FAULT_TRACE_SRC}")
     message(FATAL_ERROR "ports/wayland: missing ${XV6_FAULT_TRACE_SRC}")
+endif()
+if(NOT EXISTS "${DIRECTX_HEADERS_DIR}/directx/d3d12.h")
+    message(FATAL_ERROR "ports/wayland: missing DirectX-Headers")
 endif()
 
 set(_wl_build     ${CMAKE_CURRENT_BINARY_DIR}/wlcomp-build)
@@ -77,8 +82,10 @@ set(_mesaglfeature_bin ${_wl_build}/mesaglfeature)
 set(_mesad3d12probe_bin ${_wl_build}/mesad3d12probe)
 set(_gpu_substrate_validate_bin ${_wl_build}/gpu-substrate-validate)
 set(_dmabufsmoke_bin ${_wl_build}/dmabufsmoke)
+set(_d3d12sharedsmoke_bin ${_wl_build}/d3d12sharedsmoke)
 set(_drmgpuprobe_bin ${_wl_build}/drmgpuprobe)
 set(_webkitgpusmoke_bin ${_wl_build}/webkitgpusmoke)
+set(_xv6_gbm_static ${XV6_SYSROOT}/lib/libgbm.a)
 set(_memshim_lib  ${_wl_build}/libxv6memshim.so)
 set(_fault_trace_lib ${_wl_build}/xv6_glibc_fault_trace.so)
 set(_xv6egl_obj   ${_wl_build}/xv6_egl_gles.o)
@@ -99,6 +106,7 @@ set(_mesaglfeature_installed ${XV6_SYSROOT}/bin/mesaglfeature)
 set(_mesad3d12probe_installed ${XV6_SYSROOT}/bin/mesad3d12probe)
 set(_gpu_substrate_validate_installed ${XV6_SYSROOT}/bin/gpu-substrate-validate)
 set(_dmabufsmoke_installed ${XV6_SYSROOT}/bin/dmabufsmoke)
+set(_d3d12sharedsmoke_installed ${XV6_SYSROOT}/bin/d3d12sharedsmoke)
 set(_drmgpuprobe_installed ${XV6_SYSROOT}/bin/drmgpuprobe)
 set(_webkitgpusmoke_installed ${XV6_SYSROOT}/bin/webkitgpusmoke)
 set(_memshim_installed ${XV6_SYSROOT}/lib/libxv6memshim.so)
@@ -247,6 +255,9 @@ if(XV6_WAYLAND_HOST_GLIBC)
                     -I ${WAYLAND_SRC_DIR}
                     -I ${_wl_build}
                     -I ${_wl_proto_dir}
+                    -I ${DIRECTX_HEADERS_DIR}
+                    -I ${DIRECTX_HEADERS_DIR}/wsl/stubs
+                    -I ${XV6_SYSROOT}/include/wsl/stubs
                     -I ${XV6_SYSROOT}/include
                     -I ${XV6_SYSROOT}/include/wayland
                     -I ${XV6_SYSROOT}/include/libdrm
@@ -266,7 +277,7 @@ if(XV6_WAYLAND_HOST_GLIBC)
                     ${_host_wayland_server_lib}
                     ${_host_wayland_private_lib}
                     ${_host_wayland_util_lib}
-                    -lffi -lpthread -lrt -lm
+                    -lffi -lpthread -ldl -lrt -lm
         DEPENDS ${_host_wl_stamp}
                 ${_wl_src} ${_wl_font} ${_xdg_header} ${_xdg_code}
                 ${_dmabuf_header} ${_dmabuf_code}
@@ -305,11 +316,14 @@ if(XV6_WAYLAND_HOST_GLIBC)
 else()
     add_custom_command(
         OUTPUT  ${_wl_bin}
-        COMMAND ${CMAKE_C_COMPILER} ${_wayland_opt_cflags} -Wall -Wno-unused-result -static
+        COMMAND ${CMAKE_C_COMPILER} ${_wayland_opt_cflags} -Wall -Wno-unused-result
                     -isystem ${XV6_SYSROOT}/include
                     -I ${WAYLAND_SRC_DIR}
                     -I ${_wl_build}
                     -I ${_wl_proto_dir}
+                    -I ${DIRECTX_HEADERS_DIR}
+                    -I ${DIRECTX_HEADERS_DIR}/wsl/stubs
+                    -I ${XV6_SYSROOT}/include/wsl/stubs
                     -I ${XV6_SYSROOT}/include/wayland
                     -L ${XV6_SYSROOT}/lib
                     -Wl,-rpath-link,${XV6_SYSROOT}/lib
@@ -327,7 +341,7 @@ else()
                     ${_xdg_code} ${_dmabuf_code}
                     ${_explicit_sync_code}
                     ${XV6_SYSROOT}/lib/libwayland-server.a
-                    -lffi -lpthread -lrt -lm
+                    -lffi -lpthread -ldl -lrt -lm
         DEPENDS ${_wl_src} ${_wl_font} ${_xdg_header} ${_xdg_code}
                 ${_dmabuf_header} ${_dmabuf_code}
                 ${_explicit_sync_header} ${_explicit_sync_code}
@@ -641,13 +655,33 @@ add_custom_command(
                 -o ${_dmabufsmoke_bin}
                 ${WAYLAND_SRC_DIR}/dmabufsmoke.c ${_xdg_client_code}
                 ${_dmabuf_client_code} ${_explicit_sync_client_code}
-                -lgbm -lwayland-client
+                ${_xv6_gbm_static} -lwayland-client
                 -lffi -lpthread -ldl -lrt -lm
     DEPENDS ${WAYLAND_SRC_DIR}/dmabufsmoke.c ${_xdg_client_header}
             ${_xdg_client_code} ${_dmabuf_client_header}
             ${_dmabuf_client_code} ${_explicit_sync_client_header}
-            ${_explicit_sync_client_code}
+            ${_explicit_sync_client_code} ${_xv6_gbm_static}
     COMMENT "Compiling linux-dmabuf smoke client"
+    VERBATIM)
+
+add_custom_command(
+    OUTPUT  ${_d3d12sharedsmoke_bin}
+    COMMAND ${CMAKE_C_COMPILER} ${_wayland_opt_cflags} -Wall
+                -isystem ${XV6_SYSROOT}/include
+                -I ${XV6_SYSROOT}/include/wsl/stubs
+                -I ${_wl_proto_dir}
+                -I ${XV6_SYSROOT}/include/wayland
+                -idirafter ${XV6_REPO_ROOT}/kernel/kernel/inc
+                -L ${XV6_SYSROOT}/lib
+                -Wl,-rpath-link,${XV6_SYSROOT}/lib
+                -o ${_d3d12sharedsmoke_bin}
+                ${WAYLAND_SRC_DIR}/d3d12sharedsmoke.c ${_xdg_client_code}
+                -ld3d12 -ldxcore -lwayland-client
+                -lffi -lpthread -ldl -lrt -lm
+    DEPENDS ${WAYLAND_SRC_DIR}/d3d12sharedsmoke.c ${_xdg_client_header}
+            ${_xdg_client_code}
+            ${XV6_REPO_ROOT}/kernel/kernel/inc/uabi/d3dkmthk.h
+    COMMENT "Compiling D3D12 shared-resource Wayland smoke client"
     VERBATIM)
 
 set(_webkit_smoke_ok OFF)
@@ -734,6 +768,7 @@ add_custom_command(
             ${_mesad3d12probe_installed}
             ${_gpu_substrate_validate_installed}
             ${_dmabufsmoke_installed}
+            ${_d3d12sharedsmoke_installed}
             ${_drmgpuprobe_installed} ${_webkitgpusmoke_installed}
             ${_memshim_installed} ${_fault_trace_installed}
     COMMAND ${CMAKE_COMMAND} -E copy ${_wl_bin} ${_wl_installed}
@@ -748,6 +783,7 @@ add_custom_command(
     COMMAND ${CMAKE_COMMAND} -E copy ${_mesad3d12probe_bin} ${_mesad3d12probe_installed}
     COMMAND ${CMAKE_COMMAND} -E copy ${_gpu_substrate_validate_bin} ${_gpu_substrate_validate_installed}
     COMMAND ${CMAKE_COMMAND} -E copy ${_dmabufsmoke_bin} ${_dmabufsmoke_installed}
+    COMMAND ${CMAKE_COMMAND} -E copy ${_d3d12sharedsmoke_bin} ${_d3d12sharedsmoke_installed}
     COMMAND ${CMAKE_COMMAND} -E copy ${_drmgpuprobe_bin} ${_drmgpuprobe_installed}
     COMMAND ${CMAKE_COMMAND} -E copy ${_webkitgpusmoke_bin} ${_webkitgpusmoke_installed}
     COMMAND ${CMAKE_COMMAND} -E copy ${_memshim_lib} ${_memshim_installed}
@@ -758,7 +794,7 @@ add_custom_command(
             ${_mesawlegl_bin} ${_mesademo_bin}
             ${_mesaeglinfo_bin} ${_mesaglfeature_bin}
             ${_mesad3d12probe_bin} ${_gpu_substrate_validate_bin}
-            ${_dmabufsmoke_bin}
+            ${_dmabufsmoke_bin} ${_d3d12sharedsmoke_bin}
             ${_drmgpuprobe_bin} ${_webkitgpusmoke_bin} ${_memshim_lib}
             ${_fault_trace_lib}
     COMMENT "Installing GUI session into ${XV6_SYSROOT}/bin"
@@ -772,7 +808,7 @@ add_custom_target(port-wayland ALL DEPENDS
     ${_mesaeglinfo_installed} ${_mesaglfeature_installed}
     ${_mesad3d12probe_installed}
     ${_gpu_substrate_validate_installed}
-    ${_dmabufsmoke_installed}
+    ${_dmabufsmoke_installed} ${_d3d12sharedsmoke_installed}
     ${_drmgpuprobe_installed}
     ${_webkitgpusmoke_installed} ${_memshim_installed}
     ${_fault_trace_installed})
@@ -781,6 +817,9 @@ if(TARGET port-wayland-libs)
 endif()
 if(TARGET port-mesa)
     add_dependencies(port-wayland port-mesa)
+endif()
+if(TARGET port-xv6-gbm)
+    add_dependencies(port-wayland port-xv6-gbm)
 endif()
 if(TARGET port-webkit)
     add_dependencies(port-wayland port-webkit)
@@ -797,6 +836,7 @@ add_custom_target(port-wayland-clean
             ${_mesad3d12probe_installed}
             ${_gpu_substrate_validate_installed}
             ${_dmabufsmoke_installed}
+            ${_d3d12sharedsmoke_installed}
             ${_drmgpuprobe_installed} ${_webkitgpusmoke_installed}
             ${_memshim_installed} ${_memshim_lib}
             ${_egl_installed} ${_gles_installed}

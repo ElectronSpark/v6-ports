@@ -6,10 +6,62 @@ include(${CMAKE_CURRENT_LIST_DIR}/../cmake/AddPort.cmake)
 # and the D3D12 Gallium driver needed for Hyper-V GPU-PV/DXG bring-up.  The
 # D3D12 driver still depends on a usable dxcore/libd3d12 runtime in the guest,
 # so Hyper-V only advertises OpenGL submit after runtime validation succeeds.
+function(_mesa_append_existing_source_deps)
+    foreach(_dep IN LISTS ARGN)
+        if(EXISTS "${_dep}")
+            list(APPEND _mesa_d3d12_source_deps "${_dep}")
+        endif()
+    endforeach()
+    set(_mesa_d3d12_source_deps "${_mesa_d3d12_source_deps}" PARENT_SCOPE)
+endfunction()
+
+file(GLOB_RECURSE _mesa_d3d12_source_deps CONFIGURE_DEPENDS
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/src/gallium/drivers/d3d12/*
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/src/gallium/drivers/softpipe/*
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/src/gallium/drivers/virgl/*
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/src/gallium/frontends/dri/*
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/src/gallium/targets/dri/*
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/src/gallium/winsys/d3d12/*
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/src/gallium/winsys/sw/dri/*
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/src/gallium/winsys/sw/kms-dri/*
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/src/gallium/winsys/virgl/*
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/src/gallium/auxiliary/target-helpers/*sw_helper.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/src/egl/drivers/dri2/*
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/src/egl/main/*
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/src/gallium/include/*
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/include/GL/internal/*
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/src/microsoft/*
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/subprojects/DirectX-Headers-1.0/*
+)
+
+_mesa_append_existing_source_deps(
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/meson.build
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/src/meson.build
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/src/egl/meson.build
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/src/gallium/meson.build
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/src/gallium/auxiliary/meson.build
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/src/gallium/drivers/d3d12/meson.build
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/src/gallium/drivers/softpipe/meson.build
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/src/gallium/drivers/virgl/meson.build
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/src/gallium/frontends/dri/meson.build
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/src/gallium/targets/dri/meson.build
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/src/gallium/winsys/d3d12/wgl/meson.build
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/src/gallium/winsys/sw/dri/meson.build
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/src/gallium/winsys/sw/kms-dri/meson.build
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/src/gallium/winsys/virgl/common/meson.build
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/src/gallium/winsys/virgl/drm/meson.build
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/src/gallium/winsys/virgl/vtest/meson.build
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/src/gallium/winsys/virgl/xv6/meson.build
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/src/microsoft/meson.build
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/subprojects/DirectX-Headers-1.0/meson.build
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/subprojects/DirectX-Headers-1.0/meson_options.txt
+)
+
 xv6_port(
     NAME            mesa
     SOURCE_DIR      ${CMAKE_CURRENT_SOURCE_DIR}/src
     BUILD_SYSTEM    meson
+    SOURCE_DEPENDS  ${_mesa_d3d12_source_deps}
     C_ARGS          -DDETECT_OS_XV6=1
     CPP_ARGS        -DDETECT_OS_XV6=1
     DEPENDS         khronos-headers
@@ -125,6 +177,22 @@ set(_mesa_wsl_dxcore_src ${_mesa_wsl_d3d12_runtime_dir}/libdxcore.so)
 set(_mesa_wsl_d3d12_src ${_mesa_wsl_d3d12_runtime_dir}/libd3d12.so)
 set(_mesa_wsl_d3d12core_src ${_mesa_wsl_d3d12_runtime_dir}/libd3d12core.so)
 set(_mesa_wsl_nv_d3d12_umd_src ${_mesa_wsl_d3d12_runtime_dir}/libnvwgf2umx.so)
+file(GLOB _mesa_wsl_nv_d3d12_umd_candidate_dirs LIST_DIRECTORIES true
+     "/usr/lib/wsl/drivers/nv*.inf_amd64_*")
+foreach(_mesa_wsl_nv_d3d12_umd_candidate_dir IN LISTS
+        _mesa_wsl_nv_d3d12_umd_candidate_dirs)
+    if(EXISTS ${_mesa_wsl_nv_d3d12_umd_candidate_dir}/libnvwgf2umx.so)
+        list(APPEND _mesa_wsl_nv_d3d12_umd_dirs
+             ${_mesa_wsl_nv_d3d12_umd_candidate_dir})
+    endif()
+endforeach()
+list(SORT _mesa_wsl_nv_d3d12_umd_dirs)
+if(_mesa_wsl_nv_d3d12_umd_dirs)
+    list(GET _mesa_wsl_nv_d3d12_umd_dirs -1
+         _mesa_wsl_nv_d3d12_umd_driverstore_dir)
+    get_filename_component(_mesa_wsl_nv_d3d12_umd_driverstore_name
+        ${_mesa_wsl_nv_d3d12_umd_driverstore_dir} NAME)
+endif()
 file(GLOB _mesa_wsl_intel_d3d12_umd_dirs LIST_DIRECTORIES true
      "/usr/lib/wsl/drivers/iigd_dch.inf_amd64_*")
 list(SORT _mesa_wsl_intel_d3d12_umd_dirs)
@@ -138,6 +206,8 @@ set(_mesa_d3d12core_installed ${XV6_SYSROOT}/lib/libd3d12core.so)
 set(_mesa_d3d12core_compat_installed ${XV6_SYSROOT}/lib/libD3D12Core.so)
 set(_mesa_d3d12core_dll_compat_installed ${XV6_SYSROOT}/lib/D3D12Core.dll)
 set(_mesa_nv_d3d12_umd_installed ${XV6_SYSROOT}/lib/libnvwgf2umx.so)
+set(_mesa_nv_d3d12_umd_driverstore_installed
+    ${XV6_SYSROOT}/usr/lib/wsl/drivers/${_mesa_wsl_nv_d3d12_umd_driverstore_name}/libnvwgf2umx.so)
 set(_mesa_intel_d3d12_umd_installed ${XV6_SYSROOT}/lib/libigd12umd64.so)
 set(_mesa_intel_d3d12_xeh_installed ${XV6_SYSROOT}/lib/libigd12um64xeh.so)
 set(_mesa_intel_d3d12_xel_installed ${XV6_SYSROOT}/lib/libigd12um64xel.so)
@@ -192,6 +262,27 @@ else()
         "ports/mesa: WSL D3D12 runtime libraries not found in "
         "${_mesa_wsl_d3d12_runtime_dir}; Hyper-V Mesa D3D12 will need "
         "libdxcore.so/libd3d12.so staged separately")
+endif()
+
+if(_mesa_wsl_nv_d3d12_umd_driverstore_dir)
+    add_custom_command(
+        OUTPUT  ${_mesa_nv_d3d12_umd_driverstore_installed}
+        COMMAND ${CMAKE_COMMAND} -E make_directory
+                ${XV6_SYSROOT}/usr/lib/wsl/drivers/${_mesa_wsl_nv_d3d12_umd_driverstore_name}
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                ${_mesa_wsl_nv_d3d12_umd_driverstore_dir}/libnvwgf2umx.so
+                ${_mesa_nv_d3d12_umd_driverstore_installed}
+        DEPENDS port-mesa
+        COMMENT "Staging NVIDIA WSL D3D12 user-mode driver-store path"
+        VERBATIM)
+    add_custom_target(port-mesa-wsl-nvidia-driverstore ALL
+        DEPENDS ${_mesa_nv_d3d12_umd_driverstore_installed})
+    add_dependencies(port-mesa-wsl-nvidia-driverstore port-mesa)
+else()
+    message(STATUS
+        "ports/mesa: NVIDIA WSL D3D12 UMD not found under "
+        "/usr/lib/wsl/drivers/nv*.inf_amd64_*; NVIDIA Hyper-V D3D12 "
+        "will need the driver-store libnvwgf2umx.so staged separately")
 endif()
 
 if(_mesa_wsl_intel_d3d12_umd_dir

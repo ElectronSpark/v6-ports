@@ -129,6 +129,24 @@ static void surface_commit(struct wl_client *client, struct wl_resource *resourc
         surf->committed_buf = surf->pending_buf;
         surf->pending_buf = NULL;
         surf->has_pending_buffer = 0;
+        if (surf->committed_buf && surf->committed_buf->is_d3d12_shared) {
+            surf->committed_buf->d3d12_present_complete = 0;
+            surf->committed_buf->d3d12_gpu_copy_complete = 0;
+            surf->committed_buf->d3d12_present_evidence_pending = 0;
+            surf->committed_buf->d3d12_present_wait_confirmed = 0;
+            surf->committed_buf->d3d12_gpu_present_start_time = 0;
+            surf->committed_buf->d3d12_gpu_copy_complete_time = 0;
+            surf->committed_buf->d3d12_native_present_attempt_id = 0;
+            surf->committed_buf->d3d12_native_present_completion_id = 0;
+            surf->committed_buf->d3d12_fb_blit_attempts_at_present =
+                g_fb_blit_present_attempt_count;
+            surf->committed_buf->d3d12_fb_blit_successes_at_present =
+                g_fb_blit_present_success_count;
+            surf->committed_buf->d3d12_cpu_map_rejects_at_present =
+                g_d3d12_cpu_map_reject_count;
+            surf->committed_buf->d3d12_cpu_plane_rejects_at_present =
+                g_d3d12_cpu_plane_reject_count;
+        }
         buffer_changed = old_committed != surf->committed_buf;
         if (old_committed && surf->committed_buf &&
             (old_w != surf->committed_buf->width ||
@@ -189,6 +207,18 @@ static void surface_commit(struct wl_client *client, struct wl_resource *resourc
                 surf->sub_x, surf->sub_y,
                 surf->committed_buf->width, surf->committed_buf->height);
     }
+    if (surf->committed_buf && surf->committed_buf->is_d3d12_shared &&
+        !surf->xdg_toplevel && !surf->is_subsurface && !surf->mapped) {
+        surf->mapped = 1;
+        first_map = 1;
+        fprintf(stderr,
+                "wlcomp: mapped roleless D3D12 shared-resource surface pid=%d size=%dx%d resource=0x%x fence=0x%x target=%lu import_complete=1 release_after_present=1\n",
+                surf->client_pid, surf->committed_buf->width,
+                surf->committed_buf->height,
+                surf->committed_buf->d3d12_opened_resource,
+                surf->committed_buf->d3d12_opened_fence,
+                (unsigned long)surf->committed_buf->d3d12_fence_value);
+    }
 
     if (first_map || buffer_size_changed)
         damage_full_reason(FULL_DAMAGE_CLIENT);
@@ -196,6 +226,69 @@ static void surface_commit(struct wl_client *client, struct wl_resource *resourc
         /* The pending Wayland damage was enough to repaint this commit. */
     } else if (had_pending_buffer && buffer_changed && surf->committed_buf) {
         damage_surface(surf);
+    }
+    if (surf->committed_buf && surf->committed_buf->is_d3d12_shared) {
+        int32_t gx, gy, gw, gh;
+        int32_t ax, ay;
+
+        surface_window_geometry(surf, &gx, &gy, &gw, &gh);
+        surface_absolute_position(surf, &ax, &ay);
+        if (gw > 0 && gh > 0) {
+            int32_t draw_x = ax - gx;
+            int32_t draw_y = ay - gy;
+            int32_t src_x = gx < 0 ? 0 : gx;
+            int32_t src_y = gy < 0 ? 0 : gy;
+            int32_t src_x2 = gx + gw;
+            int32_t src_y2 = gy + gh;
+            int32_t dst_x;
+            int32_t dst_y;
+            uint32_t width;
+            uint32_t height;
+
+            if (src_x2 > surf->committed_buf->width)
+                src_x2 = surf->committed_buf->width;
+            if (src_y2 > surf->committed_buf->height)
+                src_y2 = surf->committed_buf->height;
+            if (src_x2 < src_x)
+                src_x2 = src_x;
+            if (src_y2 < src_y)
+                src_y2 = src_y;
+            dst_x = draw_x + src_x;
+            dst_y = draw_y + src_y;
+            width = (uint32_t)(src_x2 - src_x);
+            height = (uint32_t)(src_y2 - src_y);
+            if (dst_x < 0) {
+                int32_t clip = -dst_x;
+                if (clip < (int32_t)width) {
+                    src_x += clip;
+                    width -= (uint32_t)clip;
+                    dst_x = 0;
+                } else {
+                    width = 0;
+                }
+            }
+            if (dst_y < 0) {
+                int32_t clip = -dst_y;
+                if (clip < (int32_t)height) {
+                    src_y += clip;
+                    height -= (uint32_t)clip;
+                    dst_y = 0;
+                } else {
+                    height = 0;
+                }
+            }
+            if (dst_x >= (int32_t)g_fb_w || dst_y >= (int32_t)g_fb_h)
+                width = height = 0;
+            if (width > 0 && dst_x + (int32_t)width > (int32_t)g_fb_w)
+                width = (uint32_t)((int32_t)g_fb_w - dst_x);
+            if (height > 0 && dst_y + (int32_t)height > (int32_t)g_fb_h)
+                height = (uint32_t)((int32_t)g_fb_h - dst_y);
+            if (width > 0 && height > 0 &&
+                !xv6_d3d12_present_imported_buffer(
+                    surf, surf->committed_buf, dst_x, dst_y, src_x, src_y,
+                    width, height))
+                damage_full_reason(FULL_DAMAGE_ACQUIRE);
+        }
     }
     surface_pending_damage_clear(surf);
 }
@@ -550,4 +643,3 @@ static void subcompositor_bind(struct wl_client *client, void *data,
     }
     wl_resource_set_implementation(res, &subcompositor_impl, NULL, NULL);
 }
-

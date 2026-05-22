@@ -116,13 +116,30 @@ struct app_state {
     double next_frame_sec;
     int sphere_vertex_count;
     int fps_frame_count;
+    int fps_client_sample_seq;
     int fps_title_count;
     double fps_value;
     double fps_start_sec;
+    double fps_run_ceiling;
     int visible_fps_frame_count;
+    int visible_fps_sample_seq;
     double visible_fps_value;
     double callback_fps_value;
     double visible_fps_start_sec;
+    uint64_t native_present_last_count;
+    uint64_t native_present_last_delta;
+    uint64_t native_present_evidence_generation;
+    uint64_t native_present_evidence_time_us;
+    uint64_t native_present_resource;
+    uint64_t native_present_buffer_generation;
+    uint64_t native_present_client_buffer_id;
+    uint64_t native_present_manager_resource_id;
+    int native_present_client_pid;
+    int native_present_evidence_valid;
+    char native_present_evidence_run_id[96];
+    double native_present_last_sec;
+    double native_present_last_elapsed_sec;
+    double native_present_fps_value;
     double draw_total_sec;
     double swap_total_sec;
     double dispatch_total_sec;
@@ -724,6 +741,267 @@ static int read_wlcomp_fps(double *fps_out)
     return 1;
 }
 
+struct d3d12_present_evidence {
+    uint64_t count;
+    uint64_t evidence_generation;
+    uint64_t evidence_time_us;
+    uint64_t resource;
+    uint64_t buffer_generation;
+    uint64_t client_buffer_id;
+    uint64_t manager_resource_id;
+    int client_pid;
+    int display_handoff;
+    int requirements_satisfied;
+    int no_readback;
+    int cpu_readback;
+    int cpu_mapping;
+    int cpu_copy;
+    int rejected;
+    char run_id[96];
+    char path[96];
+};
+
+static int parse_key_u64(const char *line, const char *key, uint64_t *out)
+{
+    size_t key_len = strlen(key);
+    char *end = NULL;
+    unsigned long long value;
+
+    if (strncmp(line, key, key_len) != 0 || line[key_len] != '=')
+        return 0;
+    value = strtoull(line + key_len + 1, &end, 0);
+    if (end == line + key_len + 1)
+        return 0;
+    if (out)
+        *out = (uint64_t)value;
+    return 1;
+}
+
+static int parse_key_int(const char *line, const char *key, int *out)
+{
+    uint64_t value;
+
+    if (!parse_key_u64(line, key, &value))
+        return 0;
+    if (out)
+        *out = (int)value;
+    return 1;
+}
+
+static int parse_key_token(const char *line, const char *key,
+                           char *out, size_t out_size)
+{
+    size_t key_len = strlen(key);
+    const char *start;
+    size_t len;
+
+    if (out_size == 0)
+        return 0;
+    if (strncmp(line, key, key_len) != 0 || line[key_len] != '=')
+        return 0;
+    start = line + key_len + 1;
+    len = strcspn(start, " \t\r\n");
+    if (len >= out_size)
+        len = out_size - 1;
+    memcpy(out, start, len);
+    out[len] = '\0';
+    return len > 0;
+}
+
+static int read_d3d12_native_present_evidence(
+    struct d3d12_present_evidence *evidence_out)
+{
+    FILE *fp;
+    char line[256];
+    struct d3d12_present_evidence evidence;
+    const char *expected_run_id;
+
+    if (evidence_out)
+        memset(evidence_out, 0, sizeof(*evidence_out));
+    memset(&evidence, 0, sizeof(evidence));
+    evidence.cpu_readback = -1;
+    evidence.cpu_mapping = -1;
+    evidence.cpu_copy = -1;
+    fp = fopen("/tmp/wlcomp-d3d12-present", "r");
+    if (!fp)
+        return 0;
+    while (fgets(line, sizeof(line), fp)) {
+        parse_key_u64(line, "d3d12_gpu_present_completes",
+                      &evidence.count);
+        parse_key_u64(line, "d3d12_evidence_generation",
+                      &evidence.evidence_generation);
+        parse_key_u64(line, "d3d12_present_evidence_time_us",
+                      &evidence.evidence_time_us);
+        parse_key_u64(line, "d3d12_present_resource", &evidence.resource);
+        parse_key_u64(line, "d3d12_buffer_generation",
+                      &evidence.buffer_generation);
+        parse_key_u64(line, "d3d12_client_buffer_id",
+                      &evidence.client_buffer_id);
+        parse_key_u64(line, "d3d12_manager_resource_id",
+                      &evidence.manager_resource_id);
+        parse_key_int(line, "d3d12_client_pid", &evidence.client_pid);
+        parse_key_int(line, "d3d12_display_handoff_implemented",
+                      &evidence.display_handoff);
+        parse_key_int(line, "d3d12_native_present_requirements_satisfied",
+                      &evidence.requirements_satisfied);
+        parse_key_int(line, "d3d12_no_readback", &evidence.no_readback);
+        parse_key_int(line, "d3d12_cpu_readback", &evidence.cpu_readback);
+        parse_key_int(line, "d3d12_cpu_mapping", &evidence.cpu_mapping);
+        parse_key_int(line, "d3d12_cpu_copy", &evidence.cpu_copy);
+        parse_key_int(line, "d3d12_present_rejected", &evidence.rejected);
+        parse_key_token(line, "d3d12_run_id", evidence.run_id,
+                        sizeof(evidence.run_id));
+        parse_key_token(line, "d3d12_present_path", evidence.path,
+                        sizeof(evidence.path));
+    }
+    fclose(fp);
+
+    expected_run_id = getenv("XV6_GPU_VALIDATE_RUN_ID");
+    if (!expected_run_id || !*expected_run_id)
+        expected_run_id = getenv("XV6_WLCOMP_D3D12_RUN_ID");
+    if (expected_run_id && *expected_run_id) {
+        if (evidence.run_id[0] == '\0' ||
+            strcmp(evidence.run_id, expected_run_id) != 0)
+            return 0;
+    }
+    if (evidence.count == 0 || evidence.evidence_generation == 0 ||
+        evidence.evidence_time_us == 0 || evidence.resource == 0 ||
+        evidence.display_handoff != 1 ||
+        evidence.requirements_satisfied != 1 || evidence.no_readback != 1 ||
+        evidence.cpu_readback > 0 || evidence.cpu_mapping > 0 ||
+        evidence.cpu_copy > 0 || evidence.rejected != 0 ||
+        strcmp(evidence.path, "d3d12-copy-to-fb-bo-display-present") != 0)
+        return 0;
+
+    if (evidence_out)
+        *evidence_out = evidence;
+    return 1;
+}
+
+static int update_d3d12_native_present_fps(struct app_state *app,
+                                           double *fps_out)
+{
+    struct d3d12_present_evidence evidence;
+    double now;
+
+    if (fps_out)
+        *fps_out = 0.0;
+    if (!using_d3d12_driver() ||
+        !read_d3d12_native_present_evidence(&evidence)) {
+        app->native_present_last_delta = 0;
+        app->native_present_last_elapsed_sec = 0.0;
+        app->native_present_fps_value = 0.0;
+        app->native_present_evidence_valid = 0;
+        return 0;
+    }
+    app->native_present_evidence_valid = 1;
+    app->native_present_evidence_generation = evidence.evidence_generation;
+    app->native_present_evidence_time_us = evidence.evidence_time_us;
+    app->native_present_resource = evidence.resource;
+    app->native_present_buffer_generation = evidence.buffer_generation;
+    app->native_present_client_buffer_id = evidence.client_buffer_id;
+    app->native_present_manager_resource_id = evidence.manager_resource_id;
+    app->native_present_client_pid = evidence.client_pid;
+    snprintf(app->native_present_evidence_run_id,
+             sizeof(app->native_present_evidence_run_id), "%s",
+             evidence.run_id[0] ? evidence.run_id : "none");
+    now = rtc_seconds();
+    if (app->native_present_last_sec <= 0.0) {
+        app->native_present_last_sec = now;
+        app->native_present_last_count = evidence.count;
+        return 1;
+    }
+    if (evidence.count < app->native_present_last_count) {
+        app->native_present_last_sec = now;
+        app->native_present_last_count = evidence.count;
+        app->native_present_last_delta = 0;
+        app->native_present_last_elapsed_sec = 0.0;
+        app->native_present_fps_value = 0.0;
+        return 1;
+    }
+    if (now > app->native_present_last_sec &&
+        evidence.count >= app->native_present_last_count) {
+        uint64_t delta = evidence.count - app->native_present_last_count;
+        double elapsed = now - app->native_present_last_sec;
+
+        app->native_present_last_delta = delta;
+        app->native_present_last_elapsed_sec = elapsed;
+        app->native_present_fps_value =
+            elapsed > 0.0 ? (double)delta / elapsed : 0.0;
+        app->native_present_last_sec = now;
+        app->native_present_last_count = evidence.count;
+    }
+    if (fps_out)
+        *fps_out = app->native_present_fps_value;
+    return 1;
+}
+
+static const char *demo_fps_source(const struct app_state *app)
+{
+    if (using_d3d12_driver())
+        return app->native_present_last_delta > 0 ?
+            "native-d3d12-present-complete" :
+            "native-d3d12-present-stalled";
+    return "wayland-frame-callback";
+}
+
+static void write_demo_fps_probe(struct app_state *app, double visible_fps,
+                                 double client_fps, double compositor_fps,
+                                 int callback_seq)
+{
+    FILE *fp = fopen("/tmp/mesawlegl-fps", "w");
+    const char *source = demo_fps_source(app);
+    const char *validation_run_id = getenv("XV6_GPU_VALIDATE_RUN_ID");
+    const char *d3d12_run_id = app->native_present_evidence_run_id;
+
+    if (!validation_run_id || !*validation_run_id)
+        validation_run_id = "none";
+    if (!d3d12_run_id[0])
+        d3d12_run_id = "none";
+
+    if (!fp)
+        return;
+    fprintf(fp,
+            "validation_run_id=%s process_id=%ld visible_fps=%.3f displayed_fps=%.3f client_fps=%.3f callback_fps=%.3f compositor_fps=%.3f native_present_fps=%.3f native_present_count=%lu native_present_delta=%lu native_present_elapsed=%.3f callback_seq=%d frame=%d sample_time=%.3f window=%dx%d render=%dx%d render_div=%d source=%s d3d12_evidence_valid=%d d3d12_run_id=%s d3d12_evidence_generation=%lu d3d12_present_evidence_time_us=%lu d3d12_present_resource=0x%lx d3d12_buffer_generation=%lu d3d12_client_pid=%d d3d12_client_buffer_id=%lu d3d12_manager_resource_id=%lu\n",
+            validation_run_id, (long)getpid(),
+            visible_fps, visible_fps,
+            client_fps, app->callback_fps_value, compositor_fps,
+            app->native_present_fps_value,
+            (unsigned long)app->native_present_last_count,
+            (unsigned long)app->native_present_last_delta,
+            app->native_present_last_elapsed_sec,
+            callback_seq,
+            app->frame,
+            rtc_seconds(),
+            app->width, app->height, app->render_width, app->render_height,
+            app->render_divisor, source, app->native_present_evidence_valid,
+            d3d12_run_id,
+            (unsigned long)app->native_present_evidence_generation,
+            (unsigned long)app->native_present_evidence_time_us,
+            (unsigned long)app->native_present_resource,
+            (unsigned long)app->native_present_buffer_generation,
+            app->native_present_client_pid,
+            (unsigned long)app->native_present_client_buffer_id,
+            (unsigned long)app->native_present_manager_resource_id);
+    fclose(fp);
+}
+
+static double conservative_visible_fps(double client_fps, double callback_fps,
+                                       double compositor_fps, double run_ceiling)
+{
+    double visible = 0.0;
+
+    if (client_fps > 0.0)
+        visible = client_fps;
+    if (callback_fps > 0.0 && (visible <= 0.0 || callback_fps < visible))
+        visible = callback_fps;
+    if (compositor_fps > 0.0 && (visible <= 0.0 || compositor_fps < visible))
+        visible = compositor_fps;
+    if (run_ceiling > 0.0 && (visible <= 0.0 || run_ceiling < visible))
+        visible = run_ceiling;
+    return visible;
+}
+
 static int dispatch_wayland_nonblocking(struct app_state *app)
 {
     struct pollfd pfd;
@@ -782,51 +1060,63 @@ static void update_demo_client_fps(struct app_state *app)
     double now;
     double elapsed;
     double fps;
-    double compositor_fps;
+    double compositor_fps = 0.0;
     double display_fps;
+    double native_fps = 0.0;
     char title[96];
 
     if (!app->sphere_demo || !app->toplevel)
         return;
 
-    app->fps_frame_count++;
-    if (app->fps_frame_count < 30)
-        return;
-
     now = rtc_seconds();
     if (app->fps_start_sec <= 0.0) {
         app->fps_start_sec = now;
+        app->fps_frame_count = 1;
         return;
     }
+    app->fps_frame_count++;
     elapsed = now - app->fps_start_sec;
     if (elapsed < 1.0)
         return;
 
     fps = elapsed > 0.0 ? (double)app->fps_frame_count / elapsed : 0.0;
     app->fps_value = fps;
-    if (read_wlcomp_fps(&compositor_fps)) {
-        display_fps = compositor_fps;
+    app->fps_client_sample_seq++;
+    (void)read_wlcomp_fps(&compositor_fps);
+    if (using_d3d12_driver()) {
+        (void)update_d3d12_native_present_fps(app, &native_fps);
+        display_fps = app->native_present_last_delta > 0 ? native_fps : 0.0;
     } else {
-        compositor_fps = 0.0;
-        display_fps = app->callback_fps_value;
+        display_fps = conservative_visible_fps(fps, app->callback_fps_value,
+                                               compositor_fps,
+                                               app->fps_run_ceiling);
     }
-    if (display_fps > 0.0) {
+    if (using_d3d12_driver() && app->visible_fps_sample_seq >= 2) {
         app->visible_fps_value = display_fps;
-        snprintf(app->fps_text, sizeof(app->fps_text), "VIS %.1f FPS",
+        snprintf(app->fps_text, sizeof(app->fps_text), "FPS %.1f",
+                 display_fps);
+    } else if (display_fps > 0.0 && app->visible_fps_sample_seq >= 2) {
+        if (app->fps_run_ceiling <= 0.0 || display_fps < app->fps_run_ceiling)
+            app->fps_run_ceiling = display_fps;
+        app->visible_fps_value = display_fps;
+        snprintf(app->fps_text, sizeof(app->fps_text), "FPS %.1f",
                  display_fps);
         app->fps_title_count++;
         if ((app->fps_title_count & 3) == 1) {
-            snprintf(title, sizeof(title), "Mesa 3D Demo - VIS %.1f FPS",
+            snprintf(title, sizeof(title), "Mesa 3D Demo - FPS %.1f",
                      display_fps);
             xdg_toplevel_set_title(app->toplevel, title);
             wl_display_flush(app->display);
         }
     }
+    write_demo_fps_probe(app, app->visible_fps_value, fps, compositor_fps,
+                         app->visible_fps_sample_seq);
     if ((stderr_fps_counter++ & 3) == 0)
         fprintf(stderr,
-                "mesawlegl[%d]: client_rtc_fps=%.1f compositor_rtc_fps=%.1f callback_rtc_fps=%.1f displayed_fps=%.1f\n",
+                "mesawlegl[%d]: client_rtc_fps=%.1f compositor_rtc_fps=%.1f callback_rtc_fps=%.1f native_present_fps=%.1f displayed_fps=%.1f source=%s\n",
                 app->loop, fps, compositor_fps, app->callback_fps_value,
-                app->visible_fps_value);
+                app->native_present_fps_value, app->visible_fps_value,
+                demo_fps_source(app));
     app->fps_frame_count = 0;
     app->fps_start_sec = now;
 }
@@ -834,9 +1124,11 @@ static void update_demo_client_fps(struct app_state *app)
 static void update_demo_visible_fps(struct app_state *app)
 {
     static int stderr_fps_counter;
+    double compositor_fps = 0.0;
     double now;
     double elapsed;
     double fps;
+    double native_fps = 0.0;
 
     if (!app->sphere_demo || !app->toplevel)
         return;
@@ -854,10 +1146,36 @@ static void update_demo_visible_fps(struct app_state *app)
     fps = elapsed > 0.0 ?
           (double)app->visible_fps_frame_count / elapsed : 0.0;
     app->callback_fps_value = fps;
+    (void)read_wlcomp_fps(&compositor_fps);
+    (void)update_d3d12_native_present_fps(app, &native_fps);
+    app->visible_fps_sample_seq++;
+    if (app->visible_fps_sample_seq >= 2 && app->fps_client_sample_seq > 0) {
+        double display_fps = using_d3d12_driver() ? native_fps :
+            conservative_visible_fps(app->fps_value, fps, compositor_fps,
+                                     app->fps_run_ceiling);
+
+        if (using_d3d12_driver())
+            display_fps = app->native_present_last_delta > 0 ?
+                native_fps : 0.0;
+        if (!using_d3d12_driver() && display_fps > 0.0 &&
+            (app->fps_run_ceiling <= 0.0 ||
+             display_fps < app->fps_run_ceiling))
+            app->fps_run_ceiling = display_fps;
+        if (display_fps > 0.0 || using_d3d12_driver())
+            app->visible_fps_value = display_fps;
+    }
+    if (app->visible_fps_sample_seq >= 2 && app->visible_fps_value > 0.0)
+        snprintf(app->fps_text, sizeof(app->fps_text), "FPS %.1f",
+                 app->visible_fps_value);
+    write_demo_fps_probe(app, app->visible_fps_value, app->fps_value,
+                         compositor_fps,
+                         app->visible_fps_sample_seq);
     if ((stderr_fps_counter++ & 3) == 0)
         fprintf(stderr,
-                "mesawlegl[%d]: callback_rtc_fps=%.1f client_rtc_fps=%.1f displayed_fps=%.1f\n",
-                app->loop, fps, app->fps_value, app->visible_fps_value);
+                "mesawlegl[%d]: callback_rtc_fps=%.1f compositor_rtc_fps=%.1f client_rtc_fps=%.1f native_present_fps=%.1f displayed_fps=%.1f source=%s\n",
+                app->loop, fps, compositor_fps, app->fps_value,
+                app->native_present_fps_value, app->visible_fps_value,
+                demo_fps_source(app));
     app->visible_fps_frame_count = 0;
     app->visible_fps_start_sec = now;
 }
@@ -1198,12 +1516,15 @@ static int run_client(int loop, int frames, int resize_every, int api_smoke,
     }
     app.fps_start_sec = 0.0;
     app.fps_frame_count = 0;
+    app.fps_client_sample_seq = 0;
     app.fps_value = 0.0;
+    app.fps_run_ceiling = 0.0;
     app.visible_fps_start_sec = 0.0;
     app.visible_fps_frame_count = 0;
+    app.visible_fps_sample_seq = 0;
     app.visible_fps_value = 0.0;
     app.callback_fps_value = 0.0;
-    snprintf(app.fps_text, sizeof(app.fps_text), "VIS --.- FPS");
+    snprintf(app.fps_text, sizeof(app.fps_text), "FPS --.-");
 
     if (init_wayland(&app) < 0) {
         cleanup(&app);
@@ -1309,6 +1630,11 @@ int main(int argc, char **argv)
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--d3d12") == 0) {
+            const char *native_present =
+                getenv("XV6_D3D12_ENABLE_NATIVE_PRESENT");
+            int native_enabled = native_present &&
+                (strcmp(native_present, "1") == 0 ||
+                 strcmp(native_present, "true") == 0);
             setenv("XDG_RUNTIME_DIR", "/tmp", 0);
             setenv("WAYLAND_DISPLAY", "wayland-0", 0);
             setenv("LIBGL_ALWAYS_SOFTWARE", "0", 1);
@@ -1316,9 +1642,16 @@ int main(int argc, char **argv)
             setenv("LIBGL_DRIVERS_PATH", "/lib/dri", 0);
             setenv("EGL_PLATFORM", "wayland", 0);
             setenv("XV6_MESA_WAYLAND_THROTTLE", "0", 0);
-            setenv("XV6_MESA_WAYLAND_XV6GPU", "1", 0);
+            if (!native_enabled)
+                setenv("XV6_MESA_WAYLAND_XV6GPU", "1", 1);
             setenv("XV6_MESA_WAYLAND_INPLACE_PRESENT", "1", 0);
             setenv("XV6_D3D12_PRESENT_INTERVAL", "1", 0);
+            if (!native_enabled) {
+                setenv("XV6_D3D12_DIRECT_BACKBUFFER", "1", 1);
+                setenv("XV6_D3D12_SWRAST_NO_PREFENCE", "0", 1);
+                setenv("XV6_D3D12_SWRAST_NO_FRONT_FLUSH", "1", 1);
+                setenv("XV6_D3D12_ASYNC_FRONTBUFFER", "0", 1);
+            }
             setenv("vblank_mode", "0", 0);
         } else if (strcmp(argv[i], "--perf-log") == 0) {
             setenv("XV6_MESA_PERF_LOG", "1", 1);

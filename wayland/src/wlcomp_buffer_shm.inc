@@ -37,6 +37,8 @@ static void shm_pool_maybe_destroy(struct wlcomp_shm_pool *pool)
     free(pool);
 }
 
+static void xv6_d3d12_close_buffer_import(struct wlcomp_buffer *buf);
+
 static void buffer_free(struct wlcomp_buffer *buf)
 {
     if (!buf)
@@ -44,6 +46,12 @@ static void buffer_free(struct wlcomp_buffer *buf)
 
     if (buf->acquire_fence_fd >= 0)
         close(buf->acquire_fence_fd);
+    if (buf->is_d3d12_shared)
+        xv6_d3d12_close_buffer_import(buf);
+    if (buf->is_d3d12_shared && buf->d3d12_resource_fd >= 0)
+        close(buf->d3d12_resource_fd);
+    if (buf->is_d3d12_shared && buf->d3d12_fence_fd >= 0)
+        close(buf->d3d12_fence_fd);
     if (buf->explicit_release) {
         zwp_linux_buffer_release_v1_send_immediate_release(
             buf->explicit_release);
@@ -211,26 +219,51 @@ static int export_present_release_fence_fd(void)
 
 static void buffer_send_release_events(struct wlcomp_buffer *buf)
 {
+    static int d3d12_release_block_logs;
+
     if (!buf)
         return;
+    if (buf->is_d3d12_shared && !buf->d3d12_present_complete) {
+        if (d3d12_release_block_logs < 8) {
+            fprintf(stderr,
+                    "wlcomp: blocked D3D12 buffer release pending_gpu_display_present=1 resource=0x%x callbacks_blocked=1 releases_blocked=1 starts=%lu copies=%lu display_completes=%lu\n",
+                    buf->d3d12_opened_resource,
+                    (unsigned long)g_d3d12_present_start_count,
+                    (unsigned long)g_d3d12_present_copy_complete_count,
+                    (unsigned long)g_d3d12_present_display_complete_count);
+            d3d12_release_block_logs++;
+        }
+        return;
+    }
     if (buf->resource)
         wl_buffer_send_release(buf->resource);
     if (buf->explicit_release) {
-        int fence_fd = export_present_release_fence_fd();
-
-        if (fence_fd >= 0) {
-            zwp_linux_buffer_release_v1_send_fenced_release(
-                buf->explicit_release, fence_fd);
-            fprintf(stderr,
-                    "wlcomp: explicit-sync fenced release fence_fd=%d fence=%lu\n",
-                    fence_fd, (unsigned long)g_fb_bo_last_present_fence);
-        } else {
+        if (buf->is_d3d12_shared) {
             zwp_linux_buffer_release_v1_send_immediate_release(
                 buf->explicit_release);
-            fprintf(stderr, "wlcomp: explicit-sync immediate release\n");
+            fprintf(stderr,
+                    "wlcomp: d3d12 explicit-sync immediate release after completed present seq=%lu fence=%lu\n",
+                    (unsigned long)buf->d3d12_present_sequence,
+                    (unsigned long)buf->d3d12_present_fence_value);
+        } else {
+            int fence_fd = export_present_release_fence_fd();
+
+            if (fence_fd >= 0) {
+                zwp_linux_buffer_release_v1_send_fenced_release(
+                    buf->explicit_release, fence_fd);
+                fprintf(stderr,
+                        "wlcomp: explicit-sync fenced release fence_fd=%d fence=%lu\n",
+                        fence_fd, (unsigned long)g_fb_bo_last_present_fence);
+            } else {
+                zwp_linux_buffer_release_v1_send_immediate_release(
+                    buf->explicit_release);
+                fprintf(stderr, "wlcomp: explicit-sync immediate release\n");
+            }
         }
         buf->explicit_release = NULL;
     }
+    if (buf->is_d3d12_shared)
+        xv6_d3d12_observe_buffer_release(buf);
 }
 
 static void buffer_send_immediate_release_events(struct wlcomp_buffer *buf)
@@ -248,12 +281,26 @@ static void buffer_send_immediate_release_events(struct wlcomp_buffer *buf)
 
 static void queue_buffer_release(struct wlcomp_buffer *buf)
 {
+    static int d3d12_release_queue_full_logs;
+
     if (!buf || buf->release_pending)
         return;
 
     buf->release_pending = 1;
     if (g_release_queue_count < MAX_RELEASE_QUEUE) {
         g_release_queue[g_release_queue_count++] = buf;
+        return;
+    }
+    if (buf->is_d3d12_shared && !buf->d3d12_present_complete) {
+        if (d3d12_release_queue_full_logs < 8) {
+            fprintf(stderr,
+                    "wlcomp: D3D12 release queue full; keeping release blocked pending_gpu_display_present=1 resource=0x%x starts=%lu copies=%lu display_completes=%lu\n",
+                    buf->d3d12_opened_resource,
+                    (unsigned long)g_d3d12_present_start_count,
+                    (unsigned long)g_d3d12_present_copy_complete_count,
+                    (unsigned long)g_d3d12_present_display_complete_count);
+            d3d12_release_queue_full_logs++;
+        }
         return;
     }
 
@@ -274,6 +321,10 @@ static void flush_buffer_releases_after_present(void)
 
         if (!buf)
             continue;
+        if (buf->is_d3d12_shared && !buf->d3d12_present_complete) {
+            g_release_queue[out++] = buf;
+            continue;
+        }
         buffer_send_release_events(buf);
         buf->release_pending = 0;
         buffer_maybe_free(buf);
@@ -300,7 +351,38 @@ static int buffer_acquire_ready(struct wlcomp_buffer *buf)
     uint32_t now;
     int timeout_ms;
 
-    if (!buf || buf->acquire_fence_fd < 0)
+    if (!buf)
+        return 1;
+
+    if (buf->is_d3d12_shared && buf->d3d12_fence_value_valid) {
+        volatile uint64_t *fence;
+        uint64_t current;
+
+        if (buf->d3d12_fence_cpu_va == 0)
+            return 0;
+        fence = (volatile uint64_t *)buf->d3d12_fence_cpu_va;
+        current = *fence;
+        if (current >= buf->d3d12_fence_value) {
+            buf->d3d12_fence_wait_start_ms = 0;
+            return 1;
+        }
+        now = get_time_ms();
+        if (buf->d3d12_fence_wait_start_ms == 0)
+            buf->d3d12_fence_wait_start_ms = now;
+        timeout_ms = display_stall_recover_ms();
+        if (timeout_ms > 0 &&
+            now - buf->d3d12_fence_wait_start_ms >= (uint32_t)timeout_ms) {
+            fprintf(stderr,
+                    "wlcomp: d3d12 fence not ready target=%lu current=%lu wait_ms=%u\n",
+                    (unsigned long)buf->d3d12_fence_value,
+                    (unsigned long)current,
+                    now - buf->d3d12_fence_wait_start_ms);
+            buf->d3d12_fence_wait_start_ms = now;
+        }
+        return 0;
+    }
+
+    if (buf->acquire_fence_fd < 0)
         return 1;
 
     pfd.fd = buf->acquire_fence_fd;
@@ -344,8 +426,22 @@ static int buffer_acquire_ready(struct wlcomp_buffer *buf)
 
 static void *buffer_data(struct wlcomp_buffer *buf)
 {
+    static int d3d12_cpu_map_logs;
+
     if (buf && !buffer_acquire_ready(buf))
         return NULL;
+    if (buf && buf->is_d3d12_shared) {
+        g_d3d12_cpu_map_reject_count++;
+        if (d3d12_cpu_map_logs < 8) {
+            fprintf(stderr,
+                    "wlcomp: blocked D3D12 CPU map/readback request d3d12_cpu_mapping_rejected=1 resource=0x%x present_complete=%d cpu_map_rejects=%lu\n",
+                    buf->d3d12_opened_resource,
+                    buf->d3d12_present_complete,
+                    (unsigned long)g_d3d12_cpu_map_reject_count);
+            d3d12_cpu_map_logs++;
+        }
+        return NULL;
+    }
     if (buf && buf->is_gpu_bo)
         return (void *)buf->gpu_addr;
     if (!buf || !buf->pool || !buf->pool->data)
@@ -356,11 +452,32 @@ static void *buffer_data(struct wlcomp_buffer *buf)
 
 static void *buffer_plane_data(struct wlcomp_buffer *buf, uint32_t plane)
 {
+    static int d3d12_cpu_plane_logs;
+
     if (!buf || plane >= 4)
         return NULL;
+    if (buf->is_d3d12_shared) {
+        g_d3d12_cpu_plane_reject_count++;
+        if (d3d12_cpu_plane_logs < 8) {
+            fprintf(stderr,
+                    "wlcomp: blocked D3D12 plane CPU map/readback request d3d12_cpu_mapping_rejected=1 resource=0x%x plane=%u present_complete=%d cpu_plane_rejects=%lu\n",
+                    buf->d3d12_opened_resource, plane,
+                    buf->d3d12_present_complete,
+                    (unsigned long)g_d3d12_cpu_plane_reject_count);
+            d3d12_cpu_plane_logs++;
+        }
+        return NULL;
+    }
     if (buf->is_gpu_bo) {
-        if (buf->plane_gpu_addr[plane])
-            return (void *)buf->plane_gpu_addr[plane];
+        if (buf->plane_gpu_addr[plane]) {
+            uint64_t offset = 0;
+
+            if (buf->plane_offset[plane] > 0)
+                offset = (uint64_t)buf->plane_offset[plane];
+            if (offset >= buf->plane_gpu_size[plane])
+                return NULL;
+            return (void *)(uintptr_t)(buf->plane_gpu_addr[plane] + offset);
+        }
         return plane == 0 ? (void *)buf->gpu_addr : NULL;
     }
     if (!buf->pool || !buf->pool->data || plane != 0)
@@ -397,6 +514,7 @@ static int gpu_compose_present_direct_scanout(struct wlcomp_buffer *buf,
     static uint64_t direct_total_us;
     static uint64_t direct_copy_us;
     static uint64_t direct_frames;
+    static int direct_log_count;
     int perf_log = cmdline_flag_enabled("wlcomp_gpu_perf");
     uint64_t t0 = 0;
     uint64_t t_copy = 0;
@@ -446,6 +564,15 @@ static int gpu_compose_present_direct_scanout(struct wlcomp_buffer *buf,
         direct_frames = 0;
         direct_copy_us = 0;
         direct_total_us = 0;
+    }
+    if (direct_log_count < 8) {
+        uint32_t handle = buf->plane_gpu_handle[0] ? buf->plane_gpu_handle[0] :
+                                                     buf->gpu_handle;
+
+        fprintf(stderr,
+                "wlcomp: gpu-compose presented path=direct-scanout handle=%u rect=%u,%u %ux%u src_off=%lu fence=0\n",
+                handle, x, y, w, h, (unsigned long)src_off);
+        direct_log_count++;
     }
     return 1;
 }
