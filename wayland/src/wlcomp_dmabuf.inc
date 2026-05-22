@@ -127,6 +127,13 @@ static void dmabuf_buffer_import_common(struct wl_client *client,
                             (uint64_t)params->stride[i] * rows;
 
         imports[i].fd = params->fd[i];
+        imports[i].format = format;
+        imports[i].plane_count = plane_count;
+        imports[i].modifier = params->modifier[0];
+        for (uint32_t p = 0; p < plane_count; p++) {
+            imports[i].offsets[p] = params->offset[p];
+            imports[i].strides[p] = params->stride[p];
+        }
         if (ioctl(g_fb_fd, FB_GPU_BO_IMPORT_FD, &imports[i]) < 0 ||
             imports[i].addr == 0 || imports[i].size == 0 ||
             imports[i].handle == 0) {
@@ -148,6 +155,40 @@ static void dmabuf_buffer_import_common(struct wl_client *client,
             return;
         }
         imported_count++;
+        if (imports[i].format != format ||
+            imports[i].plane_count != plane_count ||
+            imports[i].modifier != params->modifier[0]) {
+            for (uint32_t j = 0; j < imported_count; j++) {
+                struct fb_gpu_bo_destroy destroy = {
+                    imports[j].handle, 0
+                };
+
+                munmap((void *)imports[j].addr, (size_t)imports[j].size);
+                (void)ioctl(g_fb_fd, FB_GPU_BO_DESTROY, &destroy);
+            }
+            wl_resource_post_error(params_res,
+                                   ZWP_LINUX_BUFFER_PARAMS_V1_ERROR_INVALID_FORMAT,
+                                   "dmabuf kernel metadata mismatch");
+            return;
+        }
+        for (uint32_t p = 0; p < plane_count; p++) {
+            if (imports[i].offsets[p] != params->offset[p] ||
+                imports[i].strides[p] != params->stride[p]) {
+                for (uint32_t j = 0; j < imported_count; j++) {
+                    struct fb_gpu_bo_destroy destroy = {
+                        imports[j].handle, 0
+                    };
+
+                    munmap((void *)imports[j].addr,
+                           (size_t)imports[j].size);
+                    (void)ioctl(g_fb_fd, FB_GPU_BO_DESTROY, &destroy);
+                }
+                wl_resource_post_error(params_res,
+                                       ZWP_LINUX_BUFFER_PARAMS_V1_ERROR_OUT_OF_BOUNDS,
+                                       "dmabuf kernel plane metadata mismatch");
+                return;
+            }
+        }
         if ((int32_t)imports[i].width != width ||
             (int32_t)imports[i].height != height ||
             (format != DRM_FORMAT_NV12 && i == 0 &&
@@ -532,4 +573,3 @@ static void dmabuf_bind(struct wl_client *client, void *data,
                                           DRM_FORMAT_MOD_LINEAR);
     }
 }
-

@@ -164,6 +164,11 @@ struct fb_gpu_bo_import_fd {
     int32_t fd;
     uint32_t flags, width, height, pitch, handle;
     uint64_t size, addr;
+    uint32_t format, plane_count;
+    uint64_t modifier;
+    uint32_t offsets[4];
+    uint32_t strides[4];
+    uint64_t implicit_fence, explicit_fence;
 };
 
 /* ── Mouse event (matches kernel struct mouse_event) ──────────────── */
