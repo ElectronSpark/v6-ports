@@ -6,6 +6,33 @@ include(${CMAKE_CURRENT_LIST_DIR}/../cmake/AddPort.cmake)
 # and the D3D12 Gallium driver needed for Hyper-V GPU-PV/DXG bring-up.  The
 # D3D12 driver still depends on a usable dxcore/libd3d12 runtime in the guest,
 # so Hyper-V only advertises OpenGL submit after runtime validation succeeds.
+option(XV6_MESA_ENABLE_NOUVEAU
+       "Enable Mesa's Nouveau Gallium driver after xv6 Nouveau validators pass"
+       OFF)
+set(XV6_MESA_NOUVEAU_VALIDATION_LOG
+    "${CMAKE_BINARY_DIR}/hyperv-gpu-core-validate.log"
+    CACHE FILEPATH
+    "Validator log required before enabling Mesa Nouveau")
+
+set(_mesa_gallium_drivers "softpipe,virgl,d3d12")
+set(_mesa_output_files
+    lib/libEGL.so.1.0.0
+    lib/libGLESv2.so.2.0.0
+    lib/libgbm.so.1.0.0
+    lib/libgallium-26.2.0-devel.so
+    lib/dri/virtio_gpu_dri.so
+    lib/dri/d3d12_dri.so
+    lib/dri/swrast_dri.so
+    lib/dri/kms_swrast_dri.so
+    lib/pkgconfig/egl.pc
+    lib/pkgconfig/glesv2.pc
+    lib/pkgconfig/gbm.pc
+    lib/pkgconfig/dri.pc
+    include/EGL/egl.h
+    include/GLES2/gl2.h
+    include/GL/gl.h
+    include/gbm.h)
+
 function(_mesa_append_existing_source_deps)
     foreach(_dep IN LISTS ARGN)
         if(EXISTS "${_dep}")
@@ -57,6 +84,45 @@ _mesa_append_existing_source_deps(
     ${CMAKE_CURRENT_SOURCE_DIR}/src/subprojects/DirectX-Headers-1.0/meson_options.txt
 )
 
+if(XV6_MESA_ENABLE_NOUVEAU)
+    if(NOT EXISTS "${XV6_MESA_NOUVEAU_VALIDATION_LOG}")
+        message(FATAL_ERROR
+            "XV6_MESA_ENABLE_NOUVEAU requires validator evidence: "
+            "${XV6_MESA_NOUVEAU_VALIDATION_LOG}")
+    endif()
+    file(READ "${XV6_MESA_NOUVEAU_VALIDATION_LOG}" _mesa_nouveau_validation)
+    if(NOT _mesa_nouveau_validation MATCHES "hyperv-gpu-core-validate: passed")
+        message(FATAL_ERROR
+            "Mesa Nouveau is gated until hyperv-gpu-core-validate passes; "
+            "missing pass marker in ${XV6_MESA_NOUVEAU_VALIDATION_LOG}")
+    endif()
+    if(NOT _mesa_nouveau_validation MATCHES "drmiftest: ok" OR
+       NOT _mesa_nouveau_validation MATCHES "ttmtest: ok" OR
+       NOT _mesa_nouveau_validation MATCHES "nouveauabitest: .*ok")
+        message(FATAL_ERROR
+            "Mesa Nouveau is gated until DRM/KMS, TTM, and Nouveau ABI "
+            "validators pass in ${XV6_MESA_NOUVEAU_VALIDATION_LOG}")
+    endif()
+    set(_mesa_gallium_drivers "${_mesa_gallium_drivers},nouveau")
+    list(APPEND _mesa_output_files lib/dri/nouveau_dri.so)
+    file(GLOB_RECURSE _mesa_nouveau_source_deps CONFIGURE_DEPENDS
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/src/gallium/drivers/nouveau/*
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/src/gallium/winsys/nouveau/*
+    )
+    list(APPEND _mesa_d3d12_source_deps ${_mesa_nouveau_source_deps})
+    _mesa_append_existing_source_deps(
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/src/gallium/drivers/nouveau/meson.build
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/src/gallium/winsys/nouveau/drm/meson.build
+    )
+    message(STATUS
+        "ports/mesa: enabling Nouveau Gallium after validator log "
+        "${XV6_MESA_NOUVEAU_VALIDATION_LOG}")
+else()
+    message(STATUS
+        "ports/mesa: Mesa Nouveau disabled; set XV6_MESA_ENABLE_NOUVEAU=ON "
+        "only after hyperv-gpu-core-validate passes")
+endif()
+
 xv6_port(
     NAME            mesa
     SOURCE_DIR      ${CMAKE_CURRENT_SOURCE_DIR}/src
@@ -70,22 +136,7 @@ xv6_port(
                     wayland-libs
                     wayland-protocols
                     zlib
-    OUTPUT_FILES    lib/libEGL.so.1.0.0
-                    lib/libGLESv2.so.2.0.0
-                    lib/libgbm.so.1.0.0
-                    lib/libgallium-26.2.0-devel.so
-                    lib/dri/virtio_gpu_dri.so
-                    lib/dri/d3d12_dri.so
-                    lib/dri/swrast_dri.so
-                    lib/dri/kms_swrast_dri.so
-                    lib/pkgconfig/egl.pc
-                    lib/pkgconfig/glesv2.pc
-                    lib/pkgconfig/gbm.pc
-                    lib/pkgconfig/dri.pc
-                    include/EGL/egl.h
-                    include/GLES2/gl2.h
-                    include/GL/gl.h
-                    include/gbm.h
+    OUTPUT_FILES    ${_mesa_output_files}
     CMAKE_ARGS
         -Dplatforms=wayland
         -Degl-native-platform=wayland
@@ -96,7 +147,7 @@ xv6_port(
         -Dglx=disabled
         -Dgbm=enabled
         -Dglvnd=disabled
-        -Dgallium-drivers=softpipe,virgl,d3d12
+        -Dgallium-drivers=${_mesa_gallium_drivers}
         -Dvulkan-drivers=
         -Dllvm=disabled
         -Dshared-llvm=disabled

@@ -36,6 +36,7 @@ struct wlcomp_buffer {
     pid_t                d3d12_client_pid;
     uint32_t             d3d12_client_buffer_id;
     uint32_t             d3d12_manager_resource_id;
+    char                 d3d12_client_run_id[96];
     uint64_t             d3d12_buffer_generation;
     uint32_t             d3d12_adapter;
     uint32_t             d3d12_source_luid_a;
@@ -60,11 +61,13 @@ struct wlcomp_buffer {
     uint64_t             d3d12_present_fence_value;
     uint64_t             d3d12_native_present_attempt_id;
     uint64_t             d3d12_native_present_completion_id;
+    int                  d3d12_native_present_reject_recorded;
     uint64_t             d3d12_fb_blit_attempts_at_present;
     uint64_t             d3d12_fb_blit_successes_at_present;
     uint64_t             d3d12_cpu_map_rejects_at_present;
     uint64_t             d3d12_cpu_plane_rejects_at_present;
     int                  d3d12_present_complete;
+    int                  d3d12_failclosed_client_unblocked;
     int                  d3d12_present_wait_confirmed;
     int                  d3d12_gpu_copy_complete;
     int                  d3d12_present_evidence_pending;
@@ -300,7 +303,8 @@ static int surface_has_unpresented_d3d12_buffer(struct wlcomp_surface *surf)
 {
     return surf && surf->committed_buf &&
            surf->committed_buf->is_d3d12_shared &&
-           !surf->committed_buf->d3d12_present_complete;
+           !surf->committed_buf->d3d12_present_complete &&
+           !surf->committed_buf->d3d12_failclosed_client_unblocked;
 }
 
 static void damage_all_frame_callbacks(uint32_t now)

@@ -35,6 +35,7 @@ static const struct wl_interface *xv6_gpu_buffer_create_types[] = {
     NULL,
     NULL,
     NULL,
+    NULL,
 };
 
 static const struct wl_message xv6_gpu_buffer_manager_requests[] = {
@@ -50,12 +51,14 @@ static const struct wl_message xv6_gpu_buffer_manager_requests[] = {
       xv6_gpu_buffer_create_types },
     { "create_d3d12_resource_buffer_with_fence_value_luid",
       "nhhuuuuiiuuu", xv6_gpu_buffer_create_types },
+    { "create_d3d12_resource_buffer_with_fence_value_luid_run_id",
+      "nhhuuuuiiuuus", xv6_gpu_buffer_create_types },
 };
 
 const struct wl_interface xv6_gpu_buffer_manager_interface = {
     "xv6_gpu_buffer_manager",
-    5,
-    7,
+    6,
+    8,
     xv6_gpu_buffer_manager_requests,
     0,
     NULL,

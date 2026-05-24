@@ -20,6 +20,8 @@
 #define WEBKIT_NET_WAIT_US 35000000
 #define WEBKIT_DEFAULT_URL "https://www.google.com/search?q=xv6&gbv=1"
 #define XV6_DRM_RENDER_NODE "/dev/dri/renderD128"
+#define XV6_GPU_CONTROL_NODE "/dev/gpu0"
+#define XV6_FB_CONTROL_NODE "/dev/fb0"
 #define XV6_D3D12_PRESENT_EVIDENCE_PATH "/tmp/wlcomp-d3d12-present"
 #define XV6_D3D12_PRESENT_EVIDENCE_MAX_AGE_SEC 120
 #define FB_GPU_BACKEND_QUERY 0x462C
@@ -86,38 +88,50 @@ struct launcher_fb_gpu_backend_info {
     char renderer[64];
 };
 
+static int launcher_gpu_backend_query(struct launcher_fb_gpu_backend_info *info)
+{
+    static const char *paths[] = {
+        XV6_GPU_CONTROL_NODE,
+        XV6_FB_CONTROL_NODE,
+        XV6_DRM_RENDER_NODE,
+    };
+    size_t i;
+
+    if (!info)
+        return 0;
+    for (i = 0; i < sizeof(paths) / sizeof(paths[0]); i++) {
+        int fd;
+
+        memset(info, 0, sizeof(*info));
+        fd = open(paths[i], O_RDONLY | O_CLOEXEC);
+        if (fd < 0)
+            continue;
+        if (ioctl(fd, FB_GPU_BACKEND_QUERY, info) == 0) {
+            close(fd);
+            return 1;
+        }
+        close(fd);
+    }
+    memset(info, 0, sizeof(*info));
+    return 0;
+}
+
 static int launcher_dxg_render_node_available(void)
 {
     struct launcher_fb_gpu_backend_info info;
-    int fd;
-    int ok;
 
-    memset(&info, 0, sizeof(info));
-    fd = open(XV6_DRM_RENDER_NODE, O_RDWR | O_CLOEXEC);
-    if (fd < 0)
-        return 0;
-    ok = ioctl(fd, FB_GPU_BACKEND_QUERY, &info) == 0 &&
-         info.backend == FB_GPU_BACKEND_HYPERV_DXG &&
-         (info.flags & FB_GPU_BACKEND_F_RENDER_NODE) != 0 &&
-         (info.flags & FB_GPU_BACKEND_F_DXG_TRANSPORT) != 0;
-    close(fd);
-    return ok;
+    return launcher_gpu_backend_query(&info) &&
+           info.backend == FB_GPU_BACKEND_HYPERV_DXG &&
+           (info.flags & FB_GPU_BACKEND_F_RENDER_NODE) != 0 &&
+           (info.flags & FB_GPU_BACKEND_F_DXG_TRANSPORT) != 0;
 }
 
 static int launcher_opengl_submit_available(void)
 {
     struct launcher_fb_gpu_backend_info info;
-    int fd;
-    int ok;
 
-    memset(&info, 0, sizeof(info));
-    fd = open(XV6_DRM_RENDER_NODE, O_RDWR | O_CLOEXEC);
-    if (fd < 0)
-        return 0;
-    ok = ioctl(fd, FB_GPU_BACKEND_QUERY, &info) == 0 &&
-         (info.flags & FB_GPU_BACKEND_F_OPENGL_SUBMIT) != 0;
-    close(fd);
-    return ok;
+    return launcher_gpu_backend_query(&info) &&
+           (info.flags & FB_GPU_BACKEND_F_OPENGL_SUBMIT) != 0;
 }
 
 static int launcher_evidence_key_u64(const char *text, const char *key,
@@ -198,15 +212,24 @@ static int launcher_read_file(const char *path, char *buf, size_t buf_size)
 
 static int launcher_d3d12_present_evidence_valid(void)
 {
-    char evidence[2048];
+    char evidence[16384];
     char source_luid[32];
     char matched_luid[32];
+    char path[96];
     uint64_t resource = 0;
     uint64_t allocations = 0;
     uint64_t fence = 0;
     uint64_t fence_target = 0;
     uint64_t release_fence = 0;
     uint64_t present_complete = 0;
+    uint64_t present_id = 0;
+    uint64_t completed = 0;
+    uint64_t display_handoff = 0;
+    uint64_t requirements_satisfied = 0;
+    uint64_t current_run_valid = 0;
+    uint64_t same_frame_observed = 0;
+    uint64_t frame_callback_observed = 0;
+    uint64_t buffer_release_observed = 0;
     uint64_t cpu_readback = 1;
     uint64_t cpu_mapping = 1;
     uint64_t cpu_copy = 1;
@@ -232,12 +255,37 @@ static int launcher_d3d12_present_evidence_valid(void)
                                     &release_fence);
     (void)launcher_evidence_key_u64(evidence, "d3d12_gpu_present_complete",
                                     &present_complete);
+    (void)launcher_evidence_key_u64(evidence, "d3d12_dxg_present_id",
+                                    &present_id);
+    (void)launcher_evidence_key_u64(evidence, "d3d12_dxg_present_completed",
+                                    &completed);
+    (void)launcher_evidence_key_u64(evidence,
+                                    "d3d12_display_handoff_implemented",
+                                    &display_handoff);
+    (void)launcher_evidence_key_u64(evidence,
+                                    "d3d12_native_present_requirements_satisfied",
+                                    &requirements_satisfied);
+    (void)launcher_evidence_key_u64(evidence,
+                                    "d3d12_present_identity_current_run_valid",
+                                    &current_run_valid);
+    (void)launcher_evidence_key_u64(evidence,
+                                    "d3d12_callback_release_same_frame_observed",
+                                    &same_frame_observed);
+    (void)launcher_evidence_key_u64(evidence,
+                                    "d3d12_frame_callback_observed",
+                                    &frame_callback_observed);
+    (void)launcher_evidence_key_u64(evidence,
+                                    "d3d12_buffer_release_observed",
+                                    &buffer_release_observed);
     (void)launcher_evidence_key_u64(evidence, "d3d12_cpu_readback",
                                     &cpu_readback);
     (void)launcher_evidence_key_u64(evidence, "d3d12_cpu_mapping",
                                     &cpu_mapping);
     (void)launcher_evidence_key_u64(evidence, "d3d12_cpu_copy",
                                     &cpu_copy);
+    if (!launcher_evidence_key_string(evidence, "d3d12_present_path",
+                                      path, sizeof(path)))
+        return 0;
     same_adapter =
         launcher_evidence_key_string(evidence, "d3d12_present_luid",
                                      source_luid, sizeof(source_luid)) &&
@@ -249,28 +297,25 @@ static int launcher_d3d12_present_evidence_valid(void)
     shared_resource = resource != 0 && allocations != 0;
     fence_ok = fence != 0 && fence_target != 0 && release_fence != 0;
     return same_adapter && no_readback && shared_resource && fence_ok &&
-           present_complete != 0;
+           present_complete != 0 && present_id != 0 &&
+           completed >= present_id && display_handoff == 1 &&
+           requirements_satisfied == 1 && current_run_valid == 1 &&
+           same_frame_observed == 1 && frame_callback_observed != 0 &&
+           buffer_release_observed != 0 &&
+           strcmp(path, "d3d12-dxg-present-source-display-handoff") == 0;
 }
 
 static int launcher_d3d12_present_contract_available(void)
 {
     struct launcher_fb_gpu_backend_info info;
-    int fd;
-    int ok;
 
-    memset(&info, 0, sizeof(info));
-    fd = open(XV6_DRM_RENDER_NODE, O_RDWR | O_CLOEXEC);
-    if (fd < 0)
-        return 0;
-    ok = ioctl(fd, FB_GPU_BACKEND_QUERY, &info) == 0 &&
-         info.backend == FB_GPU_BACKEND_HYPERV_DXG &&
-         (info.flags & FB_GPU_BACKEND_F_RENDER_NODE) != 0 &&
-         (info.flags & FB_GPU_BACKEND_F_DXG_TRANSPORT) != 0 &&
-         (info.flags & FB_GPU_BACKEND_F_D3DKMT) != 0 &&
-         (info.flags & FB_GPU_BACKEND_F_OPENGL_SUBMIT) != 0 &&
-         launcher_d3d12_present_evidence_valid();
-    close(fd);
-    return ok;
+    return launcher_gpu_backend_query(&info) &&
+           info.backend == FB_GPU_BACKEND_HYPERV_DXG &&
+           (info.flags & FB_GPU_BACKEND_F_RENDER_NODE) != 0 &&
+           (info.flags & FB_GPU_BACKEND_F_DXG_TRANSPORT) != 0 &&
+           (info.flags & FB_GPU_BACKEND_F_D3DKMT) != 0 &&
+           (info.flags & FB_GPU_BACKEND_F_OPENGL_SUBMIT) != 0 &&
+           launcher_d3d12_present_evidence_valid();
 }
 
 static void launcher_destroy_surfaces_for_pid(pid_t pid)
@@ -476,6 +521,21 @@ void wlcomp_launcher_launch(const char *path, const char *name,
             (char *)(arg ? arg : WEBKIT_DEFAULT_URL),
             NULL,
         };
+        char webkit_gpu_run_id_value[64];
+        char webkit_gpu_run_id_env[96];
+        char webkit_gpu_validate_run_id_env[112];
+        char webkit_wlcomp_d3d12_run_id_env[112];
+
+        snprintf(webkit_gpu_run_id_value, sizeof(webkit_gpu_run_id_value),
+                 "webkit-%d-%ld", getpid(), (long)time(NULL));
+        snprintf(webkit_gpu_run_id_env, sizeof(webkit_gpu_run_id_env),
+                 "WEBKIT_XV6_GPU_RUN_ID=%s", webkit_gpu_run_id_value);
+        snprintf(webkit_gpu_validate_run_id_env,
+                 sizeof(webkit_gpu_validate_run_id_env),
+                 "XV6_GPU_VALIDATE_RUN_ID=%s", webkit_gpu_run_id_value);
+        snprintf(webkit_wlcomp_d3d12_run_id_env,
+                 sizeof(webkit_wlcomp_d3d12_run_id_env),
+                 "XV6_WLCOMP_D3D12_RUN_ID=%s", webkit_gpu_run_id_value);
         char **argv = arg ? argv_def : argv_noarg;
         char *envp_default[] = {
             "HOME=/",
@@ -517,6 +577,9 @@ void wlcomp_launcher_launch(const char *path, const char *name,
             "GST_REGISTRY=/tmp/gstreamer-registry.bin",
             "GST_REGISTRY_REUSE_PLUGIN_SCANNER=1",
             "XV6_GUI_SESSION=1",
+            webkit_gpu_run_id_env,
+            webkit_gpu_validate_run_id_env,
+            webkit_wlcomp_d3d12_run_id_env,
             "WEBKIT_EXEC_PATH=/libexec/webkit2gtk-4.1",
             "WEBKIT_INJECTED_BUNDLE_PATH=/lib/webkit2gtk-4.1/injected-bundle",
             "WEBKIT_DISABLE_NETWORK_CACHE=1",
@@ -563,6 +626,9 @@ void wlcomp_launcher_launch(const char *path, const char *name,
             "GST_REGISTRY=/tmp/gstreamer-registry.bin",
             "GST_REGISTRY_REUSE_PLUGIN_SCANNER=1",
             "XV6_GUI_SESSION=1",
+            webkit_gpu_run_id_env,
+            webkit_gpu_validate_run_id_env,
+            webkit_wlcomp_d3d12_run_id_env,
             "WEBKIT_EXEC_PATH=/libexec/webkit2gtk-4.1",
             "WEBKIT_INJECTED_BUNDLE_PATH=/lib/webkit2gtk-4.1/injected-bundle",
             "WEBKIT_DISABLE_NETWORK_CACHE=1",
@@ -604,6 +670,9 @@ void wlcomp_launcher_launch(const char *path, const char *name,
             "GST_REGISTRY=/tmp/gstreamer-registry.bin",
             "GST_REGISTRY_REUSE_PLUGIN_SCANNER=1",
             "XV6_GUI_SESSION=1",
+            webkit_gpu_run_id_env,
+            webkit_gpu_validate_run_id_env,
+            webkit_wlcomp_d3d12_run_id_env,
             "WEBKIT_EXEC_PATH=/libexec/webkit2gtk-4.1",
             "WEBKIT_INJECTED_BUNDLE_PATH=/lib/webkit2gtk-4.1/injected-bundle",
             "WEBKIT_DISABLE_NETWORK_CACHE=1",
@@ -656,6 +725,9 @@ void wlcomp_launcher_launch(const char *path, const char *name,
             "GST_REGISTRY=/tmp/gstreamer-registry.bin",
             "GST_REGISTRY_REUSE_PLUGIN_SCANNER=1",
             "XV6_GUI_SESSION=1",
+            webkit_gpu_run_id_env,
+            webkit_gpu_validate_run_id_env,
+            webkit_wlcomp_d3d12_run_id_env,
             "WEBKIT_EXEC_PATH=/libexec/webkit2gtk-4.1",
             "WEBKIT_INJECTED_BUNDLE_PATH=/lib/webkit2gtk-4.1/injected-bundle",
             "WEBKIT_DISABLE_NETWORK_CACHE=1",

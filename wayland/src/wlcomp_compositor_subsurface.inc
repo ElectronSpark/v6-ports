@@ -131,6 +131,7 @@ static void surface_commit(struct wl_client *client, struct wl_resource *resourc
         surf->has_pending_buffer = 0;
         if (surf->committed_buf && surf->committed_buf->is_d3d12_shared) {
             surf->committed_buf->d3d12_present_complete = 0;
+            surf->committed_buf->d3d12_failclosed_client_unblocked = 0;
             surf->committed_buf->d3d12_gpu_copy_complete = 0;
             surf->committed_buf->d3d12_present_evidence_pending = 0;
             surf->committed_buf->d3d12_present_wait_confirmed = 0;

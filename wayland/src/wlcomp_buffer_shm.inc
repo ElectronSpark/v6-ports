@@ -223,7 +223,8 @@ static void buffer_send_release_events(struct wlcomp_buffer *buf)
 
     if (!buf)
         return;
-    if (buf->is_d3d12_shared && !buf->d3d12_present_complete) {
+    if (buf->is_d3d12_shared && !buf->d3d12_present_complete &&
+        !buf->d3d12_failclosed_client_unblocked) {
         if (d3d12_release_block_logs < 8) {
             fprintf(stderr,
                     "wlcomp: blocked D3D12 buffer release pending_gpu_display_present=1 resource=0x%x callbacks_blocked=1 releases_blocked=1 starts=%lu copies=%lu display_completes=%lu\n",
@@ -241,10 +242,17 @@ static void buffer_send_release_events(struct wlcomp_buffer *buf)
         if (buf->is_d3d12_shared) {
             zwp_linux_buffer_release_v1_send_immediate_release(
                 buf->explicit_release);
-            fprintf(stderr,
-                    "wlcomp: d3d12 explicit-sync immediate release after completed present seq=%lu fence=%lu\n",
-                    (unsigned long)buf->d3d12_present_sequence,
-                    (unsigned long)buf->d3d12_present_fence_value);
+            if (buf->d3d12_failclosed_client_unblocked &&
+                !buf->d3d12_present_complete) {
+                fprintf(stderr,
+                        "wlcomp: d3d12 explicit-sync immediate release after fail-closed unblock no_native_present_credit=1 seq=%lu\n",
+                        (unsigned long)buf->d3d12_present_sequence);
+            } else {
+                fprintf(stderr,
+                        "wlcomp: d3d12 explicit-sync immediate release after completed present seq=%lu fence=%lu\n",
+                        (unsigned long)buf->d3d12_present_sequence,
+                        (unsigned long)buf->d3d12_present_fence_value);
+            }
         } else {
             int fence_fd = export_present_release_fence_fd();
 
@@ -291,7 +299,8 @@ static void queue_buffer_release(struct wlcomp_buffer *buf)
         g_release_queue[g_release_queue_count++] = buf;
         return;
     }
-    if (buf->is_d3d12_shared && !buf->d3d12_present_complete) {
+    if (buf->is_d3d12_shared && !buf->d3d12_present_complete &&
+        !buf->d3d12_failclosed_client_unblocked) {
         if (d3d12_release_queue_full_logs < 8) {
             fprintf(stderr,
                     "wlcomp: D3D12 release queue full; keeping release blocked pending_gpu_display_present=1 resource=0x%x starts=%lu copies=%lu display_completes=%lu\n",
@@ -313,15 +322,29 @@ static void flush_buffer_releases_after_present(void)
 {
     int out = 0;
 
-    if (!framebuffer_present_fence_ready())
-        return;
+    if (!framebuffer_present_fence_ready()) {
+        int has_failclosed_d3d12_release = 0;
+
+        for (int i = 0; i < g_release_queue_count; i++) {
+            struct wlcomp_buffer *buf = g_release_queue[i];
+
+            if (buf && buf->is_d3d12_shared &&
+                buf->d3d12_failclosed_client_unblocked) {
+                has_failclosed_d3d12_release = 1;
+                break;
+            }
+        }
+        if (!has_failclosed_d3d12_release)
+            return;
+    }
 
     for (int i = 0; i < g_release_queue_count; i++) {
         struct wlcomp_buffer *buf = g_release_queue[i];
 
         if (!buf)
             continue;
-        if (buf->is_d3d12_shared && !buf->d3d12_present_complete) {
+        if (buf->is_d3d12_shared && !buf->d3d12_present_complete &&
+            !buf->d3d12_failclosed_client_unblocked) {
             g_release_queue[out++] = buf;
             continue;
         }

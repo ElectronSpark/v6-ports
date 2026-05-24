@@ -22,6 +22,15 @@
 #ifndef FB_GPU_DXG_DISPLAY_TARGET_NONE
 #define FB_GPU_DXG_DISPLAY_TARGET_NONE 0
 #endif
+#ifndef FB_GPU_DXG_DISPLAY_TARGET_SYNTHVID_VRAM_D3D12_EXISTING_SYSMEM
+#define FB_GPU_DXG_DISPLAY_TARGET_SYNTHVID_VRAM_D3D12_EXISTING_SYSMEM 1
+#endif
+#ifndef FB_GPU_DXG_DISPLAY_TARGET_RUNTIME_D3D12_RESOURCE
+#define FB_GPU_DXG_DISPLAY_TARGET_RUNTIME_D3D12_RESOURCE 2
+#endif
+#ifndef FB_GPU_DXG_DISPLAY_TARGET_DDA_NOUVEAU_SCANOUT
+#define FB_GPU_DXG_DISPLAY_TARGET_DDA_NOUVEAU_SCANOUT 3
+#endif
 #ifndef FB_GPU_DXG_PRESENT_MISSING_NONE
 #define FB_GPU_DXG_PRESENT_MISSING_NONE 0
 #endif
@@ -44,10 +53,12 @@
 #define FB_GPU_DXG_PRESENT_PROV_ADAPTER_LUID 0x0010
 #endif
 #ifndef XV6_D3D12_DISPLAY_TARGET_SYNTHVID_VRAM_D3D12_EXISTING_SYSMEM
-#define XV6_D3D12_DISPLAY_TARGET_SYNTHVID_VRAM_D3D12_EXISTING_SYSMEM 1
+#define XV6_D3D12_DISPLAY_TARGET_SYNTHVID_VRAM_D3D12_EXISTING_SYSMEM \
+    FB_GPU_DXG_DISPLAY_TARGET_SYNTHVID_VRAM_D3D12_EXISTING_SYSMEM
 #endif
 #ifndef XV6_D3D12_DISPLAY_TARGET_RUNTIME_CREATED_D3D12_RESOURCE
-#define XV6_D3D12_DISPLAY_TARGET_RUNTIME_CREATED_D3D12_RESOURCE 2
+#define XV6_D3D12_DISPLAY_TARGET_RUNTIME_CREATED_D3D12_RESOURCE \
+    FB_GPU_DXG_DISPLAY_TARGET_RUNTIME_D3D12_RESOURCE
 #endif
 #ifndef DRM_FORMAT_ARGB8888
 #define DRM_FORMAT_ARGB8888 0x34325241u
@@ -144,6 +155,7 @@ static const struct wl_interface *xv6_gpu_buffer_create_types[] = {
     NULL,
     NULL,
     NULL,
+    NULL,
 };
 
 static const struct wl_message xv6_gpu_buffer_manager_requests[] = {
@@ -159,12 +171,14 @@ static const struct wl_message xv6_gpu_buffer_manager_requests[] = {
       xv6_gpu_buffer_create_types },
     { "create_d3d12_resource_buffer_with_fence_value_luid",
       "nhhuuuuiiuuu", xv6_gpu_buffer_create_types },
+    { "create_d3d12_resource_buffer_with_fence_value_luid_run_id",
+      "nhhuuuuiiuuus", xv6_gpu_buffer_create_types },
 };
 
 static const struct wl_interface xv6_gpu_buffer_manager_interface = {
     "xv6_gpu_buffer_manager",
-    5,
-    7,
+    6,
+    8,
     xv6_gpu_buffer_manager_requests,
     0,
     NULL,
@@ -404,6 +418,15 @@ static uint64_t g_d3d12_fence_target_observed_count;
 static uint64_t g_d3d12_framebuffer_fallback_count;
 static uint64_t g_d3d12_buffer_release_observed_count;
 static uint64_t g_d3d12_frame_callback_observed_count;
+static uint64_t g_d3d12_buffer_release_native_success_count;
+static uint64_t g_d3d12_frame_callback_native_success_count;
+static uint64_t g_d3d12_failclosed_client_unblock_count;
+static uint64_t g_d3d12_failclosed_client_unblock_resource;
+static uint64_t g_d3d12_failclosed_client_unblock_sequence;
+static uint64_t g_d3d12_failclosed_client_unblock_buffer_generation;
+static uint64_t g_d3d12_failclosed_client_unblock_attempt_id;
+static uint64_t g_d3d12_failclosed_client_unblock_release_count;
+static uint64_t g_d3d12_failclosed_client_unblock_callback_count;
 static uint64_t g_d3d12_native_present_attempt_count;
 static uint64_t g_d3d12_native_present_completion_count;
 static uint64_t g_d3d12_next_buffer_generation;
@@ -413,6 +436,7 @@ static uint64_t g_d3d12_last_native_present_completion_id;
 static pid_t g_d3d12_last_client_pid;
 static uint32_t g_d3d12_last_client_buffer_id;
 static uint32_t g_d3d12_last_manager_resource_id;
+static char g_d3d12_last_client_run_id[96];
 static uint32_t g_d3d12_buffer_release_resource;
 static uint64_t g_d3d12_buffer_release_present_sequence;
 static uint64_t g_d3d12_buffer_release_buffer_generation;
@@ -434,6 +458,9 @@ static uint64_t g_d3d12_compositor_target_create_attempt_count;
 static uint64_t g_d3d12_compositor_target_create_success_count;
 static uint64_t g_d3d12_compositor_gpu_copy_submit_count;
 static uint64_t g_d3d12_compositor_gpu_copy_wait_count;
+static uint64_t g_d3d12_compositor_copy_device_ptr;
+static uint64_t g_d3d12_compositor_copy_queue_ptr;
+static uint64_t g_d3d12_compositor_copy_cmdlist_ptr;
 static uint64_t g_d3d12_dxg_present_register_attempt_count;
 static uint64_t g_d3d12_dxg_present_register_success_count;
 static uint64_t g_d3d12_dxg_present_commit_attempt_count;
@@ -457,6 +484,28 @@ static int g_d3d12_phase2_missing_fence_fd_rejected_current;
 static int g_d3d12_phase2_stale_fence_rejected_current;
 static int g_d3d12_phase2_cpu_mappable_fallback_rejected_current;
 
+#define XV6_D3D12_IDENTITY_COUNTER_RECORDS 64
+
+struct xv6_d3d12_identity_counter_record {
+    char run_id[96];
+    pid_t client_pid;
+    uint32_t client_buffer_id;
+    uint32_t manager_resource_id;
+    uint32_t resource;
+    uint64_t buffer_generation;
+    uint64_t client_attempts;
+    uint64_t client_completions;
+    uint64_t client_rejects;
+    uint64_t resource_attempts;
+    uint64_t resource_completions;
+    uint64_t resource_rejects;
+    uint64_t last_seen;
+};
+
+static struct xv6_d3d12_identity_counter_record
+    g_d3d12_identity_counters[XV6_D3D12_IDENTITY_COUNTER_RECORDS];
+static uint64_t g_d3d12_identity_counter_clock;
+
 struct xv6_d3d12_present_contract;
 struct xv6_d3d12_present_result;
 
@@ -466,6 +515,8 @@ static void xv6_d3d12_write_present_evidence(
     const struct xv6_d3d12_present_result *result,
     int rejected,
     int err);
+static void xv6_d3d12_drain_failclosed_client(
+    struct wlcomp_buffer *buf, const char *reason);
 
 struct xv6_d3d12_present_rect {
     int32_t x;
@@ -489,6 +540,13 @@ struct xv6_d3d12_present_contract {
     int source_luid_valid;
     uint32_t matched_luid_a;
     uint32_t matched_luid_b;
+    uint32_t descriptor_width;
+    uint32_t descriptor_height;
+    uint32_t descriptor_pitch;
+    uint64_t descriptor_modifier;
+    uint32_t descriptor_sample_count;
+    int descriptor_dxg_fd;
+    int descriptor_resource_fd;
     int wait_confirmed;
     uint32_t total_priv_size;
     pid_t client_pid;
@@ -539,6 +597,8 @@ static const char *xv6_d3d12_present_run_id(void)
     static char run_id[96];
     const char *env;
 
+    if (g_d3d12_last_client_run_id[0])
+        return g_d3d12_last_client_run_id;
     env = getenv("XV6_WLCOMP_D3D12_RUN_ID");
     if (env && *env) {
         snprintf(run_id, sizeof(run_id), "%s", env);
@@ -548,6 +608,175 @@ static const char *xv6_d3d12_present_run_id(void)
         snprintf(run_id, sizeof(run_id), "wlcomp-%d-%lu", (int)getpid(),
                  (unsigned long)get_time_us());
     return run_id;
+}
+
+static struct xv6_d3d12_identity_counter_record *
+xv6_d3d12_get_identity_counter_record(const struct wlcomp_buffer *buf,
+                                      int create)
+{
+    struct xv6_d3d12_identity_counter_record *empty = NULL;
+    const char *run_id;
+
+    if (!buf || !buf->is_d3d12_shared)
+        return NULL;
+    run_id = buf->d3d12_client_run_id[0] ?
+        buf->d3d12_client_run_id : xv6_d3d12_present_run_id();
+    for (size_t i = 0; i < XV6_D3D12_IDENTITY_COUNTER_RECORDS; i++) {
+        struct xv6_d3d12_identity_counter_record *rec =
+            &g_d3d12_identity_counters[i];
+
+        if (rec->last_seen == 0) {
+            if (!empty)
+                empty = rec;
+            continue;
+        }
+        if (rec->client_pid == buf->d3d12_client_pid &&
+            rec->client_buffer_id == buf->d3d12_client_buffer_id &&
+            rec->manager_resource_id == buf->d3d12_manager_resource_id &&
+            rec->resource == buf->d3d12_opened_resource &&
+            rec->buffer_generation == buf->d3d12_buffer_generation &&
+            strcmp(rec->run_id, run_id) == 0)
+            return rec;
+    }
+    if (!create)
+        return NULL;
+    if (!empty) {
+        uint64_t oldest = UINT64_MAX;
+
+        empty = &g_d3d12_identity_counters[0];
+        for (size_t i = 0; i < XV6_D3D12_IDENTITY_COUNTER_RECORDS; i++) {
+            struct xv6_d3d12_identity_counter_record *rec =
+                &g_d3d12_identity_counters[i];
+
+            if (rec->last_seen < oldest) {
+                oldest = rec->last_seen;
+                empty = rec;
+            }
+        }
+    }
+    memset(empty, 0, sizeof(*empty));
+    snprintf(empty->run_id, sizeof(empty->run_id), "%s", run_id);
+    empty->client_pid = buf->d3d12_client_pid;
+    empty->client_buffer_id = buf->d3d12_client_buffer_id;
+    empty->manager_resource_id = buf->d3d12_manager_resource_id;
+    empty->resource = buf->d3d12_opened_resource;
+    empty->buffer_generation = buf->d3d12_buffer_generation;
+    empty->last_seen = ++g_d3d12_identity_counter_clock;
+    return empty;
+}
+
+static void xv6_d3d12_note_identity_present_attempt(
+    struct wlcomp_buffer *buf)
+{
+    struct xv6_d3d12_identity_counter_record *rec;
+
+    rec = xv6_d3d12_get_identity_counter_record(buf, 1);
+    if (!rec)
+        return;
+    rec->client_attempts++;
+    rec->resource_attempts++;
+    rec->last_seen = ++g_d3d12_identity_counter_clock;
+}
+
+static void xv6_d3d12_note_identity_present_completion(
+    struct wlcomp_buffer *buf)
+{
+    struct xv6_d3d12_identity_counter_record *rec;
+
+    rec = xv6_d3d12_get_identity_counter_record(buf, 1);
+    if (!rec)
+        return;
+    rec->client_completions++;
+    rec->resource_completions++;
+    rec->last_seen = ++g_d3d12_identity_counter_clock;
+}
+
+static void xv6_d3d12_note_identity_present_reject(
+    struct wlcomp_buffer *buf)
+{
+    struct xv6_d3d12_identity_counter_record *rec;
+
+    if (!buf || buf->d3d12_native_present_reject_recorded ||
+        buf->d3d12_native_present_completion_id != 0 ||
+        buf->d3d12_native_present_attempt_id == 0)
+        return;
+    rec = xv6_d3d12_get_identity_counter_record(buf, 1);
+    if (!rec)
+        return;
+    rec->client_rejects++;
+    rec->resource_rejects++;
+    rec->last_seen = ++g_d3d12_identity_counter_clock;
+    buf->d3d12_native_present_reject_recorded = 1;
+}
+
+static int xv6_d3d12_failclosed_unblocks_clients(void)
+{
+    static int initialized;
+    static int enabled = 1;
+    const char *env;
+
+    if (initialized)
+        return enabled;
+    initialized = 1;
+    env = getenv("XV6_WLCOMP_D3D12_FAILCLOSED_UNBLOCK");
+    if (env && *env)
+        enabled = atoi(env) != 0;
+    enabled = cmdline_int_value("wlcomp_d3d12_failclosed_unblock",
+                                enabled) != 0;
+    return enabled;
+}
+
+static void xv6_d3d12_unblock_failclosed_client(
+    struct wlcomp_buffer *buf, const char *reason)
+{
+    static int logs;
+
+    if (!buf || !buf->is_d3d12_shared || buf->d3d12_present_complete ||
+        buf->d3d12_failclosed_client_unblocked ||
+        !xv6_d3d12_failclosed_unblocks_clients())
+        return;
+
+    buf->d3d12_failclosed_client_unblocked = 1;
+    buf->d3d12_present_evidence_pending = 0;
+    buf->d3d12_present_sequence = get_time_us();
+    buf->d3d12_present_fence_value = 0;
+    g_d3d12_failclosed_client_unblock_count++;
+    g_d3d12_failclosed_client_unblock_resource =
+        buf->d3d12_opened_resource;
+    g_d3d12_failclosed_client_unblock_sequence =
+        buf->d3d12_present_sequence;
+    g_d3d12_failclosed_client_unblock_buffer_generation =
+        buf->d3d12_buffer_generation;
+    g_d3d12_failclosed_client_unblock_attempt_id =
+        buf->d3d12_native_present_attempt_id;
+    if (logs < 16) {
+        fprintf(stderr,
+                "wlcomp: d3d12 fail-closed client unblocked no_native_present_credit=1 reason=%s resource=0x%x attempts=%lu copies=%lu native_completions=%lu backend_opengl_submit=0\n",
+                reason ? reason : "unknown", buf->d3d12_opened_resource,
+                (unsigned long)g_d3d12_native_present_attempt_count,
+                (unsigned long)g_d3d12_present_copy_complete_count,
+                (unsigned long)g_d3d12_native_present_completion_count);
+        logs++;
+    }
+    xv6_d3d12_drain_failclosed_client(buf, reason);
+}
+
+static void xv6_d3d12_set_last_client_run_id(const char *client_run_id)
+{
+    size_t i;
+    size_t out = 0;
+
+    g_d3d12_last_client_run_id[0] = '\0';
+    if (!client_run_id)
+        return;
+    for (i = 0; client_run_id[i] &&
+         out + 1 < sizeof(g_d3d12_last_client_run_id); i++) {
+        unsigned char ch = (unsigned char)client_run_id[i];
+
+        g_d3d12_last_client_run_id[out++] =
+            (ch <= ' ' || ch == 0x7f) ? '_' : (char)ch;
+    }
+    g_d3d12_last_client_run_id[out] = '\0';
 }
 
 static const char *xv6_d3d12_display_target_kind_name(uint32_t kind)
@@ -747,6 +976,7 @@ static void xv6_d3d12_set_last_identity_from_buffer(
     g_d3d12_last_client_pid = buf->d3d12_client_pid;
     g_d3d12_last_client_buffer_id = buf->d3d12_client_buffer_id;
     g_d3d12_last_manager_resource_id = buf->d3d12_manager_resource_id;
+    xv6_d3d12_set_last_client_run_id(buf->d3d12_client_run_id);
     g_d3d12_last_buffer_generation = buf->d3d12_buffer_generation;
     if (buf->d3d12_native_present_attempt_id)
         g_d3d12_last_native_present_attempt_id =
@@ -771,6 +1001,14 @@ static void xv6_d3d12_fill_present_identity(
     present->native_present_attempt_id = buf->d3d12_native_present_attempt_id;
     present->native_present_completion_id =
         buf->d3d12_native_present_completion_id;
+    present->descriptor_width = buf->width > 0 ? (uint32_t)buf->width : 0;
+    present->descriptor_height = buf->height > 0 ? (uint32_t)buf->height : 0;
+    present->descriptor_pitch =
+        present->descriptor_width != 0 ? present->descriptor_width * 4U : 0;
+    present->descriptor_modifier = DRM_FORMAT_MOD_LINEAR;
+    present->descriptor_sample_count = 1;
+    present->descriptor_dxg_fd = buf->d3d12_dxg_fd;
+    present->descriptor_resource_fd = buf->d3d12_resource_fd;
     present->framebuffer_blit_attempts_at_present =
         buf->d3d12_fb_blit_attempts_at_present;
     present->framebuffer_blit_successes_at_present =
@@ -897,7 +1135,7 @@ static void xv6_d3d12_write_final_handoff_evidence(
     if (!fp)
         return;
     fprintf(fp,
-            "d3d12_final_handoff_lane=runtime-created-d3d12-resource-to-host-display-helper\n"
+            "d3d12_final_handoff_lane=runtime-created-d3d12-resource-through-gpu-p-or-dda\n"
             "d3d12_final_handoff_selected=dxg-resource-scanout-bind\n"
             "d3d12_final_handoff_source=runtime-created-d3d12-resource\n"
             "d3d12_final_handoff_intermediate=compositor-owned-d3d12-texture\n"
@@ -907,11 +1145,12 @@ static void xv6_d3d12_write_final_handoff_evidence(
             "d3d12_wslg_user_display_lane_selected=0\n"
             "d3d12_wslg_user_display_channel_available=0\n"
             "d3d12_wslg_user_display_transport=none\n"
+            "d3d12_wslg_user_display_service_path=none\n"
             "d3d12_wslg_user_display_helper_path=none\n"
             "d3d12_wslg_user_display_host_ack_required=1\n"
             "d3d12_wslg_user_display_host_ack_observed=0\n"
             "d3d12_wslg_user_display_success=0\n"
-            "d3d12_wslg_user_display_dependency=guest-host-remoting-transport-and-host-display-helper\n"
+            "d3d12_wslg_user_display_dependency=represented-gpu-p-or-dda-display-transport\n"
             "d3d12_final_handoff_existing_sysmem_allowed=0\n"
             "d3d12_final_handoff_synthvid_dirty_only_allowed=0\n"
             "d3d12_final_handoff_runtime_resource_required=1\n"
@@ -1018,6 +1257,22 @@ struct xv6_gpu_buffer_manager_impl {
         uint32_t format,
         uint32_t allocation_count,
         uint32_t total_priv_size);
+    void (*create_d3d12_resource_buffer_with_fence_value_luid_run_id)(
+        struct wl_client *client,
+        struct wl_resource *resource,
+        uint32_t id,
+        int32_t resource_fd,
+        int32_t fence_fd,
+        uint32_t fence_value_low,
+        uint32_t fence_value_high,
+        uint32_t luid_a,
+        uint32_t luid_b,
+        int32_t width,
+        int32_t height,
+        uint32_t format,
+        uint32_t allocation_count,
+        uint32_t total_priv_size,
+        const char *client_run_id);
 };
 
 static void xv6_gpu_create_buffer_common(struct wl_client *client,
@@ -1105,6 +1360,68 @@ static void xv6_gpu_create_buffer_common(struct wl_client *client,
         fprintf(stderr,
                 "wlcomp: xv6gpu buffer pid=%d size=%dx%d stride=%d fmt=0x%x handle=%u\n",
                 client_pid, width, height, stride, format, handle);
+    }
+}
+
+static void xv6_d3d12_count_identity_present_progress(
+    const struct xv6_d3d12_present_contract *present,
+    uint64_t *client_attempts,
+    uint64_t *client_completions,
+    uint64_t *client_rejects,
+    uint64_t *resource_attempts,
+    uint64_t *resource_completions,
+    uint64_t *resource_rejects)
+{
+    const char *run_id;
+
+    if (client_attempts)
+        *client_attempts = 0;
+    if (client_completions)
+        *client_completions = 0;
+    if (client_rejects)
+        *client_rejects = 0;
+    if (resource_attempts)
+        *resource_attempts = 0;
+    if (resource_completions)
+        *resource_completions = 0;
+    if (resource_rejects)
+        *resource_rejects = 0;
+    if (!present || present->client_pid == 0)
+        return;
+    run_id = xv6_d3d12_present_run_id();
+
+    for (size_t i = 0; i < XV6_D3D12_IDENTITY_COUNTER_RECORDS; i++) {
+        struct xv6_d3d12_identity_counter_record *rec =
+            &g_d3d12_identity_counters[i];
+        int same_client;
+        int same_resource_generation;
+
+        if (rec->last_seen == 0)
+            continue;
+        same_client =
+            rec->client_pid == present->client_pid &&
+            strcmp(rec->run_id, run_id) == 0;
+        same_resource_generation =
+            same_client &&
+            present->resource != 0 &&
+            rec->resource == present->resource &&
+            rec->buffer_generation == present->buffer_generation;
+        if (same_client) {
+            if (client_attempts)
+                *client_attempts += rec->client_attempts;
+            if (client_completions)
+                *client_completions += rec->client_completions;
+            if (client_rejects)
+                *client_rejects += rec->client_rejects;
+        }
+        if (same_resource_generation) {
+            if (resource_attempts)
+                *resource_attempts += rec->resource_attempts;
+            if (resource_completions)
+                *resource_completions += rec->resource_completions;
+            if (resource_rejects)
+                *resource_rejects += rec->resource_rejects;
+        }
     }
 }
 
@@ -1593,8 +1910,15 @@ static void xv6_d3d12_observe_buffer_release(struct wlcomp_buffer *buf)
     struct xv6_d3d12_present_contract present;
     struct xv6_d3d12_present_result result;
     struct xv6_d3d12_present_source_record *source_record;
+    int failclosed_unblock;
+    int err;
 
-    if (!buf || !buf->is_d3d12_shared || !buf->d3d12_present_complete)
+    if (!buf || !buf->is_d3d12_shared)
+        return;
+    failclosed_unblock =
+        buf->d3d12_failclosed_client_unblocked &&
+        !buf->d3d12_present_complete;
+    if (!buf->d3d12_present_complete && !failclosed_unblock)
         return;
 
     source_record = xv6_d3d12_get_present_source_record(buf, 0);
@@ -1637,8 +1961,23 @@ static void xv6_d3d12_observe_buffer_release(struct wlcomp_buffer *buf)
     xv6_d3d12_fill_present_identity(&present, buf);
     result.start_sequence = buf->d3d12_gpu_present_start_time;
     result.copy_sequence = buf->d3d12_gpu_copy_complete_time;
-    result.complete_sequence = buf->d3d12_present_sequence;
-    result.release_fence = buf->d3d12_present_fence_value;
+    result.complete_sequence =
+        failclosed_unblock ? 0 : buf->d3d12_present_sequence;
+    result.release_fence =
+        failclosed_unblock ? 0 : buf->d3d12_present_fence_value;
+    if (failclosed_unblock) {
+        g_d3d12_failclosed_client_unblock_release_count++;
+        err = source_record && source_record->commit_errno ?
+            source_record->commit_errno : EOPNOTSUPP;
+        xv6_d3d12_write_present_evidence(&present, &result, 1, err);
+        fprintf(stderr,
+                "wlcomp: d3d12 fail-closed buffer release observed no_native_present_credit=1 releases=%lu resource=0x%x sequence=%lu commit_errno=%d backend_opengl_submit=0\n",
+                (unsigned long)g_d3d12_failclosed_client_unblock_release_count,
+                buf->d3d12_opened_resource,
+                (unsigned long)buf->d3d12_present_sequence, err);
+        return;
+    }
+    g_d3d12_buffer_release_native_success_count++;
     xv6_d3d12_write_present_evidence(&present, &result, 0, 0);
     fprintf(stderr,
             "wlcomp: d3d12 buffer release observed d3d12_buffer_release_observed=%lu resource=0x%x present_sequence=%lu evidence_generation=%lu\n",
@@ -1655,11 +1994,18 @@ static void xv6_d3d12_observe_frame_callback(struct wlcomp_surface *surf,
     struct xv6_d3d12_present_result result;
     struct xv6_d3d12_present_source_record *source_record;
     struct wlcomp_buffer *buf;
+    int failclosed_unblock;
+    int err;
 
     if (!surf)
         return;
     buf = surf->committed_buf;
-    if (!buf || !buf->is_d3d12_shared || !buf->d3d12_present_complete)
+    if (!buf || !buf->is_d3d12_shared)
+        return;
+    failclosed_unblock =
+        buf->d3d12_failclosed_client_unblocked &&
+        !buf->d3d12_present_complete;
+    if (!buf->d3d12_present_complete && !failclosed_unblock)
         return;
 
     source_record = xv6_d3d12_get_present_source_record(buf, 0);
@@ -1702,8 +2048,23 @@ static void xv6_d3d12_observe_frame_callback(struct wlcomp_surface *surf,
     xv6_d3d12_fill_present_identity(&present, buf);
     result.start_sequence = buf->d3d12_gpu_present_start_time;
     result.copy_sequence = buf->d3d12_gpu_copy_complete_time;
-    result.complete_sequence = buf->d3d12_present_sequence;
-    result.release_fence = buf->d3d12_present_fence_value;
+    result.complete_sequence =
+        failclosed_unblock ? 0 : buf->d3d12_present_sequence;
+    result.release_fence =
+        failclosed_unblock ? 0 : buf->d3d12_present_fence_value;
+    if (failclosed_unblock) {
+        g_d3d12_failclosed_client_unblock_callback_count++;
+        err = source_record && source_record->commit_errno ?
+            source_record->commit_errno : EOPNOTSUPP;
+        xv6_d3d12_write_present_evidence(&present, &result, 1, err);
+        fprintf(stderr,
+                "wlcomp: d3d12 fail-closed frame callback observed no_native_present_credit=1 callbacks=%lu resource=0x%x sequence=%lu callback_time=%u commit_errno=%d backend_opengl_submit=0\n",
+                (unsigned long)g_d3d12_failclosed_client_unblock_callback_count,
+                buf->d3d12_opened_resource,
+                (unsigned long)buf->d3d12_present_sequence, now, err);
+        return;
+    }
+    g_d3d12_frame_callback_native_success_count++;
     xv6_d3d12_write_present_evidence(&present, &result, 0, 0);
     fprintf(stderr,
             "wlcomp: d3d12 frame callback observed d3d12_frame_callback_observed=%lu resource=0x%x present_sequence=%lu callback_time=%u evidence_generation=%lu\n",
@@ -1711,6 +2072,51 @@ static void xv6_d3d12_observe_frame_callback(struct wlcomp_surface *surf,
             buf->d3d12_opened_resource,
             (unsigned long)buf->d3d12_present_sequence, now,
             (unsigned long)g_d3d12_evidence_generation);
+}
+
+static void xv6_d3d12_drain_failclosed_client(struct wlcomp_buffer *buf,
+                                              const char *reason)
+{
+    struct wlcomp_surface *surf;
+    uint32_t now;
+    int releases_queued = 0;
+    int callbacks_sent = 0;
+
+    if (!buf || !buf->is_d3d12_shared ||
+        !buf->d3d12_failclosed_client_unblocked ||
+        buf->d3d12_present_complete)
+        return;
+
+    now = get_time_ms();
+    wl_list_for_each(surf, &g_surfaces, link) {
+        if (surf->committed_buf != buf)
+            continue;
+        if (!surf->buffer_released && buf->acquire_fence_fd < 0) {
+            queue_buffer_release(buf);
+            surf->buffer_released = 1;
+            releases_queued++;
+        }
+        {
+            struct wlcomp_frame_callback *cb;
+            struct wlcomp_frame_callback *tmp;
+
+            wl_list_for_each_safe(cb, tmp, &surf->frame_callbacks, link) {
+                xv6_d3d12_observe_frame_callback(surf, now);
+                wl_callback_send_done(cb->resource, now);
+                wl_resource_destroy(cb->resource);
+                wl_list_remove(&cb->link);
+                free(cb);
+                callbacks_sent++;
+            }
+        }
+    }
+    flush_buffer_releases_after_present();
+    if (g_display)
+        wl_display_flush_clients(g_display);
+    fprintf(stderr,
+            "wlcomp: d3d12 fail-closed client drain no_native_present_credit=1 reason=%s resource=0x%x releases_queued=%d callbacks_sent=%d backend_opengl_submit=0\n",
+            reason ? reason : "unknown", buf->d3d12_opened_resource,
+            releases_queued, callbacks_sent);
 }
 
 static int xv6_d3d12_load_runtime(void)
@@ -2197,6 +2603,8 @@ static int xv6_d3d12_copy_shared_resource_to_compositor_texture(
         errno = EIO;
         goto out;
     }
+    g_d3d12_compositor_copy_device_ptr = (uint64_t)(uintptr_t)device;
+    g_d3d12_compositor_copy_queue_ptr = (uint64_t)(uintptr_t)queue;
     hr = ID3D12Device_CreateCommandAllocator(
         device, D3D12_COMMAND_LIST_TYPE_DIRECT,
         &IID_ID3D12CommandAllocator, (void **)&allocator);
@@ -2216,6 +2624,7 @@ static int xv6_d3d12_copy_shared_resource_to_compositor_texture(
         errno = EIO;
         goto out;
     }
+    g_d3d12_compositor_copy_cmdlist_ptr = (uint64_t)(uintptr_t)cmdlist;
 
     memset(barriers, 0, sizeof(barriers));
     barriers[0].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
@@ -2291,11 +2700,14 @@ static int xv6_d3d12_copy_shared_resource_to_compositor_texture(
     if (copy_fence_out)
         *copy_fence_out = copy_fence_value;
     fprintf(stderr,
-            "wlcomp: d3d12 compositor GPU copy proof complete target=compositor-owned-d3d12-texture target_size=%ux%u format=%u copy_fence=%lu submits=%lu waits=%lu display_handoff=0 no_cpu_readback=1\n",
+            "wlcomp: d3d12 compositor GPU copy proof complete target=compositor-owned-d3d12-texture target_size=%ux%u format=%u copy_fence=%lu submits=%lu waits=%lu queue_type=direct device=0x%lx queue=0x%lx cmdlist=0x%lx display_handoff=0 no_cpu_readback=1\n",
             present->src.w, present->src.h, src_desc.Format,
             (unsigned long)copy_fence_value,
             (unsigned long)g_d3d12_compositor_gpu_copy_submit_count,
-            (unsigned long)g_d3d12_compositor_gpu_copy_wait_count);
+            (unsigned long)g_d3d12_compositor_gpu_copy_wait_count,
+            (unsigned long)g_d3d12_compositor_copy_device_ptr,
+            (unsigned long)g_d3d12_compositor_copy_queue_ptr,
+            (unsigned long)g_d3d12_compositor_copy_cmdlist_ptr);
     ret = 0;
 
 out:
@@ -2405,7 +2817,7 @@ static void xv6_d3d12_write_present_evidence(
     int present_source_no_present_id_completed = present &&
         present->present_source_present_id == 0 &&
         present->present_source_completed == 0;
-    int present_source_no_host_helper =
+    int present_source_no_gpu_p_or_dda_display_bind =
         present_source_commit_rejected_eopnotsupp;
     int present_source_no_display_handoff = rejected &&
         (!present || present->present_source_commit_successes == 0 ||
@@ -2424,6 +2836,12 @@ static void xv6_d3d12_write_present_evidence(
         !release_same_generation &&
         !release_same_attempt &&
         !release_same_present_id;
+    uint64_t identity_client_attempts = 0;
+    uint64_t identity_client_completions = 0;
+    uint64_t identity_client_rejects = 0;
+    uint64_t identity_resource_attempts = 0;
+    uint64_t identity_resource_completions = 0;
+    uint64_t identity_resource_rejects = 0;
 
     if (!present)
         present_source_query_skipped_reason = "no-present";
@@ -2446,6 +2864,10 @@ static void xv6_d3d12_write_present_evidence(
     if (!fp)
         return;
     g_d3d12_evidence_generation++;
+    xv6_d3d12_count_identity_present_progress(
+        present, &identity_client_attempts, &identity_client_completions,
+        &identity_client_rejects, &identity_resource_attempts,
+        &identity_resource_completions, &identity_resource_rejects);
     if (rejected) {
         fprintf(fp,
                 "d3d12_present_evidence_time_us=%lu\n"
@@ -2469,6 +2891,12 @@ static void xv6_d3d12_write_present_evidence(
                 "d3d12_compositor_target_create_successes=%lu\n"
                 "d3d12_compositor_gpu_copy_submits=%lu\n"
                 "d3d12_compositor_gpu_copy_waits=%lu\n"
+                "d3d12_compositor_copy_queue_type=direct\n"
+                "d3d12_compositor_copy_device_ptr=0x%lx\n"
+                "d3d12_compositor_copy_queue_ptr=0x%lx\n"
+                "d3d12_compositor_copy_cmdlist_ptr=0x%lx\n"
+                "d3d12_compositor_copy_hwqueue_handle=0\n"
+                "d3d12_compositor_copy_hwqueue_source=d3d12-command-queue\n"
                 "d3d12_display_handoff_implemented=0\n"
                 "d3d12_display_target_kind=%s\n"
                 "d3d12_d3d12_copy_target_presentable=0\n"
@@ -2544,8 +2972,8 @@ static void xv6_d3d12_write_present_evidence(
                 "d3d12_present_open_only=0\n"
                 "d3d12_present_callback_only=0\n"
                 "d3d12_present_release_only=0\n"
-                "callbacks_blocked=1\n"
-                "releases_blocked=1\n",
+                "callbacks_blocked=%d\n"
+                "releases_blocked=%d\n",
                 (unsigned long)evidence_time_us,
                 (unsigned long)g_d3d12_evidence_generation,
                 (unsigned long)g_d3d12_present_start_count,
@@ -2554,6 +2982,9 @@ static void xv6_d3d12_write_present_evidence(
                 (unsigned long)g_d3d12_compositor_target_create_success_count,
                 (unsigned long)g_d3d12_compositor_gpu_copy_submit_count,
                 (unsigned long)g_d3d12_compositor_gpu_copy_wait_count,
+                (unsigned long)g_d3d12_compositor_copy_device_ptr,
+                (unsigned long)g_d3d12_compositor_copy_queue_ptr,
+                (unsigned long)g_d3d12_compositor_copy_cmdlist_ptr,
                 xv6_d3d12_display_target_kind_name(
                     present ? present->display_target_kind : 0),
                 (unsigned long)g_d3d12_dxg_present_register_attempt_count,
@@ -2609,7 +3040,9 @@ static void xv6_d3d12_write_present_evidence(
                 present ? present->source_luid_b : 0,
                 present ? present->source_luid_a : 0,
                 present ? present->matched_luid_b : 0,
-                present ? present->matched_luid_a : 0);
+                present ? present->matched_luid_a : 0,
+                same_frame_callbacks_blocked,
+                same_frame_releases_blocked);
     } else {
         fprintf(fp,
                 "d3d12_present_evidence_time_us=%lu\n"
@@ -2634,6 +3067,12 @@ static void xv6_d3d12_write_present_evidence(
                 "d3d12_compositor_target_create_successes=%lu\n"
                 "d3d12_compositor_gpu_copy_submits=%lu\n"
                 "d3d12_compositor_gpu_copy_waits=%lu\n"
+                "d3d12_compositor_copy_queue_type=direct\n"
+                "d3d12_compositor_copy_device_ptr=0x%lx\n"
+                "d3d12_compositor_copy_queue_ptr=0x%lx\n"
+                "d3d12_compositor_copy_cmdlist_ptr=0x%lx\n"
+                "d3d12_compositor_copy_hwqueue_handle=0\n"
+                "d3d12_compositor_copy_hwqueue_source=d3d12-command-queue\n"
                 "d3d12_display_handoff_implemented=1\n"
                 "d3d12_display_target_kind=%s\n"
                 "d3d12_display_handoff_requires_kernel_host_protocol=0\n"
@@ -2716,6 +3155,9 @@ static void xv6_d3d12_write_present_evidence(
                 (unsigned long)g_d3d12_compositor_target_create_success_count,
                 (unsigned long)g_d3d12_compositor_gpu_copy_submit_count,
                 (unsigned long)g_d3d12_compositor_gpu_copy_wait_count,
+                (unsigned long)g_d3d12_compositor_copy_device_ptr,
+                (unsigned long)g_d3d12_compositor_copy_queue_ptr,
+                (unsigned long)g_d3d12_compositor_copy_cmdlist_ptr,
                 xv6_d3d12_display_target_kind_name(
                     present ? present->display_target_kind : 0),
                 (unsigned long)g_d3d12_dxg_present_register_attempt_count,
@@ -2781,6 +3223,17 @@ static void xv6_d3d12_write_present_evidence(
             "d3d12_native_present_attempt_id=%lu\n"
             "d3d12_native_present_completion_id=%lu\n"
             "d3d12_context_native_present_completion_id=%lu\n"
+            "d3d12_client_native_present_attempts=%lu\n"
+            "d3d12_client_native_present_completions=%lu\n"
+            "d3d12_client_native_present_rejects=%lu\n"
+            "d3d12_resource_native_present_attempts=%lu\n"
+            "d3d12_resource_native_present_completions=%lu\n"
+            "d3d12_resource_native_present_rejects=%lu\n"
+            "d3d12_resource_generation_counter=%lu\n"
+            "d3d12_resource_generation_native_present_attempts=%lu\n"
+            "d3d12_resource_generation_native_present_completions=%lu\n"
+            "d3d12_resource_generation_native_present_rejects=%lu\n"
+            "d3d12_identity_counters_match_resource=%d\n"
             "d3d12_present_identity_compositor_run_id=%s\n"
             "d3d12_present_identity_client_pid=%d\n"
             "d3d12_present_identity_client_buffer_id=%u\n"
@@ -2807,6 +3260,19 @@ static void xv6_d3d12_write_present_evidence(
             "d3d12_frame_callback_same_attempt=%d\n"
             "d3d12_frame_callback_same_present_id=%d\n"
             "d3d12_callback_release_same_frame_observed=%d\n"
+            "d3d12_buffer_release_native_successes=%lu\n"
+            "d3d12_frame_callback_native_successes=%lu\n"
+            "d3d12_buffer_release_failclosed_unblocks=%lu\n"
+            "d3d12_frame_callback_failclosed_unblocks=%lu\n"
+            "d3d12_failclosed_client_unblock_enabled=%d\n"
+            "d3d12_failclosed_client_unblocked=%lu\n"
+            "d3d12_failclosed_client_unblock_no_native_present_credit=1\n"
+            "d3d12_failclosed_client_unblock_resource=0x%lx\n"
+            "d3d12_failclosed_client_unblock_sequence=%lu\n"
+            "d3d12_failclosed_client_unblock_buffer_generation=%lu\n"
+            "d3d12_failclosed_client_unblock_attempt_id=%lu\n"
+            "d3d12_failclosed_client_unblock_releases=%lu\n"
+            "d3d12_failclosed_client_unblock_callbacks=%lu\n"
             "d3d12_present_source_buffer_register_attempts=%lu\n"
             "d3d12_present_source_buffer_register_successes=%lu\n"
             "d3d12_present_source_buffer_register_errno=%d\n"
@@ -2829,10 +3295,10 @@ static void xv6_d3d12_write_present_evidence(
             "d3d12_present_source_registered=%d\n"
             "d3d12_present_source_query_attempted=%d\n"
             "d3d12_present_source_query_skipped_reason=%s\n"
-            "d3d12_present_source_helper_transport_absent=1\n"
+            "d3d12_present_source_gpu_p_or_dda_transport_absent=1\n"
+            "d3d12_present_source_no_gpu_p_or_dda_display_bind=%d\n"
             "d3d12_present_source_commit_rejected_eopnotsupp=%d\n"
             "d3d12_present_source_no_present_id_completed=%d\n"
-            "d3d12_present_source_no_host_helper=%d\n"
             "d3d12_present_source_no_display_handoff=%d\n"
             "d3d12_present_source_no_present_completion=%d\n"
             "d3d12_present_source_same_frame_callbacks_blocked=%d\n"
@@ -2843,6 +3309,23 @@ static void xv6_d3d12_write_present_evidence(
             "d3d12_present_source_adapter_luid_high=0x%x\n"
             "d3d12_present_source_provenance_flags=0x%x\n"
             "d3d12_present_source_register_flags=0x%x\n"
+            "d3d12_present_descriptor_width=%u\n"
+            "d3d12_present_descriptor_height=%u\n"
+            "d3d12_present_descriptor_pitch=%u\n"
+            "d3d12_present_descriptor_layout=linear\n"
+            "d3d12_present_descriptor_modifier=0x%lx\n"
+            "d3d12_present_descriptor_sample_count=%u\n"
+            "d3d12_present_descriptor_dxg_fd=%d\n"
+            "d3d12_present_descriptor_resource_fd=%d\n"
+            "d3d12_present_descriptor_nt_shared_fd=%d\n"
+            "d3d12_present_descriptor_device=0x%x\n"
+            "d3d12_present_descriptor_resource=0x%x\n"
+            "d3d12_present_descriptor_allocation0=0x%x\n"
+            "d3d12_present_descriptor_allocation_count=%u\n"
+            "d3d12_present_descriptor_format=0x%x\n"
+            "d3d12_present_descriptor_total_private_size=%u\n"
+            "d3d12_present_descriptor_luid=%08x:%08x\n"
+            "d3d12_present_descriptor_matches_gpu_copy_resource=%d\n"
             "d3d12_display_target_kind_raw=%u\n"
             "d3d12_display_target_kind_kernel=%s\n"
             "d3d12_display_target_kernel_reported=%d\n"
@@ -2862,6 +3345,12 @@ static void xv6_d3d12_write_present_evidence(
             "d3d12_framebuffer_blit_successes=%lu\n"
             "d3d12_framebuffer_blit_attempts_at_present=%lu\n"
             "d3d12_framebuffer_blit_successes_at_present=%lu\n"
+            "d3d12_framebuffer_present_frames=%lu\n"
+            "d3d12_framebuffer_present_rects=%lu\n"
+            "d3d12_framebuffer_present_pixels=%lu\n"
+            "d3d12_framebuffer_present_full_frames=%lu\n"
+            "d3d12_framebuffer_present_union_collapses=%lu\n"
+            "d3d12_partial_framebuffer_updates=%lu\n"
             "d3d12_cpu_map_rejects_at_present=%lu\n"
             "d3d12_cpu_plane_rejects_at_present=%lu\n"
             "d3d12_present_sequence_framebuffer_blit_used=0\n"
@@ -2886,6 +3375,20 @@ static void xv6_d3d12_write_present_evidence(
             (unsigned long)(rejected ? 0 : (present ?
                 present->native_present_completion_id : 0)),
             (unsigned long)(present ? present->native_present_completion_id : 0),
+            (unsigned long)identity_client_attempts,
+            (unsigned long)identity_client_completions,
+            (unsigned long)identity_client_rejects,
+            (unsigned long)identity_resource_attempts,
+            (unsigned long)identity_resource_completions,
+            (unsigned long)identity_resource_rejects,
+            (unsigned long)(present ? present->buffer_generation : 0),
+            (unsigned long)identity_resource_attempts,
+            (unsigned long)identity_resource_completions,
+            (unsigned long)identity_resource_rejects,
+            present && identity_resource_attempts != 0 &&
+                identity_resource_attempts <= identity_client_attempts &&
+                identity_resource_completions <= identity_client_completions &&
+                identity_resource_rejects <= identity_client_rejects,
             run_id,
             present ? (int)present->client_pid : 0,
             present ? present->client_buffer_id : 0,
@@ -2912,6 +3415,18 @@ static void xv6_d3d12_write_present_evidence(
             callback_same_attempt,
             callback_same_present_id,
             callback_release_same_frame,
+            (unsigned long)g_d3d12_buffer_release_native_success_count,
+            (unsigned long)g_d3d12_frame_callback_native_success_count,
+            (unsigned long)g_d3d12_failclosed_client_unblock_release_count,
+            (unsigned long)g_d3d12_failclosed_client_unblock_callback_count,
+            xv6_d3d12_failclosed_unblocks_clients(),
+            (unsigned long)g_d3d12_failclosed_client_unblock_count,
+            (unsigned long)g_d3d12_failclosed_client_unblock_resource,
+            (unsigned long)g_d3d12_failclosed_client_unblock_sequence,
+            (unsigned long)g_d3d12_failclosed_client_unblock_buffer_generation,
+            (unsigned long)g_d3d12_failclosed_client_unblock_attempt_id,
+            (unsigned long)g_d3d12_failclosed_client_unblock_release_count,
+            (unsigned long)g_d3d12_failclosed_client_unblock_callback_count,
             (unsigned long)(present ?
                 present->present_source_register_attempts : 0),
             (unsigned long)(present ?
@@ -2942,9 +3457,9 @@ static void xv6_d3d12_write_present_evidence(
             present_source_registered,
             present_source_query_attempted,
             present_source_query_skipped_reason,
+            present_source_no_gpu_p_or_dda_display_bind,
             present_source_commit_rejected_eopnotsupp,
             present_source_no_present_id_completed,
-            present_source_no_host_helper,
             present_source_no_display_handoff,
             present_source_no_present_completion,
             same_frame_callbacks_blocked,
@@ -2955,6 +3470,25 @@ static void xv6_d3d12_write_present_evidence(
             present ? present->present_source_adapter_luid_high : 0,
             present ? present->present_source_provenance_flags : 0,
             present ? present->present_source_register_flags : 0,
+            present ? present->descriptor_width : 0,
+            present ? present->descriptor_height : 0,
+            present ? present->descriptor_pitch : 0,
+            (unsigned long)(present ? present->descriptor_modifier : 0),
+            present ? present->descriptor_sample_count : 0,
+            present ? present->descriptor_dxg_fd : -1,
+            present ? present->descriptor_resource_fd : -1,
+            present ? present->descriptor_resource_fd : -1,
+            present ? present->device : 0,
+            present ? present->resource : 0,
+            present && present->allocations &&
+                present->allocation_count > 0 ? present->allocations[0] : 0,
+            present ? present->allocation_count : 0,
+            present ? present->format : 0,
+            present ? present->total_priv_size : 0,
+            present ? present->present_source_adapter_luid_high : 0,
+            present ? present->present_source_adapter_luid_low : 0,
+            present && present->resource != 0 &&
+                present->present_source_register_successes != 0,
             present ? present->display_target_kind : 0,
             xv6_d3d12_display_target_kind_name(
                 present ? present->display_target_kind : 0),
@@ -2989,6 +3523,13 @@ static void xv6_d3d12_write_present_evidence(
                 present->framebuffer_blit_attempts_at_present : 0),
             (unsigned long)(present ?
                 present->framebuffer_blit_successes_at_present : 0),
+            (unsigned long)g_damage_stats.frames,
+            (unsigned long)g_damage_stats.present_rects,
+            (unsigned long)g_damage_stats.present_pixels,
+            (unsigned long)g_damage_stats.present_full_frames,
+            (unsigned long)g_damage_stats.present_union_collapses,
+            (unsigned long)(g_damage_stats.present_rects -
+                g_damage_stats.present_full_frames),
             (unsigned long)(present ? present->cpu_map_rejects_at_present : 0),
             (unsigned long)(present ? present->cpu_plane_rejects_at_present :
                 0));
@@ -3277,6 +3818,7 @@ static void xv6_d3d12_write_fail_closed_display_handoff_evidence(
 
     buf->d3d12_present_evidence_pending = 0;
     g_d3d12_present_reject_count++;
+    xv6_d3d12_note_identity_present_reject(buf);
     xv6_d3d12_write_present_evidence(&present, &result, 1, present_errno);
     fprintf(stderr,
             "wlcomp: d3d12 native present fail-closed evidence written resource=0x%x copy_complete=%lu present_source=0x%x register_successes=%lu commit_attempts=%lu commit_successes=%lu commit_errno=%d present_id=%lu completed=%lu display_handoff=0 callbacks_blocked=1 releases_blocked=1 no_cpu_readback=1\n",
@@ -3291,6 +3833,7 @@ static void xv6_d3d12_write_fail_closed_display_handoff_evidence(
             source_record ? source_record->commit_errno : 0,
             (unsigned long)(source_record ? source_record->present_id : 0),
             (unsigned long)(source_record ? source_record->completed : 0));
+    xv6_d3d12_unblock_failclosed_client(buf, "display-handoff-missing");
 }
 
 static void xv6_d3d12_probe_dxg_present_source_handoff(
@@ -3766,6 +4309,7 @@ static void xv6_d3d12_finish_present_after_display(struct wlcomp_buffer *buf)
         g_d3d12_native_present_completion_count;
     g_d3d12_last_native_present_completion_id =
         buf->d3d12_native_present_completion_id;
+    xv6_d3d12_note_identity_present_completion(buf);
     xv6_d3d12_fill_present_identity(&present, buf);
     xv6_d3d12_write_present_evidence(&present, &result, 0, 0);
     fprintf(stderr,
@@ -3792,6 +4336,7 @@ static void xv6_d3d12_finish_present_after_display(struct wlcomp_buffer *buf)
 reject_display_completion:
     buf->d3d12_present_evidence_pending = 0;
     g_d3d12_present_reject_count++;
+    xv6_d3d12_note_identity_present_reject(buf);
     xv6_d3d12_write_present_evidence(&present, &result, 1, present_errno);
     fprintf(stderr,
             "wlcomp: d3d12 display completion rejected fail_closed=1 rejects=%lu missing='%s' resource=0x%x allocation_count=%u fence=0x%x target=%lu wait_confirmed=%d copy_complete=%d start=%lu copy=%lu errno=%d (%s) callbacks_blocked=1 releases_blocked=1 no_cpu_readback=1\n",
@@ -3803,6 +4348,7 @@ reject_display_completion:
             (unsigned long)result.start_sequence,
             (unsigned long)result.copy_sequence, present_errno,
             strerror(present_errno));
+    xv6_d3d12_unblock_failclosed_client(buf, "display-completion-rejected");
 }
 
 static void xv6_d3d12_complete_pending_presents_after_display(void)
@@ -3858,6 +4404,7 @@ static int xv6_d3d12_present_imported_buffer(struct wlcomp_surface *surf,
     buf->d3d12_native_present_attempt_id =
         g_d3d12_native_present_attempt_count;
     buf->d3d12_native_present_completion_id = 0;
+    buf->d3d12_native_present_reject_recorded = 0;
     buf->d3d12_fb_blit_attempts_at_present =
         g_fb_blit_present_attempt_count;
     buf->d3d12_fb_blit_successes_at_present =
@@ -3868,6 +4415,7 @@ static int xv6_d3d12_present_imported_buffer(struct wlcomp_surface *surf,
         g_d3d12_cpu_plane_reject_count;
     g_d3d12_last_native_present_attempt_id =
         buf->d3d12_native_present_attempt_id;
+    xv6_d3d12_note_identity_present_attempt(buf);
 
     memset(&present, 0, sizeof(present));
     memset(&result, 0, sizeof(result));
@@ -3910,6 +4458,7 @@ static int xv6_d3d12_present_imported_buffer(struct wlcomp_surface *surf,
 reject_present:
     present_errno = errno ? errno : EIO;
     g_d3d12_present_reject_count++;
+    xv6_d3d12_note_identity_present_reject(buf);
     xv6_d3d12_write_present_evidence(&present, &result, 1, present_errno);
     if (unimplemented_logs < 16) {
         fprintf(stderr,
@@ -3932,6 +4481,7 @@ reject_present:
                 strerror(present_errno));
         unimplemented_logs++;
     }
+    xv6_d3d12_unblock_failclosed_client(buf, "present-submit-rejected");
     return 0;
 }
 
@@ -4362,7 +4912,8 @@ static void xv6_gpu_create_d3d12_resource_buffer_common(
     int32_t height,
     uint32_t format,
     uint32_t allocation_count,
-    uint32_t total_priv_size)
+    uint32_t total_priv_size,
+    const char *client_run_id)
 {
     struct wlcomp_buffer *buf;
     struct wl_resource *buf_res;
@@ -4373,6 +4924,7 @@ static void xv6_gpu_create_d3d12_resource_buffer_common(
     uint32_t manager_resource_id = resource ? wl_resource_get_id(resource) : 0;
 
     wl_client_get_credentials(client, &client_pid, &client_uid, &client_gid);
+    xv6_d3d12_set_last_client_run_id(client_run_id);
     g_d3d12_last_client_pid = client_pid;
     g_d3d12_last_client_buffer_id = id;
     g_d3d12_last_manager_resource_id = manager_resource_id;
@@ -4383,8 +4935,9 @@ static void xv6_gpu_create_d3d12_resource_buffer_common(
     xv6_d3d12_reset_phase2_negative_current();
     g_d3d12_resource_submit_count++;
     fprintf(stderr,
-            "wlcomp: d3d12 shared buffer submission d3d12_resource_submissions=%lu pid=%d manager_resource_id=%u client_buffer_id=%u fd=%d fence_fd=%d target_valid=%d target=%lu size=%dx%d fmt=0x%x allocation_count=%u total_priv=%u source_luid_valid=%d source_luid=%08x:%08x\n",
-            (unsigned long)g_d3d12_resource_submit_count, client_pid,
+            "wlcomp: d3d12 shared buffer submission d3d12_resource_submissions=%lu run_id=%s pid=%d manager_resource_id=%u client_buffer_id=%u fd=%d fence_fd=%d target_valid=%d target=%lu size=%dx%d fmt=0x%x allocation_count=%u total_priv=%u source_luid_valid=%d source_luid=%08x:%08x\n",
+            (unsigned long)g_d3d12_resource_submit_count,
+            xv6_d3d12_present_run_id(), client_pid,
             manager_resource_id, id, resource_fd, fence_fd,
             fence_value_valid, (unsigned long)fence_value, width, height,
             format, allocation_count, total_priv_size, source_luid_valid,
@@ -4513,6 +5066,8 @@ static void xv6_gpu_create_d3d12_resource_buffer_common(
     buf->d3d12_client_pid = client_pid;
     buf->d3d12_client_buffer_id = id;
     buf->d3d12_manager_resource_id = manager_resource_id;
+    snprintf(buf->d3d12_client_run_id, sizeof(buf->d3d12_client_run_id),
+             "%s", g_d3d12_last_client_run_id);
     buf->d3d12_buffer_generation = ++g_d3d12_next_buffer_generation;
     buf->d3d12_resource_fd = resource_fd;
     buf->d3d12_fence_fd = stored_fence_fd;
@@ -4677,7 +5232,7 @@ static void xv6_gpu_create_d3d12_resource_buffer(
 {
     xv6_gpu_create_d3d12_resource_buffer_common(
         client, resource, id, resource_fd, -1, 0, 0, 0, 0, 0, width,
-        height, format, allocation_count, total_priv_size);
+        height, format, allocation_count, total_priv_size, NULL);
 }
 
 static void xv6_gpu_create_d3d12_resource_buffer_with_fence(
@@ -4694,7 +5249,7 @@ static void xv6_gpu_create_d3d12_resource_buffer_with_fence(
 {
     xv6_gpu_create_d3d12_resource_buffer_common(
         client, resource, id, resource_fd, fence_fd, 0, 0, 0, 0, 0, width,
-        height, format, allocation_count, total_priv_size);
+        height, format, allocation_count, total_priv_size, NULL);
 }
 
 static void xv6_gpu_create_d3d12_resource_buffer_luid(
@@ -4712,7 +5267,7 @@ static void xv6_gpu_create_d3d12_resource_buffer_luid(
 {
     xv6_gpu_create_d3d12_resource_buffer_common(
         client, resource, id, resource_fd, -1, luid_a, luid_b, 1, 0, 0,
-        width, height, format, allocation_count, total_priv_size);
+        width, height, format, allocation_count, total_priv_size, NULL);
 }
 
 static void xv6_gpu_create_d3d12_resource_buffer_with_fence_luid(
@@ -4731,7 +5286,8 @@ static void xv6_gpu_create_d3d12_resource_buffer_with_fence_luid(
 {
     xv6_gpu_create_d3d12_resource_buffer_common(
         client, resource, id, resource_fd, fence_fd, luid_a, luid_b, 1,
-        0, 0, width, height, format, allocation_count, total_priv_size);
+        0, 0, width, height, format, allocation_count, total_priv_size,
+        NULL);
 }
 
 static void xv6_gpu_create_d3d12_resource_buffer_with_fence_value_luid(
@@ -4756,7 +5312,33 @@ static void xv6_gpu_create_d3d12_resource_buffer_with_fence_value_luid(
     xv6_gpu_create_d3d12_resource_buffer_common(
         client, resource, id, resource_fd, fence_fd, luid_a, luid_b, 1,
         fence_value, 1, width, height, format, allocation_count,
-        total_priv_size);
+        total_priv_size, NULL);
+}
+
+static void xv6_gpu_create_d3d12_resource_buffer_with_fence_value_luid_run_id(
+    struct wl_client *client,
+    struct wl_resource *resource,
+    uint32_t id,
+    int32_t resource_fd,
+    int32_t fence_fd,
+    uint32_t fence_value_low,
+    uint32_t fence_value_high,
+    uint32_t luid_a,
+    uint32_t luid_b,
+    int32_t width,
+    int32_t height,
+    uint32_t format,
+    uint32_t allocation_count,
+    uint32_t total_priv_size,
+    const char *client_run_id)
+{
+    uint64_t fence_value =
+        ((uint64_t)fence_value_high << 32) | fence_value_low;
+
+    xv6_gpu_create_d3d12_resource_buffer_common(
+        client, resource, id, resource_fd, fence_fd, luid_a, luid_b, 1,
+        fence_value, 1, width, height, format, allocation_count,
+        total_priv_size, client_run_id);
 }
 
 static const struct xv6_gpu_buffer_manager_impl xv6_gpu_buffer_manager_impl = {
@@ -4772,6 +5354,8 @@ static const struct xv6_gpu_buffer_manager_impl xv6_gpu_buffer_manager_impl = {
         xv6_gpu_create_d3d12_resource_buffer_with_fence_luid,
     .create_d3d12_resource_buffer_with_fence_value_luid =
         xv6_gpu_create_d3d12_resource_buffer_with_fence_value_luid,
+    .create_d3d12_resource_buffer_with_fence_value_luid_run_id =
+        xv6_gpu_create_d3d12_resource_buffer_with_fence_value_luid_run_id,
 };
 
 static void xv6_gpu_bind(struct wl_client *client, void *data,
@@ -4780,8 +5364,8 @@ static void xv6_gpu_bind(struct wl_client *client, void *data,
     struct wl_resource *res;
 
     (void)data;
-    if (version > 5)
-        version = 5;
+    if (version > 6)
+        version = 6;
     res = wl_resource_create(client, &xv6_gpu_buffer_manager_interface,
                              version, id);
     if (!res) {
