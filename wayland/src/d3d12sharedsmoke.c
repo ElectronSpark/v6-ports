@@ -6973,6 +6973,13 @@ int main(int argc, char **argv)
         runtime_opts.runtime_dxg_syncfile_acquire = 1;
         auto_runtime_dxg_syncfile_acquire = 1;
         printf("d3d12sharedsmoke: runtime-present acquire path auto-selected acquire_sync=dxg-syncfile-acquire reason=d3d12-fence-open-wsl-reproducible-failure d3d12_fence_open_required=0 fail_closed=1\n");
+        printf("d3d12sharedsmoke: d3d12_fence_sharing_policy_matrix "
+               "decision=dxg_syncfile_acquire direct_d3d12_open_required=0 "
+               "direct_d3d12_open_expected_fail=1 "
+               "dxg_syncfile_acquire_required=1 "
+               "same_adapter_wsl_trace=/tmp/xv6-wsl-probe/mesaglfeature-nvidia-live.trace "
+               "same_adapter_trace_required=1 "
+               "native_present_claim=0 opengl_submit_credit=0 status=PASS\n");
     }
 
     signal(SIGALRM, timeout_handler);
@@ -7237,6 +7244,13 @@ int main(int argc, char **argv)
             }
             printf("d3d12sharedsmoke: dxg-syncfile-acquire import validation ok acquire_sync=dxg-syncfile-acquire acquire_fd_kind=dxg-shared-sync-fd fd=%d target=1 kernel_dxg_sync_import=PASS d3d12_fence_fd_used=0\n",
                    fence_fd);
+            printf("d3d12sharedsmoke: d3d12_fence_sharing_validation_matrix "
+                   "decision=dxg_syncfile_acquire direct_d3d12_fence_fd_used=0 "
+                   "dxg_syncfile_export=PASS dxg_syncfile_import=PASS "
+                   "acquire_target=1 same_adapter_luid=PASS "
+                   "same_adapter_wsl_trace=/tmp/xv6-wsl-probe/mesaglfeature-nvidia-live.trace "
+                   "present_claim=requires-compositor-completion "
+                   "native_present_claim=0 opengl_submit_credit=0 status=PASS\n");
         }
     } else {
         if (open_first_dxg_device(&dxg_fd, &adapter, &device,
