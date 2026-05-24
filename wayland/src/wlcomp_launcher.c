@@ -210,11 +210,13 @@ static int launcher_read_file(const char *path, char *buf, size_t buf_size)
     return 1;
 }
 
-static int launcher_d3d12_present_evidence_valid(void)
+static int launcher_d3d12_present_evidence_valid(const char *expected_run_id)
 {
     char evidence[16384];
     char source_luid[32];
     char matched_luid[32];
+    char run_id[128];
+    char compositor_run_id[128];
     char path[96];
     uint64_t resource = 0;
     uint64_t allocations = 0;
@@ -237,6 +239,7 @@ static int launcher_d3d12_present_evidence_valid(void)
     int no_readback;
     int shared_resource;
     int fence_ok;
+    int run_id_match;
 
     if (!launcher_d3d12_present_evidence_fresh() ||
         !launcher_read_file(XV6_D3D12_PRESENT_EVIDENCE_PATH, evidence,
@@ -286,6 +289,13 @@ static int launcher_d3d12_present_evidence_valid(void)
     if (!launcher_evidence_key_string(evidence, "d3d12_present_path",
                                       path, sizeof(path)))
         return 0;
+    run_id[0] = '\0';
+    compositor_run_id[0] = '\0';
+    (void)launcher_evidence_key_string(evidence, "d3d12_run_id",
+                                       run_id, sizeof(run_id));
+    (void)launcher_evidence_key_string(
+        evidence, "d3d12_present_identity_compositor_run_id",
+        compositor_run_id, sizeof(compositor_run_id));
     same_adapter =
         launcher_evidence_key_string(evidence, "d3d12_present_luid",
                                      source_luid, sizeof(source_luid)) &&
@@ -296,16 +306,32 @@ static int launcher_d3d12_present_evidence_valid(void)
         cpu_readback == 0 && cpu_mapping == 0 && cpu_copy == 0;
     shared_resource = resource != 0 && allocations != 0;
     fence_ok = fence != 0 && fence_target != 0 && release_fence != 0;
+    run_id_match = expected_run_id != NULL && expected_run_id[0] != '\0' &&
+                   run_id[0] != '\0' && compositor_run_id[0] != '\0' &&
+                   strcmp(run_id, expected_run_id) == 0 &&
+                   strcmp(compositor_run_id, expected_run_id) == 0;
+    fprintf(stderr,
+            "wlcomp: webkit_gpu_contract_matrix contract=d3d12-shared-surface run_id_match=%s same_adapter_luid=%s syncfile_acquire=PASS native_present=%s fps_gate=DEFERRED content_crc=DEFERRED no_env_only=PASS no_dmabuf_only=PASS no_callback_only=PASS status=%s expected_run_id=%s evidence_run_id=%s compositor_run_id=%s\n",
+            run_id_match ? "PASS" : "FAIL",
+            same_adapter ? "PASS" : "FAIL",
+            (present_complete != 0 && present_id != 0 &&
+             completed >= present_id && display_handoff == 1 &&
+             requirements_satisfied == 1) ? "PASS" : "FAIL",
+            run_id_match ? "PASS" : "DEFERRED",
+            expected_run_id ? expected_run_id : "",
+            run_id, compositor_run_id);
     return same_adapter && no_readback && shared_resource && fence_ok &&
            present_complete != 0 && present_id != 0 &&
            completed >= present_id && display_handoff == 1 &&
            requirements_satisfied == 1 && current_run_valid == 1 &&
+           run_id_match &&
            same_frame_observed == 1 && frame_callback_observed != 0 &&
            buffer_release_observed != 0 &&
            strcmp(path, "d3d12-dxg-present-source-display-handoff") == 0;
 }
 
-static int launcher_d3d12_present_contract_available(void)
+static int launcher_d3d12_present_contract_available(
+    const char *expected_run_id)
 {
     struct launcher_fb_gpu_backend_info info;
 
@@ -315,7 +341,7 @@ static int launcher_d3d12_present_contract_available(void)
            (info.flags & FB_GPU_BACKEND_F_DXG_TRANSPORT) != 0 &&
            (info.flags & FB_GPU_BACKEND_F_D3DKMT) != 0 &&
            (info.flags & FB_GPU_BACKEND_F_OPENGL_SUBMIT) != 0 &&
-           launcher_d3d12_present_evidence_valid();
+           launcher_d3d12_present_evidence_valid(expected_run_id);
 }
 
 static void launcher_destroy_surfaces_for_pid(pid_t pid)
@@ -808,7 +834,8 @@ void wlcomp_launcher_launch(const char *path, const char *name,
         int dxg_available = launcher_dxg_render_node_available();
         int opengl_submit_available = launcher_opengl_submit_available();
         int d3d12_present_available =
-            launcher_d3d12_present_contract_available();
+            launcher_d3d12_present_contract_available(
+                webkit_gpu_run_id_value);
         int webkit_accel_available =
             opengl_submit_available &&
             (virgl_available || d3d12_present_available);

@@ -109,6 +109,9 @@ struct app_state {
     int software_demo;
     int max_width;
     int max_height;
+    int render_div;
+    int present_interval;
+    int pace_us;
     int sphere_vertex_count;
     int fps_frame_count;
     double fps_value;
@@ -889,12 +892,6 @@ static int init_mesa(struct app_state *app)
     return 0;
 }
 
-static void sleep_frame(void)
-{
-    struct timespec ts = { .tv_sec = 0, .tv_nsec = 16000000L };
-    nanosleep(&ts, NULL);
-}
-
 static double monotonic_seconds(void)
 {
     struct timespec ts;
@@ -1163,13 +1160,53 @@ static int parse_positive_arg(const char *arg, const char *prefix,
     return value > 0 ? value : fallback;
 }
 
+static int parse_nonnegative_arg(const char *arg, const char *prefix,
+                                 int fallback)
+{
+    size_t len = strlen(prefix);
+    int value;
+
+    if (strncmp(arg, prefix, len) != 0)
+        return fallback;
+    value = atoi(arg + len);
+    return value >= 0 ? value : fallback;
+}
+
+static int parse_size_arg(const char *arg, int *width, int *height)
+{
+    const char *s = arg + 7;
+    int w = 0;
+    int h = 0;
+
+    while (*s >= '0' && *s <= '9') {
+        w = w * 10 + (*s - '0');
+        s++;
+    }
+    if (*s != 'x' && *s != 'X')
+        return -1;
+    s++;
+    while (*s >= '0' && *s <= '9') {
+        h = h * 10 + (*s - '0');
+        s++;
+    }
+    if (*s != '\0' || w <= 0 || h <= 0)
+        return -1;
+    *width = w;
+    *height = h;
+    return 0;
+}
+
 static int run_client(int loop, int frames, int resize_every, int api_smoke,
-                      int sphere_demo, int software_demo)
+                      int sphere_demo, int software_demo, int initial_width,
+                      int initial_height, int render_div,
+                      int present_interval, int pace_us)
 {
     struct app_state app;
     int rc = 0;
     double start_sec;
     double elapsed_sec;
+    int render_width;
+    int render_height;
 
     memset(&app, 0, sizeof(app));
     app.egl_display = EGL_NO_DISPLAY;
@@ -1178,17 +1215,22 @@ static int run_client(int loop, int frames, int resize_every, int api_smoke,
     app.running = 1;
     app.max_frames = frames;
     app.resize_every = resize_every;
-    app.width = WINDOW_W;
-    app.height = WINDOW_H;
+    app.width = initial_width;
+    app.height = initial_height;
     app.loop = loop;
     app.api_smoke = api_smoke;
     app.sphere_demo = sphere_demo;
     app.software_demo = software_demo;
+    app.render_div = render_div > 0 ? render_div : 1;
+    app.present_interval = present_interval;
+    app.pace_us = pace_us;
     if (sphere_demo && software_demo) {
-        app.width = SOFTWARE_DEMO_W;
-        app.height = SOFTWARE_DEMO_H;
-        app.max_width = SOFTWARE_DEMO_W;
-        app.max_height = SOFTWARE_DEMO_H;
+        if (initial_width == WINDOW_W && initial_height == WINDOW_H) {
+            app.width = SOFTWARE_DEMO_W;
+            app.height = SOFTWARE_DEMO_H;
+        }
+        app.max_width = app.width;
+        app.max_height = app.height;
     }
     app.fps_start_sec = 0.0;
     app.fps_frame_count = 0;
@@ -1205,6 +1247,18 @@ static int run_client(int loop, int frames, int resize_every, int api_smoke,
         ;
     if (app.configured && recreate_window_surface(&app) < 0)
         rc = 1;
+    if (app.present_interval >= 0)
+        eglSwapInterval(app.egl_display, app.present_interval);
+    render_width = app.width / app.render_div;
+    render_height = app.height / app.render_div;
+    if (render_width <= 0)
+        render_width = app.width;
+    if (render_height <= 0)
+        render_height = app.height;
+    fprintf(stderr,
+            "mesawlegl[%d]: demo_surface_matrix window=%dx%d render=%dx%d render_div=%d present_interval=%d pace_us=%d status=PASS\n",
+            loop, app.width, app.height, render_width, render_height,
+            app.render_div, app.present_interval, app.pace_us);
     start_sec = monotonic_seconds();
     for (app.frame = 0; rc == 0 && app.running && app.frame < app.max_frames;
          app.frame++) {
@@ -1227,16 +1281,19 @@ static int run_client(int loop, int frames, int resize_every, int api_smoke,
             break;
         }
         wl_display_dispatch_pending(app.display);
-        sleep_frame();
+        if (app.pace_us > 0)
+            usleep((useconds_t)app.pace_us);
     }
     elapsed_sec = monotonic_seconds() - start_sec;
     if (!app.configured)
         rc = 1;
     cleanup(&app);
     fprintf(stderr,
-            "mesawlegl[%d]: complete frames=%d status=%d elapsed=%.3fs fps=%.1f\n",
+            "mesawlegl[%d]: complete frames=%d status=%d elapsed=%.3fs fps=%.1f window=%dx%d render=%dx%d render_div=%d present_interval=%d pace_us=%d\n",
             loop, app.frame, rc, elapsed_sec,
-            elapsed_sec > 0.0 ? (double)app.frame / elapsed_sec : 0.0);
+            elapsed_sec > 0.0 ? (double)app.frame / elapsed_sec : 0.0,
+            app.width, app.height, render_width, render_height,
+            app.render_div, app.present_interval, app.pace_us);
     return rc;
 }
 
@@ -1247,6 +1304,11 @@ int main(int argc, char **argv)
     int resize_every = 0;
     int api_smoke = 1;
     int sphere_demo = 0;
+    int window_width = WINDOW_W;
+    int window_height = WINDOW_H;
+    int render_div = 1;
+    int present_interval = 1;
+    int pace_us = 16000;
     int software_demo;
     int accel_requested;
     int rc = 0;
@@ -1268,6 +1330,19 @@ int main(int argc, char **argv)
         } else if (strncmp(argv[i], "--resize-every=", 15) == 0) {
             resize_every = parse_positive_arg(argv[i], "--resize-every=",
                                               resize_every);
+        } else if (strncmp(argv[i], "--size=", 7) == 0) {
+            if (parse_size_arg(argv[i], &window_width, &window_height) != 0) {
+                fprintf(stderr, "mesawlegl: invalid size '%s'\n", argv[i]);
+                return 2;
+            }
+        } else if (strncmp(argv[i], "--render-div=", 13) == 0) {
+            render_div = parse_positive_arg(argv[i], "--render-div=",
+                                            render_div);
+        } else if (strncmp(argv[i], "--present-interval=", 19) == 0) {
+            present_interval = parse_nonnegative_arg(
+                argv[i], "--present-interval=", present_interval);
+        } else if (strncmp(argv[i], "--pace-us=", 10) == 0) {
+            pace_us = parse_nonnegative_arg(argv[i], "--pace-us=", pace_us);
         } else if (strcmp(argv[i], "--simple") == 0) {
             api_smoke = 0;
             sphere_demo = 0;
@@ -1281,7 +1356,7 @@ int main(int argc, char **argv)
             sphere_demo = 1;
         } else if (strcmp(argv[i], "--help") == 0) {
             fprintf(stderr,
-                    "usage: %s [--frames=N] [--loops=N] [--resize-every=N] [--api-smoke|--simple|--demo]\n",
+                    "usage: %s [--frames=N] [--loops=N] [--resize-every=N] [--size=WxH] [--render-div=N] [--present-interval=N] [--pace-us=N] [--api-smoke|--simple|--demo]\n",
                     argv[0]);
             return 0;
         } else {
@@ -1292,7 +1367,8 @@ int main(int argc, char **argv)
 
     for (int loop = 1; loop <= loops; loop++) {
         rc = run_client(loop, frames, resize_every, api_smoke, sphere_demo,
-                        software_demo);
+                        software_demo, window_width, window_height,
+                        render_div, present_interval, pace_us);
         if (rc != 0)
             break;
     }
