@@ -347,6 +347,8 @@ static int validate_gpu_contract(void)
     char source_luid[32] = { 0 };
     char matched_luid[32] = { 0 };
     char evidence_run_id[64] = { 0 };
+    char evidence_content_progress_state[96] = { 0 };
+    char evidence_visible_content_progress[96] = { 0 };
     uint64_t evidence_resource = 0;
     uint64_t evidence_allocations = 0;
     uint64_t evidence_resource_import_successes = 0;
@@ -388,6 +390,10 @@ static int validate_gpu_contract(void)
     uint64_t evidence_frame_callback_completion_id = 0;
     uint64_t evidence_content_crc = 0;
     uint64_t evidence_content_frame = 0;
+    uint64_t evidence_content_frame_hash = 0;
+    uint64_t evidence_content_native_complete = 0;
+    uint64_t evidence_content_visible_credit = 0;
+    uint64_t evidence_content_native_credit = 0;
     uint64_t evidence_cpu_readback = 1;
     uint64_t evidence_cpu_mapping = 1;
     uint64_t evidence_cpu_copy = 1;
@@ -628,6 +634,25 @@ static int validate_gpu_contract(void)
                                    &evidence_content_frame);
         evidence_key_u64_alias_max(evidence, "d3d12_visible_content_frames",
                                    &evidence_content_frame);
+        evidence_key_u64_alias_max(evidence, "d3d12_present_frame_hash",
+                                   &evidence_content_frame_hash);
+        evidence_key_u64_alias_max(evidence, "d3d12_visible_frame_hash",
+                                   &evidence_content_frame_hash);
+        (void)evidence_key_string(evidence, "d3d12_content_progress_state",
+                                  evidence_content_progress_state,
+                                  sizeof(evidence_content_progress_state));
+        (void)evidence_key_string(evidence, "d3d12_visible_content_progress",
+                                  evidence_visible_content_progress,
+                                  sizeof(evidence_visible_content_progress));
+        (void)evidence_key_u64(
+            evidence, "d3d12_content_progress_native_present_complete",
+            &evidence_content_native_complete);
+        (void)evidence_key_u64(
+            evidence, "d3d12_content_progress_visible_credit",
+            &evidence_content_visible_credit);
+        (void)evidence_key_u64(
+            evidence, "d3d12_content_progress_native_present_credit",
+            &evidence_content_native_credit);
         (void)evidence_key_u64(evidence, "d3d12_cpu_readback",
                                &evidence_cpu_readback);
         (void)evidence_key_u64(evidence, "d3d12_cpu_mapping",
@@ -853,7 +878,15 @@ static int validate_gpu_contract(void)
         evidence_native_present_completion_id != 0;
     evidence_content_progress =
         evidence_content_crc != 0 &&
-        evidence_content_frame != 0;
+        evidence_content_frame != 0 &&
+        evidence_content_frame_hash != 0 &&
+        strcmp(evidence_content_progress_state,
+               "NATIVE_PRESENT_COMPLETE") == 0 &&
+        strcmp(evidence_visible_content_progress,
+               "NATIVE_PRESENT_COMPLETE") == 0 &&
+        evidence_content_native_complete == 1 &&
+        evidence_content_visible_credit == 1 &&
+        evidence_content_native_credit == 1;
     evidence_ok =
         evidence_terminal_success && !evidence_fail_closed_rejected &&
         !evidence_soft_claim_rejected &&
@@ -963,7 +996,13 @@ static int validate_gpu_contract(void)
             "d3d12_buffer_release_completion_id=%lu "
             "d3d12_callback_release_ok=%d "
             "d3d12_content_progress=%d d3d12_content_crc=%lu "
-            "d3d12_content_frame=%lu d3d12_no_cpu_map=%lu "
+            "d3d12_content_frame=%lu d3d12_content_frame_hash=%lu "
+            "d3d12_content_progress_state=%s "
+            "d3d12_visible_content_progress=%s "
+            "d3d12_content_native_complete=%lu "
+            "d3d12_content_visible_credit=%lu "
+            "d3d12_content_native_credit=%lu "
+            "d3d12_no_cpu_map=%lu "
             "d3d12_final_no_cpu_map=%lu d3d12_fb_blit_used=%lu "
             "d3d12_cpu_map_used=%lu d3d12_cpu_readback_used=%lu "
             "d3d12_cpu_copy_used=%lu d3d12_software_dri_used=%lu "
@@ -1040,6 +1079,14 @@ static int validate_gpu_contract(void)
             evidence_content_progress,
             (unsigned long)evidence_content_crc,
             (unsigned long)evidence_content_frame,
+            (unsigned long)evidence_content_frame_hash,
+            evidence_content_progress_state[0] ?
+                evidence_content_progress_state : "MISSING",
+            evidence_visible_content_progress[0] ?
+                evidence_visible_content_progress : "MISSING",
+            (unsigned long)evidence_content_native_complete,
+            (unsigned long)evidence_content_visible_credit,
+            (unsigned long)evidence_content_native_credit,
             (unsigned long)evidence_no_cpu_map_no_readback,
             (unsigned long)evidence_final_no_cpu_map_no_readback,
             (unsigned long)evidence_fb_blit_used,
