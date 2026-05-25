@@ -394,6 +394,7 @@ static int launcher_d3d12_present_evidence_valid(
     uint64_t content_native_complete = 0;
     uint64_t content_visible_credit = 0;
     uint64_t content_native_credit = 0;
+    uint64_t content_source_owned = 0;
     uint64_t content_present_id = 0;
     uint64_t content_completed = 0;
     uint64_t cpu_readback = 1;
@@ -558,31 +559,8 @@ static int launcher_d3d12_present_evidence_valid(
                                         "d3d12_frame_callback_completion_id",
                                         &frame_callback_completion_id);
         launcher_evidence_key_u64_alias_max(evidence,
-                                            "d3d12_present_content_crc",
-                                            &content_crc);
-        launcher_evidence_key_u64_alias_max(evidence,
-                                            "d3d12_present_region_crc",
-                                            &content_crc);
-        launcher_evidence_key_u64_alias_max(evidence,
-                                            "d3d12_client_content_crc",
-                                            &content_crc);
-        launcher_evidence_key_u64_alias_max(evidence,
                                             "d3d12_visible_content_crc",
                                             &content_crc);
-        launcher_evidence_key_u64_alias_max(evidence, "d3d12_present_crc",
-                                            &content_crc);
-        launcher_evidence_key_u64_alias_max(evidence,
-                                            "d3d12_present_content_frame",
-                                            &content_frame);
-        launcher_evidence_key_u64_alias_max(evidence,
-                                            "d3d12_present_content_frames",
-                                            &content_frame);
-        launcher_evidence_key_u64_alias_max(evidence,
-                                            "d3d12_present_content_change",
-                                            &content_frame);
-        launcher_evidence_key_u64_alias_max(evidence,
-                                            "d3d12_present_content_changes",
-                                            &content_frame);
         launcher_evidence_key_u64_alias_max(evidence,
                                             "d3d12_visible_content_frame",
                                             &content_frame);
@@ -590,13 +568,7 @@ static int launcher_d3d12_present_evidence_valid(
                                             "d3d12_visible_content_frames",
                                             &content_frame);
         launcher_evidence_key_u64_alias_max(evidence,
-                                            "d3d12_present_frame_hash",
-                                            &content_frame_hash);
-        launcher_evidence_key_u64_alias_max(evidence,
                                             "d3d12_visible_frame_hash",
-                                            &content_frame_hash);
-        launcher_evidence_key_u64_alias_max(evidence,
-                                            "d3d12_content_frame_hash",
                                             &content_frame_hash);
         launcher_evidence_key_u64_alias_max(evidence,
                                             "d3d12_visible_content_frame_hash",
@@ -627,6 +599,9 @@ static int launcher_d3d12_present_evidence_valid(
         (void)launcher_evidence_key_u64(evidence,
                                         "d3d12_content_progress_native_present_credit",
                                         &content_native_credit);
+        (void)launcher_evidence_key_u64(evidence,
+                                        "d3d12_content_progress_source_owned",
+                                        &content_source_owned);
         (void)launcher_evidence_key_u64(evidence,
                                         "d3d12_content_progress_present_id",
                                         &content_present_id);
@@ -716,7 +691,8 @@ static int launcher_d3d12_present_evidence_valid(
         content_requires_native == 1 && visible_requires_native == 1 &&
         visible_credit_before_native == 0 &&
         content_native_complete == 1 && content_visible_credit == 1 &&
-        content_native_credit == 1 && content_present_id == present_id &&
+        content_native_credit == 1 && content_source_owned == 1 &&
+        content_present_id == present_id &&
         content_completed >= content_present_id;
     gate_open =
         render_node && dxg_transport && d3dkmt && opengl_submit &&

@@ -194,6 +194,8 @@ int gbm_device_is_format_supported(struct gbm_device *gbm, uint32_t format,
     if (usage & ~(GBM_BO_USE_SCANOUT | GBM_BO_USE_RENDERING |
                   GBM_BO_USE_WRITE | GBM_BO_USE_LINEAR))
         return 0;
+    if ((usage & GBM_BO_USE_SCANOUT) && format == GBM_FORMAT_NV12)
+        return 0;
     return 1;
 }
 
