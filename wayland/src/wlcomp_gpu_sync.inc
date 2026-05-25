@@ -3833,6 +3833,22 @@ static void xv6_d3d12_write_fail_closed_display_handoff_evidence(
             source_record ? source_record->commit_errno : 0,
             (unsigned long)(source_record ? source_record->present_id : 0),
             (unsigned long)(source_record ? source_record->completed : 0));
+    fprintf(stderr,
+            "wlcomp: d3d12_wayland_present_failclosed_identity_matrix "
+            "run_id=%s client_pid=%d client_buffer_id=%u "
+            "manager_resource_id=%u buffer_generation=%lu "
+            "present_source_registered=%d commit_attempted=%d "
+            "commit_success=0 present_id=%lu completed=%lu "
+            "callbacks_blocked=1 releases_blocked=1 native_present_claim=0 "
+            "opengl_submit_credit=0 status=PASS\n",
+            xv6_d3d12_present_run_id(), (int)buf->d3d12_client_pid,
+            buf->d3d12_client_buffer_id,
+            buf->d3d12_manager_resource_id,
+            (unsigned long)buf->d3d12_buffer_generation,
+            source_record && source_record->register_successes,
+            source_record && source_record->commit_attempts,
+            (unsigned long)(source_record ? source_record->present_id : 0),
+            (unsigned long)(source_record ? source_record->completed : 0));
     xv6_d3d12_unblock_failclosed_client(buf, "display-handoff-missing");
 }
 
@@ -5208,6 +5224,24 @@ static void xv6_gpu_create_d3d12_resource_buffer_common(
             (unsigned long)buf->d3d12_fence_gpu_va,
             (unsigned long)g_d3d12_native_import_attempt_count,
             (unsigned long)g_d3d12_native_import_complete_count);
+    fprintf(stderr,
+            "wlcomp: d3d12_wayland_resource_buffer_admission_matrix "
+            "run_id=%s client_pid=%d client_buffer_id=%u "
+            "manager_resource_id=%u buffer_generation=%lu "
+            "same_adapter_luid=%d resource_fd=%d fence_fd=%d "
+            "resource_query=1 resource_open=1 fence_open=%d "
+            "protocol_accepted=1 present_admission=failclosed "
+            "native_present_claim=0 opengl_submit_credit=0 status=PASS\n",
+            xv6_d3d12_present_run_id(), client_pid,
+            buf->d3d12_client_buffer_id,
+            buf->d3d12_manager_resource_id,
+            (unsigned long)buf->d3d12_buffer_generation,
+            buf->d3d12_source_luid_valid &&
+                buf->d3d12_source_luid_a == buf->d3d12_matched_luid_a &&
+                buf->d3d12_source_luid_b == buf->d3d12_matched_luid_b,
+            buf->d3d12_resource_fd >= 0,
+            buf->d3d12_fence_fd >= 0,
+            buf->d3d12_opened_fence != 0);
     xv6_d3d12_write_stage_evidence("protocol_accepted", 0);
     if (buf->d3d12_fence_value_valid) {
         fprintf(stderr,
