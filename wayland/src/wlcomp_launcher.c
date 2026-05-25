@@ -387,6 +387,7 @@ static int launcher_d3d12_present_evidence_valid(
     uint64_t frame_callback_completion_id = 0;
     uint64_t content_crc = 0;
     uint64_t content_frame = 0;
+    uint64_t content_frame_hash = 0;
     uint64_t content_requires_native = 0;
     uint64_t visible_requires_native = 0;
     uint64_t visible_credit_before_native = 1;
@@ -588,6 +589,18 @@ static int launcher_d3d12_present_evidence_valid(
         launcher_evidence_key_u64_alias_max(evidence,
                                             "d3d12_visible_content_frames",
                                             &content_frame);
+        launcher_evidence_key_u64_alias_max(evidence,
+                                            "d3d12_present_frame_hash",
+                                            &content_frame_hash);
+        launcher_evidence_key_u64_alias_max(evidence,
+                                            "d3d12_visible_frame_hash",
+                                            &content_frame_hash);
+        launcher_evidence_key_u64_alias_max(evidence,
+                                            "d3d12_content_frame_hash",
+                                            &content_frame_hash);
+        launcher_evidence_key_u64_alias_max(evidence,
+                                            "d3d12_visible_content_frame_hash",
+                                            &content_frame_hash);
         (void)launcher_evidence_key_string(evidence,
                                            "d3d12_content_progress_state",
                                            content_progress_state,
@@ -697,6 +710,7 @@ static int launcher_d3d12_present_evidence_valid(
         frame_callback_completion_id == native_present_completion_id;
     content_progress_ok =
         content_crc != 0 && content_frame != 0 &&
+        content_frame_hash != 0 &&
         strcmp(content_progress_state, "NATIVE_PRESENT_COMPLETE") == 0 &&
         strcmp(visible_content_progress, "NATIVE_PRESENT_COMPLETE") == 0 &&
         content_requires_native == 1 && visible_requires_native == 1 &&
@@ -717,6 +731,7 @@ static int launcher_d3d12_present_evidence_valid(
             "syncfile_acquire=%s native_present=%s "
             "content_progress=%s content_progress_state=%s "
             "visible_content_progress=%s content_crc=%s content_frame=%s "
+            "content_frame_hash=%s "
             "display_bind_backend=%s display_bind_transport=%s "
             "display_bind_present_id=%lu display_bind_completed_id=%lu "
             "display_bind_resource_generation=%lu "
@@ -740,6 +755,7 @@ static int launcher_d3d12_present_evidence_valid(
             visible_content_progress[0] ? visible_content_progress : "MISSING",
             content_crc != 0 ? "PASS" : "MISSING",
             content_frame != 0 ? "PASS" : "MISSING",
+            content_frame_hash != 0 ? "PASS" : "MISSING",
             native_present.display_bind_backend[0] ?
                 native_present.display_bind_backend : "MISSING",
             native_present.display_bind_transport[0] ?
