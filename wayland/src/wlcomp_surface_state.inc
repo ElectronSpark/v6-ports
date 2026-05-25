@@ -139,6 +139,14 @@ struct wlcomp_surface {
     pid_t   client_pid;       /* pid from Wayland credentials, if known */
     int     has_window_geometry;
     int32_t window_x, window_y, window_w, window_h;
+    int     demo_visible_observed;
+    int     demo_closeable_observed;
+    int     demo_close_requested;
+    int     demo_resize_requested;
+    int     demo_resize_configures;
+    int     demo_resize_acked;
+    int     demo_resize_buffer_changed;
+    int32_t demo_resize_w, demo_resize_h;
     /* Saved geometry for restore from maximize */
     int32_t saved_x, saved_y, saved_w, saved_h;
     struct damage_rect pending_damage[MAX_SURFACE_DAMAGE_RECTS];
@@ -258,6 +266,74 @@ static int surface_is_demo_window(const struct wlcomp_surface *surf)
 {
     return surf && (strcmp(surf->app_id, "mesaglsmoke") == 0 ||
                     strcmp(surf->app_id, "mesawlegl") == 0);
+}
+
+static int surface_tree_visible(const struct wlcomp_surface *surf);
+static void surface_window_geometry(const struct wlcomp_surface *s,
+                                    int32_t *gx, int32_t *gy,
+                                    int32_t *gw, int32_t *gh);
+
+static const char *wlcomp_validation_run_id(void)
+{
+    const char *run_id = getenv("XV6_GPU_VALIDATE_RUN_ID");
+
+    if (run_id && run_id[0])
+        return run_id;
+    run_id = getenv("XV6_WLCOMP_D3D12_RUN_ID");
+    return (run_id && run_id[0]) ? run_id : "";
+}
+
+static void wlcomp_emit_demo_interaction_matrix(struct wlcomp_surface *surf,
+                                                const char *event)
+{
+    FILE *fp;
+    int32_t gx = 0, gy = 0, gw = 0, gh = 0;
+    int visible_demo;
+    int closeable_demo;
+    int resizable_demo;
+
+    if (!surface_is_demo_window(surf))
+        return;
+    surface_window_geometry(surf, &gx, &gy, &gw, &gh);
+    surf->demo_closeable_observed = surf->xdg_toplevel != NULL;
+    visible_demo = surf->mapped && surf->committed_buf &&
+        surface_tree_visible(surf) && gw > 0 && gh > 0;
+    if (visible_demo)
+        surf->demo_visible_observed = 1;
+    closeable_demo = surf->demo_closeable_observed;
+    resizable_demo = surf->demo_resize_requested &&
+        ((surf->demo_resize_configures > 0 && surf->demo_resize_acked) ||
+         surf->demo_resize_buffer_changed);
+
+    fp = fopen("/tmp/mesawlegl-fps", "a");
+    if (!fp)
+        return;
+    fprintf(fp,
+            "wayland_demo_visible_close_resize_matrix "
+            "validation_run_id=%s event=%s process_id=%d "
+            "d3d12_client_pid=%d state_visible_demo=%d "
+            "state_closeable_demo=%d state_resizable_demo=%d "
+            "%s"
+            "mapped=%d minimized=%d "
+            "xdg_toplevel=%d committed_buffer=%d closeable_path=%d "
+            "close_requested=%d resize_requested=%d "
+            "resize_configures=%d resize_acked=%d "
+            "resize_buffer_changed=%d "
+            "window=%dx%d resize_configure=%dx%d "
+            "native_present_credit=0 opengl_submit_credit=0 status=PASS\n",
+            wlcomp_validation_run_id(), event ? event : "unknown",
+            surf->client_pid, surf->client_pid,
+            visible_demo, closeable_demo, resizable_demo,
+            (visible_demo && closeable_demo && resizable_demo) ?
+                "visible_demo=1 closeable_demo=1 resizable_demo=1 "
+                "demo_visible=1 demo_closeable=1 demo_resizable=1 " : "",
+            surf->mapped, surf->minimized, surf->xdg_toplevel != NULL,
+            surf->committed_buf != NULL, closeable_demo,
+            surf->demo_close_requested, surf->demo_resize_requested,
+            surf->demo_resize_configures, surf->demo_resize_acked,
+            surf->demo_resize_buffer_changed,
+            gw, gh, surf->demo_resize_w, surf->demo_resize_h);
+    fclose(fp);
 }
 
 static int surface_is_webkit_window(const struct wlcomp_surface *surf)

@@ -99,6 +99,14 @@ static void process_mouse(void)
                 wl_array_release(&states);
                 xdg_surface_send_configure(g_grab_surface->xdg_surface,
                                            ++g_serial);
+                if (surface_is_demo_window(g_grab_surface)) {
+                    g_grab_surface->demo_resize_requested = 1;
+                    g_grab_surface->demo_resize_configures++;
+                    g_grab_surface->demo_resize_w = nw;
+                    g_grab_surface->demo_resize_h = nh;
+                    wlcomp_emit_demo_interaction_matrix(
+                        g_grab_surface, "resize-release-configure");
+                }
             }
             g_grab_surface = NULL;
             g_grab_mode = 0;
@@ -142,6 +150,14 @@ static void process_mouse(void)
                 wl_array_release(&states);
                 xdg_surface_send_configure(g_grab_surface->xdg_surface,
                                            ++g_serial);
+                if (surface_is_demo_window(g_grab_surface)) {
+                    g_grab_surface->demo_resize_requested = 1;
+                    g_grab_surface->demo_resize_configures++;
+                    g_grab_surface->demo_resize_w = nw;
+                    g_grab_surface->demo_resize_h = nh;
+                    wlcomp_emit_demo_interaction_matrix(
+                        g_grab_surface, "resize-drag-configure");
+                }
             }
             damage_surface(g_grab_surface);
         }
@@ -182,6 +198,10 @@ static void process_mouse(void)
                                  left_press_count >= 2);
             desktop_handled = 1;
         } else if (target && surface_close_hit(target, g_cursor_x, g_cursor_y)) {
+            if (surface_is_demo_window(target)) {
+                target->demo_close_requested = 1;
+                wlcomp_emit_demo_interaction_matrix(target, "close-request");
+            }
             destroy_surface_client(target);
             target = NULL;
             desktop_handled = 1;
@@ -194,6 +214,7 @@ static void process_mouse(void)
             surface_raise_to_top(target);
             surface_set_keyboard_focus(target);
             if (edges != 0) {
+                target->demo_resize_requested = 1;
                 g_grab_surface = target;
                 g_grab_mode = 2;
                 g_grab_edges = edges;
@@ -205,6 +226,7 @@ static void process_mouse(void)
                                  target->committed_buf->width : 200;
                 g_grab_start_h = target->committed_buf ?
                                  target->committed_buf->height : 200;
+                wlcomp_emit_demo_interaction_matrix(target, "resize-grab");
                 desktop_handled = 1;
             } else if (surface_demo_title_hit(target, g_cursor_x,
                                               g_cursor_y)) {
@@ -622,4 +644,3 @@ static int cmdline_int_value(const char *key, int fallback)
     }
     return fallback;
 }
-

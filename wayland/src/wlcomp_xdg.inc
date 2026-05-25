@@ -143,6 +143,10 @@ static void toplevel_resize(struct wl_client *c, struct wl_resource *r,
     surface_window_geometry(surf, &gx, &gy, &gw, &gh);
     (void)gx;
     (void)gy;
+    if (surface_is_demo_window(surf)) {
+        surf->demo_resize_requested = 1;
+        wlcomp_emit_demo_interaction_matrix(surf, "client-resize-request");
+    }
     damage_surface(surf);
     g_grab_surface = surf;
     g_grab_mode = 2; /* resize */
@@ -424,6 +428,11 @@ static void xdg_surface_ack_configure(struct wl_client *c,
     (void)c;
     fprintf(stderr, "wlcomp: xdg ack_configure pid=%d serial=%u\n",
             surf ? surf->client_pid : 0, serial);
+    if (surf && surface_is_demo_window(surf) &&
+        surf->demo_resize_configures > 0) {
+        surf->demo_resize_acked = 1;
+        wlcomp_emit_demo_interaction_matrix(surf, "resize-ack");
+    }
 }
 
 static const struct xdg_surface_interface xdg_surface_impl = {

@@ -1551,6 +1551,8 @@ static void append_demo_interaction_evidence(struct app_state *app,
                                              double elapsed_sec, int rc)
 {
     FILE *fp;
+    struct d3d12_present_evidence evidence;
+    const char *run_id;
     int render_width;
     int render_height;
     int visible_demo;
@@ -1568,23 +1570,43 @@ static void append_demo_interaction_evidence(struct app_state *app,
     visible_demo = rc == 0 && app->frame > 0 &&
         app->source_content_hash != 0 && app->source_content_frame != 0;
     closeable_demo = app->toplevel != NULL;
-    resizable_demo = app->resize_every <= 0 || app->resize_count > 0;
+    resizable_demo = app->resize_count > 0;
+    memset(&evidence, 0, sizeof(evidence));
+    (void)read_d3d12_present_evidence(&evidence);
+    run_id = validation_run_id();
 
     fp = fopen(FPS_EVIDENCE_PATH, "a");
     if (!fp)
         return;
     fprintf(fp,
             "mesawlegl_demo_interaction_matrix "
+            "validation_run_id=%s process_id=%d d3d12_client_pid=%d "
             "visible_demo=%d closeable_demo=%d resizable_demo=%d "
             "resize_count=%d close_requested=%d frames=%d rc=%d "
             "elapsed=%.3f window=%dx%d render=%dx%d render_div=%d "
+            "present_id=%lu completed=%lu "
+            "display_bind_present_id=%lu display_bind_completed_id=%lu "
+            "display_bind_resource_generation=%lu "
+            "display_bind_completion_source=%s "
+            "d3d12_demo_interaction_native_present_complete=%d "
+            "d3d12_demo_interaction_content_progress=%d "
             "client_content_hash=%lu client_content_frame=%lu "
             "content_region=client-content-no-title-fps "
             "native_present_credit=0 opengl_submit_credit=0 status=%s\n",
+            run_id, (int)getpid(), evidence.client_pid,
             visible_demo, closeable_demo, resizable_demo,
             app->resize_count, app->close_requested, app->frame, rc,
             elapsed_sec, app->width, app->height, render_width, render_height,
-            app->render_div, app->source_content_hash,
+            app->render_div,
+            evidence.present_id, evidence.completed,
+            evidence.display_bind_present_id,
+            evidence.display_bind_completed_id,
+            evidence.display_bind_resource_generation,
+            evidence.display_bind_completion_source[0] ?
+                evidence.display_bind_completion_source : "missing",
+            evidence.valid ? 1 : 0,
+            evidence.valid ? 1 : 0,
+            app->source_content_hash,
             app->source_content_frame,
             visible_demo && closeable_demo && resizable_demo ?
                 "PASS" : "FAIL");

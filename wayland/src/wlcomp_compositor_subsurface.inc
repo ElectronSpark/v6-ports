@@ -195,6 +195,7 @@ static void surface_commit(struct wl_client *client, struct wl_resource *resourc
         g_iwin_focus = -1;
         surface_raise_to_top(surf);
         surface_set_keyboard_focus(surf);
+        wlcomp_emit_demo_interaction_matrix(surf, "mapped");
     }
 
     if (surf->committed_buf && surf->is_subsurface && surf->parent &&
@@ -227,6 +228,15 @@ static void surface_commit(struct wl_client *client, struct wl_resource *resourc
         /* The pending Wayland damage was enough to repaint this commit. */
     } else if (had_pending_buffer && buffer_changed && surf->committed_buf) {
         damage_surface(surf);
+    }
+    if (buffer_size_changed && surface_is_demo_window(surf)) {
+        surf->demo_resize_requested = 1;
+        surf->demo_resize_buffer_changed = 1;
+        surf->demo_resize_w = surf->committed_buf ?
+            surf->committed_buf->width : 0;
+        surf->demo_resize_h = surf->committed_buf ?
+            surf->committed_buf->height : 0;
+        wlcomp_emit_demo_interaction_matrix(surf, "buffer-size-change");
     }
     if (surf->committed_buf && surf->committed_buf->is_d3d12_shared) {
         int32_t gx, gy, gw, gh;

@@ -4705,13 +4705,19 @@ static void xv6_d3d12_finish_present_after_display(struct wlcomp_buffer *buf)
             "display_bind_present_id=%lu display_bind_completed_id=%lu "
             "display_bind_resource_generation=%lu "
             "display_bind_completion_source=display completion_source=display "
-            "d3d12_content_progress_state=NATIVE_PRESENT_COMPLETE "
-            "d3d12_visible_content_progress=NATIVE_PRESENT_COMPLETE "
+            "d3d12_content_progress_state=DEFERRED "
+            "d3d12_visible_content_progress=DEFERRED "
+            "d3d12_present_content_crc=0 d3d12_visible_content_crc=0 "
+            "d3d12_present_content_frame=0 d3d12_visible_content_frame=0 "
+            "d3d12_present_frame_hash=0 d3d12_visible_frame_hash=0 "
+            "d3d12_content_progress_source_owned=0 "
+            "d3d12_content_progress_region=client-content-no-title-fps "
             "d3d12_content_progress_requires_native_present=1 "
             "d3d12_visible_content_requires_native_present_completion=1 "
             "d3d12_visible_content_credit_before_native_present=0 "
-            "visible_content_credit=1 native_present_credit=1 "
-            "native_present_claim=1 opengl_submit_credit=0 status=PASS\n",
+            "visible_content_credit=0 native_present_credit=0 "
+            "native_present_claim=1 opengl_submit_credit=0 "
+            "status=PASS_FAILCLOSED\n",
             (unsigned long)source_record->present_id,
             (unsigned long)source_record->completed,
             (unsigned long)source_record->present_id,
