@@ -41,6 +41,7 @@
 #define FB_GPU_BACKEND_F_RENDER_NODE 0x0001
 #define FB_GPU_BACKEND_F_DXG_TRANSPORT 0x0008
 #define FB_GPU_BACKEND_F_OPENGL_SUBMIT 0x0020
+#define D3D12_DISPLAY_BIND_FIELD_MAX 64
 #define DRM_IOCTL_VIRTGPU_GETPARAM 0xc0106443UL
 #define VIRTGPU_PARAM_3D_FEATURES  1
 #define NETCONF_HOSTNAME_MAX 32
@@ -80,6 +81,7 @@ struct webkit_gpu_contract_state {
     int validated_shared_surface;
     int d3d12_present;
     int d3d12_contract_evidence;
+    int d3d12_display_bind;
     int d3d12_same_adapter;
     int d3d12_no_readback;
     int d3d12_shared_resource;
@@ -88,7 +90,22 @@ struct webkit_gpu_contract_state {
     int d3d12_copy_export;
     int d3d12_readback;
     int virgl_contract;
+    uint64_t display_bind_present_id;
+    uint64_t display_bind_completed_id;
+    uint64_t display_bind_resource_generation;
+    char display_bind_backend[D3D12_DISPLAY_BIND_FIELD_MAX];
+    char display_bind_transport[D3D12_DISPLAY_BIND_FIELD_MAX];
+    char display_bind_completion_source[D3D12_DISPLAY_BIND_FIELD_MAX];
     const char *gpu_contract;
+};
+
+struct d3d12_native_present_evidence {
+    uint64_t display_bind_present_id;
+    uint64_t display_bind_completed_id;
+    uint64_t display_bind_resource_generation;
+    char display_bind_backend[D3D12_DISPLAY_BIND_FIELD_MAX];
+    char display_bind_transport[D3D12_DISPLAY_BIND_FIELD_MAX];
+    char display_bind_completion_source[D3D12_DISPLAY_BIND_FIELD_MAX];
 };
 
 struct netconf_req_compat {
@@ -254,11 +271,72 @@ static int evidence_key_string(const char *text, const char *key,
     if (!p)
         return 0;
     p += strlen(needle);
-    while (p[n] && p[n] != '\n' && p[n] != '\r' && n + 1 < out_size)
+    while (p[n] && p[n] != '\n' && p[n] != '\r' &&
+           p[n] != ' ' && p[n] != '\t' && n + 1 < out_size)
         n++;
     memcpy(out, p, n);
     out[n] = '\0';
     return n != 0;
+}
+
+static int evidence_string_matches_any(const char *value,
+                                       const char *a,
+                                       const char *b,
+                                       const char *c,
+                                       const char *d)
+{
+    return value && value[0] &&
+           ((a && strcmp(value, a) == 0) ||
+            (b && strcmp(value, b) == 0) ||
+            (c && strcmp(value, c) == 0) ||
+            (d && strcmp(value, d) == 0));
+}
+
+static int d3d12_native_present_evidence_read(
+    const char *text, struct d3d12_native_present_evidence *out)
+{
+    if (!text || !out)
+        return 0;
+    memset(out, 0, sizeof(*out));
+    return evidence_key_string(text, "display_bind_backend",
+                               out->display_bind_backend,
+                               sizeof(out->display_bind_backend)) &&
+           evidence_key_string(text, "display_bind_transport",
+                               out->display_bind_transport,
+                               sizeof(out->display_bind_transport)) &&
+           evidence_key_u64(text, "display_bind_present_id",
+                            &out->display_bind_present_id) &&
+           evidence_key_u64(text, "display_bind_completed_id",
+                            &out->display_bind_completed_id) &&
+           evidence_key_u64(text, "display_bind_resource_generation",
+                            &out->display_bind_resource_generation) &&
+           evidence_key_string(text, "display_bind_completion_source",
+                               out->display_bind_completion_source,
+                               sizeof(out->display_bind_completion_source));
+}
+
+static int d3d12_native_present_evidence_valid(
+    const struct d3d12_native_present_evidence *evidence)
+{
+    return evidence &&
+           evidence_string_matches_any(
+               evidence->display_bind_backend,
+               "dxg-resource-scanout-bind",
+               "gpu-p-dxg-resource-scanout-bind",
+               "hyperv-dxg",
+               NULL) &&
+           evidence_string_matches_any(
+               evidence->display_bind_transport,
+               "gpu-p-dxg-resource-scanout-bind",
+               "dxg-resource-scanout-bind", "vmbus", "hvsock") &&
+           evidence->display_bind_present_id != 0 &&
+           evidence->display_bind_completed_id >=
+               evidence->display_bind_present_id &&
+           evidence->display_bind_resource_generation != 0 &&
+           evidence_string_matches_any(
+               evidence->display_bind_completion_source,
+               "display", "host-display-channel",
+               "FB_GPU_DXG_PRESENT_COMPLETION_DISPLAY", "3");
 }
 
 static int evidence_string_is(const char *text, const char *key,
@@ -330,6 +408,7 @@ static void compute_webkit_gpu_contract(
     uint64_t handoff = 0;
     uint64_t native_requirements = 0;
     uint64_t identity_current = 0;
+    uint64_t buffer_generation = 0;
     uint64_t callback_release_same_frame = 0;
     uint64_t frame_callback = 0;
     uint64_t buffer_release = 0;
@@ -347,6 +426,7 @@ static void compute_webkit_gpu_contract(
     uint64_t framebuffer_blit_only = 1;
     uint64_t copy_export = 0;
     uint64_t copy_export_fallback = 0;
+    struct d3d12_native_present_evidence native_present;
     char *evidence;
     int virgl;
 
@@ -390,6 +470,8 @@ static void compute_webkit_gpu_contract(
         evidence_key_u64(evidence,
                          "d3d12_present_identity_current_run_valid",
                          &identity_current);
+        evidence_key_u64(evidence, "d3d12_buffer_generation",
+                         &buffer_generation);
         evidence_key_u64(evidence,
                          "d3d12_callback_release_same_frame_observed",
                          &callback_release_same_frame);
@@ -425,6 +507,28 @@ static void compute_webkit_gpu_contract(
         evidence_key_u64(evidence, "d3d12_copy_export", &copy_export);
         evidence_key_u64(evidence, "d3d12_copy_export_fallback",
                          &copy_export_fallback);
+        if (d3d12_native_present_evidence_read(evidence, &native_present)) {
+            memcpy(contract->display_bind_backend,
+                   native_present.display_bind_backend,
+                   sizeof(contract->display_bind_backend));
+            memcpy(contract->display_bind_transport,
+                   native_present.display_bind_transport,
+                   sizeof(contract->display_bind_transport));
+            memcpy(contract->display_bind_completion_source,
+                   native_present.display_bind_completion_source,
+                   sizeof(contract->display_bind_completion_source));
+            contract->display_bind_present_id =
+                native_present.display_bind_present_id;
+            contract->display_bind_completed_id =
+                native_present.display_bind_completed_id;
+            contract->display_bind_resource_generation =
+                native_present.display_bind_resource_generation;
+            contract->d3d12_display_bind =
+                d3d12_native_present_evidence_valid(&native_present) &&
+                (buffer_generation == 0 ||
+                 native_present.display_bind_resource_generation ==
+                     buffer_generation);
+        }
 
         contract->d3d12_same_adapter =
             evidence_key_string(evidence, "d3d12_present_luid",
@@ -450,8 +554,11 @@ static void compute_webkit_gpu_contract(
             evidence_string_is(
                 evidence, "d3d12_present_path",
                 "d3d12-dxg-present-source-display-handoff") &&
+            contract->d3d12_display_bind &&
             present_complete != 0 && present_id != 0 &&
             completed >= present_id && buffer_correlated == 1 &&
+            present_id == contract->display_bind_present_id &&
+            completed == contract->display_bind_completed_id &&
             handoff == 1 && native_requirements == 1 &&
             identity_current == 1 &&
             callback_release_same_frame == 1 &&
@@ -471,6 +578,7 @@ static void compute_webkit_gpu_contract(
         contract->d3d12_no_readback &&
         contract->d3d12_shared_resource &&
         contract->d3d12_fence &&
+        contract->d3d12_display_bind &&
         contract->d3d12_native_present_required &&
         !contract->d3d12_copy_export &&
         !contract->d3d12_readback;
@@ -2286,7 +2394,7 @@ static void write_webkit_gpu_policy_file(const char *name, int requested_accel,
                                              *contract)
 {
     const char *fallback = "none";
-    char buf[768];
+    char buf[1280];
     int fd;
     int n;
     int shared_surface = contract ? contract->shared_surface : 0;
@@ -2295,6 +2403,7 @@ static void write_webkit_gpu_policy_file(const char *name, int requested_accel,
     int d3d12_present = contract ? contract->d3d12_present : 0;
     int d3d12_contract_evidence =
         contract ? contract->d3d12_contract_evidence : 0;
+    int d3d12_display_bind = contract ? contract->d3d12_display_bind : 0;
     int d3d12_same_adapter = contract ? contract->d3d12_same_adapter : 0;
     int d3d12_no_readback = contract ? contract->d3d12_no_readback : 0;
     int d3d12_shared_resource =
@@ -2305,6 +2414,21 @@ static void write_webkit_gpu_policy_file(const char *name, int requested_accel,
     int d3d12_copy_export = contract ? contract->d3d12_copy_export : 0;
     int d3d12_readback = contract ? contract->d3d12_readback : 0;
     const char *gpu_contract = contract ? contract->gpu_contract : "none";
+    const char *display_bind_backend =
+        contract && contract->display_bind_backend[0] ?
+            contract->display_bind_backend : "none";
+    const char *display_bind_transport =
+        contract && contract->display_bind_transport[0] ?
+            contract->display_bind_transport : "none";
+    const char *display_bind_completion_source =
+        contract && contract->display_bind_completion_source[0] ?
+            contract->display_bind_completion_source : "none";
+    unsigned long display_bind_present_id =
+        contract ? (unsigned long)contract->display_bind_present_id : 0;
+    unsigned long display_bind_completed_id =
+        contract ? (unsigned long)contract->display_bind_completed_id : 0;
+    unsigned long display_bind_resource_generation =
+        contract ? (unsigned long)contract->display_bind_resource_generation : 0;
 
     if (requested_accel && !effective_accel && !dmabuf_requested)
         fallback = opengl_submit_available ?
@@ -2319,7 +2443,13 @@ static void write_webkit_gpu_policy_file(const char *name, int requested_accel,
                  "effective_accel=%d opengl_submit=%d dxg_transport=%d "
                  "render_node=%d dmabuf=%d shared_surface=%d "
                  "validated_shared_surface=%d d3d12_present=%d "
-                 "d3d12_contract_evidence=%d d3d12_same_adapter=%d "
+                 "d3d12_contract_evidence=%d d3d12_display_bind=%d "
+                 "display_bind_backend=%s display_bind_transport=%s "
+                 "display_bind_present_id=%lu "
+                 "display_bind_completed_id=%lu "
+                 "display_bind_resource_generation=%lu "
+                 "display_bind_completion_source=%s "
+                 "d3d12_same_adapter=%d "
                  "d3d12_no_readback=%d d3d12_shared_resource=%d "
                  "d3d12_fence=%d d3d12_native_present_required=%d "
                  "d3d12_copy_export=%d d3d12_readback=%d "
@@ -2328,7 +2458,11 @@ static void write_webkit_gpu_policy_file(const char *name, int requested_accel,
                  opengl_submit_available, dxg_transport_available,
                  render_node_available, dmabuf_requested, shared_surface,
                  validated_shared_surface, d3d12_present,
-                 d3d12_contract_evidence, d3d12_same_adapter,
+                 d3d12_contract_evidence, d3d12_display_bind,
+                 display_bind_backend, display_bind_transport,
+                 display_bind_present_id, display_bind_completed_id,
+                 display_bind_resource_generation,
+                 display_bind_completion_source, d3d12_same_adapter,
                  d3d12_no_readback, d3d12_shared_resource, d3d12_fence,
                  d3d12_native_present_required, d3d12_copy_export,
                  d3d12_readback, gpu_contract, fallback);

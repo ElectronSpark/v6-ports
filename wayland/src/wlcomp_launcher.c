@@ -32,6 +32,7 @@
 #define FB_GPU_BACKEND_F_DXG_TRANSPORT 0x0008
 #define FB_GPU_BACKEND_F_D3DKMT 0x0010
 #define FB_GPU_BACKEND_F_OPENGL_SUBMIT 0x0020
+#define D3D12_DISPLAY_BIND_FIELD_MAX 64
 static const char *webkit_feature_flags =
     "--features=+OffscreenCanvas,+OffscreenCanvasInWorkers,+requestIdleCallback";
 static const char *webkit_youtube_compat_user_agent =
@@ -86,6 +87,15 @@ struct launcher_fb_gpu_backend_info {
     uint32_t dxg_vgpu_rx;
     char name[32];
     char renderer[64];
+};
+
+struct launcher_d3d12_native_present_evidence {
+    uint64_t display_bind_present_id;
+    uint64_t display_bind_completed_id;
+    uint64_t display_bind_resource_generation;
+    char display_bind_backend[D3D12_DISPLAY_BIND_FIELD_MAX];
+    char display_bind_transport[D3D12_DISPLAY_BIND_FIELD_MAX];
+    char display_bind_completion_source[D3D12_DISPLAY_BIND_FIELD_MAX];
 };
 
 static int launcher_gpu_backend_query(struct launcher_fb_gpu_backend_info *info)
@@ -186,6 +196,67 @@ static void launcher_evidence_key_u64_alias_max(const char *text,
         return;
     if (launcher_evidence_key_u64(text, key, &value) && value > *out)
         *out = value;
+}
+
+static int launcher_evidence_string_matches_any(const char *value,
+                                                const char *a,
+                                                const char *b,
+                                                const char *c,
+                                                const char *d)
+{
+    return value && value[0] &&
+           ((a && strcmp(value, a) == 0) ||
+            (b && strcmp(value, b) == 0) ||
+            (c && strcmp(value, c) == 0) ||
+            (d && strcmp(value, d) == 0));
+}
+
+static int launcher_d3d12_native_present_evidence_read(
+    const char *text, struct launcher_d3d12_native_present_evidence *out)
+{
+    if (!text || !out)
+        return 0;
+    memset(out, 0, sizeof(*out));
+    return launcher_evidence_key_string(text, "display_bind_backend",
+                                        out->display_bind_backend,
+                                        sizeof(out->display_bind_backend)) &&
+           launcher_evidence_key_string(text, "display_bind_transport",
+                                        out->display_bind_transport,
+                                        sizeof(out->display_bind_transport)) &&
+           launcher_evidence_key_u64(text, "display_bind_present_id",
+                                     &out->display_bind_present_id) &&
+           launcher_evidence_key_u64(text, "display_bind_completed_id",
+                                     &out->display_bind_completed_id) &&
+           launcher_evidence_key_u64(text, "display_bind_resource_generation",
+                                     &out->display_bind_resource_generation) &&
+           launcher_evidence_key_string(
+               text, "display_bind_completion_source",
+               out->display_bind_completion_source,
+               sizeof(out->display_bind_completion_source));
+}
+
+static int launcher_d3d12_native_present_evidence_valid(
+    const struct launcher_d3d12_native_present_evidence *evidence)
+{
+    return evidence &&
+           launcher_evidence_string_matches_any(
+               evidence->display_bind_backend,
+               "dxg-resource-scanout-bind",
+               "gpu-p-dxg-resource-scanout-bind",
+               "hyperv-dxg",
+               NULL) &&
+           launcher_evidence_string_matches_any(
+               evidence->display_bind_transport,
+               "gpu-p-dxg-resource-scanout-bind",
+               "dxg-resource-scanout-bind", "vmbus", "hvsock") &&
+           evidence->display_bind_present_id != 0 &&
+           evidence->display_bind_completed_id >=
+               evidence->display_bind_present_id &&
+           evidence->display_bind_resource_generation != 0 &&
+           launcher_evidence_string_matches_any(
+               evidence->display_bind_completion_source,
+               "display", "host-display-channel",
+               "FB_GPU_DXG_PRESENT_COMPLETION_DISPLAY", "3");
 }
 
 static int launcher_d3d12_present_evidence_fresh(void)
@@ -291,6 +362,7 @@ static int launcher_d3d12_present_evidence_valid(
     uint64_t cpu_readback = 1;
     uint64_t cpu_mapping = 1;
     uint64_t cpu_copy = 1;
+    struct launcher_d3d12_native_present_evidence native_present;
     int evidence_loaded = 0;
     int render_node = 0;
     int dxg_transport = 0;
@@ -302,6 +374,7 @@ static int launcher_d3d12_present_evidence_valid(
     int fence_ok;
     int run_id_match;
     int client_identity_ok;
+    int native_present_skeleton_ok;
     int native_present_ok;
     int callback_release_ok;
     int content_progress_ok;
@@ -315,6 +388,7 @@ static int launcher_d3d12_present_evidence_valid(
     path[0] = '\0';
     content_progress_state[0] = '\0';
     visible_content_progress[0] = '\0';
+    memset(&native_present, 0, sizeof(native_present));
     if (info) {
         render_node = (info->flags & FB_GPU_BACKEND_F_RENDER_NODE) != 0;
         dxg_transport = (info->flags & FB_GPU_BACKEND_F_DXG_TRANSPORT) != 0;
@@ -530,6 +604,8 @@ static int launcher_d3d12_present_evidence_valid(
                                            "d3d12_present_matched_luid",
                                            matched_luid,
                                            sizeof(matched_luid));
+        (void)launcher_d3d12_native_present_evidence_read(
+            evidence, &native_present);
     }
     same_adapter =
         source_luid_valid == 1 && present_same_luid == 1 &&
@@ -554,6 +630,9 @@ static int launcher_d3d12_present_evidence_valid(
         identity_manager_resource_id == manager_resource_id &&
         buffer_generation != 0 &&
         identity_buffer_generation == buffer_generation;
+    native_present_skeleton_ok =
+        launcher_d3d12_native_present_evidence_valid(&native_present) &&
+        native_present.display_bind_resource_generation == buffer_generation;
     native_present_ok =
         evidence_loaded && present_rejected == 0 && evidence_generation != 0 &&
         evidence_time_us != 0 && present_complete != 0 && present_id != 0 &&
@@ -561,6 +640,9 @@ static int launcher_d3d12_present_evidence_valid(
         display_handoff == 1 && requirements_satisfied == 1 &&
         native_present_attempt_id != 0 &&
         native_present_completion_id != 0 &&
+        present_id == native_present.display_bind_present_id &&
+        completed == native_present.display_bind_completed_id &&
+        native_present_skeleton_ok &&
         strcmp(path, "d3d12-dxg-present-source-display-handoff") == 0;
     callback_release_ok =
         callback_release_required == 1 && same_frame_observed == 1 &&
@@ -599,6 +681,10 @@ static int launcher_d3d12_present_evidence_valid(
             "syncfile_acquire=%s native_present=%s "
             "content_progress=%s content_progress_state=%s "
             "visible_content_progress=%s content_crc=%s content_frame=%s "
+            "display_bind_backend=%s display_bind_transport=%s "
+            "display_bind_present_id=%lu display_bind_completed_id=%lu "
+            "display_bind_resource_generation=%lu "
+            "display_bind_completion_source=%s "
             "backend_opengl_submit=%d render_node=%d dxg_transport=%d "
             "d3dkmt=%d fps_gate=DEFERRED no_env_only=PASS "
             "title_only=REJECT chrome_only=REJECT cursor_only=REJECT "
@@ -618,6 +704,15 @@ static int launcher_d3d12_present_evidence_valid(
             visible_content_progress[0] ? visible_content_progress : "MISSING",
             content_crc != 0 ? "PASS" : "MISSING",
             content_frame != 0 ? "PASS" : "MISSING",
+            native_present.display_bind_backend[0] ?
+                native_present.display_bind_backend : "MISSING",
+            native_present.display_bind_transport[0] ?
+                native_present.display_bind_transport : "MISSING",
+            (unsigned long)native_present.display_bind_present_id,
+            (unsigned long)native_present.display_bind_completed_id,
+            (unsigned long)native_present.display_bind_resource_generation,
+            native_present.display_bind_completion_source[0] ?
+                native_present.display_bind_completion_source : "MISSING",
             opengl_submit, render_node, dxg_transport, d3dkmt,
             callback_release_ok ? "PASS" : "FAIL",
             callback_release_ok ? "PASS" : "FAIL",
