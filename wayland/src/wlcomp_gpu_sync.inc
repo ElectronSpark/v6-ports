@@ -1257,6 +1257,69 @@ static void xv6_d3d12_write_fps_provenance_evidence(
             display_handoff_implemented);
 }
 
+static void xv6_d3d12_write_content_progress_evidence(
+    FILE *fp,
+    const struct xv6_d3d12_present_contract *present,
+    const struct xv6_d3d12_present_result *result,
+    int rejected)
+{
+    int native_present_complete = !rejected && present && result &&
+        present->present_source_present_id != 0 &&
+        present->present_source_completed >=
+            present->present_source_present_id &&
+        present->native_present_completion_id != 0 &&
+        xv6_d3d12_display_target_is_runtime_resource(
+            present->display_target_kind);
+    const char *progress_state = native_present_complete ?
+        "NATIVE_PRESENT_COMPLETE" : "DEFERRED";
+    uint64_t present_id = present ? present->present_source_present_id : 0;
+    uint64_t completed = present ? present->present_source_completed : 0;
+
+    if (!fp)
+        return;
+    fprintf(fp,
+            "d3d12_wayland_content_progress_matrix "
+            "resource_buffer_admitted=%d gpu_copy_complete=%d "
+            "display_handoff_implemented=%d present_id=%lu "
+            "completed=%lu d3d12_content_progress_state=%s "
+            "d3d12_visible_content_progress=%s "
+            "d3d12_content_progress_requires_native_present=1 "
+            "d3d12_visible_content_requires_native_present_completion=1 "
+            "d3d12_visible_content_credit_before_native_present=0 "
+            "visible_content_credit=%d native_present_credit=%d "
+            "native_present_claim=%d opengl_submit_credit=0 status=%s\n",
+            present && present->resource != 0,
+            result && result->copy_sequence != 0,
+            native_present_complete,
+            (unsigned long)present_id,
+            (unsigned long)completed,
+            progress_state,
+            progress_state,
+            native_present_complete,
+            native_present_complete,
+            native_present_complete,
+            native_present_complete ? "PASS" : "PASS_FAILCLOSED");
+    fprintf(fp,
+            "d3d12_content_progress_state=%s\n"
+            "d3d12_visible_content_progress=%s\n"
+            "d3d12_content_progress_requires_native_present=1\n"
+            "d3d12_visible_content_requires_native_present_completion=1\n"
+            "d3d12_visible_content_credit_before_native_present=0\n"
+            "d3d12_content_progress_present_id=%lu\n"
+            "d3d12_content_progress_completed=%lu\n"
+            "d3d12_content_progress_native_present_complete=%d\n"
+            "d3d12_content_progress_visible_credit=%d\n"
+            "d3d12_content_progress_native_present_credit=%d\n"
+            "d3d12_content_progress_opengl_submit_credit=0\n",
+            progress_state,
+            progress_state,
+            (unsigned long)present_id,
+            (unsigned long)completed,
+            native_present_complete,
+            native_present_complete,
+            native_present_complete);
+}
+
 struct xv6_gpu_buffer_manager_impl {
     void (*create_buffer)(struct wl_client *client,
                           struct wl_resource *resource,
@@ -1983,6 +2046,7 @@ static void xv6_d3d12_write_stage_evidence(const char *stage, int err)
             (unsigned long)g_d3d12_frame_callback_present_id);
     xv6_d3d12_write_final_handoff_evidence(fp, NULL, NULL, 1);
     xv6_d3d12_write_fps_provenance_evidence(fp, NULL, NULL, 1);
+    xv6_d3d12_write_content_progress_evidence(fp, NULL, NULL, 1);
     xv6_d3d12_write_phase2_negative_evidence(fp);
     fclose(fp);
 }
@@ -3657,6 +3721,7 @@ static void xv6_d3d12_write_present_evidence(
                 0));
     xv6_d3d12_write_final_handoff_evidence(fp, present, result, rejected);
     xv6_d3d12_write_fps_provenance_evidence(fp, present, result, rejected);
+    xv6_d3d12_write_content_progress_evidence(fp, present, result, rejected);
     xv6_d3d12_write_phase2_negative_evidence(fp);
     fclose(fp);
 }
@@ -3979,6 +4044,20 @@ static void xv6_d3d12_write_fail_closed_display_handoff_evidence(
             "present_id=%lu completed=%lu callbacks_blocked=1 "
             "releases_blocked=1 fps_credit=0 native_present_claim=0 "
             "opengl_submit_credit=0 status=PASS_FAILCLOSED\n",
+            (unsigned long)(source_record ? source_record->present_id : 0),
+            (unsigned long)(source_record ? source_record->completed : 0));
+    fprintf(stderr,
+            "wlcomp: d3d12_wayland_content_progress_matrix "
+            "resource_buffer_admitted=1 gpu_copy_complete=1 "
+            "display_handoff_implemented=0 present_id=%lu completed=%lu "
+            "d3d12_content_progress_state=DEFERRED "
+            "d3d12_visible_content_progress=DEFERRED "
+            "d3d12_content_progress_requires_native_present=1 "
+            "d3d12_visible_content_requires_native_present_completion=1 "
+            "d3d12_visible_content_credit_before_native_present=0 "
+            "visible_content_credit=0 native_present_credit=0 "
+            "native_present_claim=0 opengl_submit_credit=0 "
+            "status=PASS_FAILCLOSED\n",
             (unsigned long)(source_record ? source_record->present_id : 0),
             (unsigned long)(source_record ? source_record->completed : 0));
     xv6_d3d12_unblock_failclosed_client(buf, "display-handoff-missing");
@@ -4486,6 +4565,19 @@ static void xv6_d3d12_finish_present_after_display(struct wlcomp_buffer *buf)
             "present_id=%lu completed=%lu callbacks_blocked=0 "
             "releases_blocked=0 fps_credit=1 native_present_claim=1 "
             "opengl_submit_credit=0 status=PASS\n",
+            (unsigned long)source_record->present_id,
+            (unsigned long)source_record->completed);
+    fprintf(stderr,
+            "wlcomp: d3d12_wayland_content_progress_matrix "
+            "resource_buffer_admitted=1 gpu_copy_complete=1 "
+            "display_handoff_implemented=1 present_id=%lu completed=%lu "
+            "d3d12_content_progress_state=NATIVE_PRESENT_COMPLETE "
+            "d3d12_visible_content_progress=NATIVE_PRESENT_COMPLETE "
+            "d3d12_content_progress_requires_native_present=1 "
+            "d3d12_visible_content_requires_native_present_completion=1 "
+            "d3d12_visible_content_credit_before_native_present=0 "
+            "visible_content_credit=1 native_present_credit=1 "
+            "native_present_claim=1 opengl_submit_credit=0 status=PASS\n",
             (unsigned long)source_record->present_id,
             (unsigned long)source_record->completed);
     return;
