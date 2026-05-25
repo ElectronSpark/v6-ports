@@ -817,6 +817,24 @@ static int xv6_d3d12_display_target_is_synthvid_sysmem(uint32_t kind)
         XV6_D3D12_DISPLAY_TARGET_SYNTHVID_VRAM_D3D12_EXISTING_SYSMEM;
 }
 
+static int xv6_d3d12_display_bind_complete(
+    const struct xv6_d3d12_present_contract *present)
+{
+    return present &&
+        present->present_source_present_id != 0 &&
+        present->present_source_completed >=
+            present->present_source_present_id &&
+        present->native_present_completion_id != 0 &&
+        xv6_d3d12_display_target_is_runtime_resource(
+            present->display_target_kind);
+}
+
+static const char *xv6_d3d12_display_bind_completion_source(
+    const struct xv6_d3d12_present_contract *present)
+{
+    return xv6_d3d12_display_bind_complete(present) ? "display" : "missing";
+}
+
 static uint64_t xv6_d3d12_counter_delta(uint64_t current, uint64_t baseline)
 {
     return current >= baseline ? current - baseline : 0;
@@ -1200,13 +1218,8 @@ static void xv6_d3d12_write_fps_provenance_evidence(
     const struct xv6_d3d12_present_result *result,
     int rejected)
 {
-    int display_handoff_implemented = !rejected && present && result &&
-        present->present_source_present_id != 0 &&
-        present->present_source_completed >=
-            present->present_source_present_id &&
-        present->native_present_completion_id != 0 &&
-        xv6_d3d12_display_target_is_runtime_resource(
-            present->display_target_kind);
+    int display_handoff_implemented =
+        !rejected && result && xv6_d3d12_display_bind_complete(present);
     int callbacks_blocked = !display_handoff_implemented;
     int releases_blocked = !display_handoff_implemented;
     int fps_credit = display_handoff_implemented;
@@ -1221,6 +1234,11 @@ static void xv6_d3d12_write_fps_provenance_evidence(
             "gpu_copy_complete=%d display_handoff_implemented=%d "
             "present_id=%lu completed=%lu callbacks_blocked=%d "
             "releases_blocked=%d fps_credit=%d native_present_claim=%d "
+            "display_bind_backend=gpup_dxg_scanout_bind "
+            "display_bind_transport=gpu-p-dxg-resource-scanout-bind "
+            "display_bind_present_id=%lu display_bind_completed_id=%lu "
+            "display_bind_resource_generation=%lu "
+            "display_bind_completion_source=%s completion_source=%s "
             "opengl_submit_credit=0 status=%s\n",
             present && present->resource != 0,
             present && present->fence != 0 ? "PASS" : "ABSENT",
@@ -1232,6 +1250,11 @@ static void xv6_d3d12_write_fps_provenance_evidence(
             releases_blocked,
             fps_credit,
             display_handoff_implemented,
+            (unsigned long)present_id,
+            (unsigned long)completed,
+            (unsigned long)(present ? present->buffer_generation : 0),
+            xv6_d3d12_display_bind_completion_source(present),
+            xv6_d3d12_display_bind_completion_source(present),
             display_handoff_implemented ? "PASS" : "PASS_FAILCLOSED");
     fprintf(fp,
             "d3d12_fps_provenance_resource_buffer_admitted=%d\n"
@@ -1240,6 +1263,13 @@ static void xv6_d3d12_write_fps_provenance_evidence(
             "d3d12_fps_provenance_display_handoff_implemented=%d\n"
             "d3d12_fps_provenance_present_id=%lu\n"
             "d3d12_fps_provenance_completed=%lu\n"
+            "display_bind_backend=gpup_dxg_scanout_bind\n"
+            "display_bind_transport=gpu-p-dxg-resource-scanout-bind\n"
+            "display_bind_present_id=%lu\n"
+            "display_bind_completed_id=%lu\n"
+            "display_bind_resource_generation=%lu\n"
+            "display_bind_completion_source=%s\n"
+            "completion_source=%s\n"
             "d3d12_fps_provenance_callbacks_blocked=%d\n"
             "d3d12_fps_provenance_releases_blocked=%d\n"
             "d3d12_fps_provenance_credit=%d\n"
@@ -1251,6 +1281,11 @@ static void xv6_d3d12_write_fps_provenance_evidence(
             display_handoff_implemented,
             (unsigned long)present_id,
             (unsigned long)completed,
+            (unsigned long)present_id,
+            (unsigned long)completed,
+            (unsigned long)(present ? present->buffer_generation : 0),
+            xv6_d3d12_display_bind_completion_source(present),
+            xv6_d3d12_display_bind_completion_source(present),
             callbacks_blocked,
             releases_blocked,
             fps_credit,
@@ -1263,13 +1298,8 @@ static void xv6_d3d12_write_content_progress_evidence(
     const struct xv6_d3d12_present_result *result,
     int rejected)
 {
-    int native_present_complete = !rejected && present && result &&
-        present->present_source_present_id != 0 &&
-        present->present_source_completed >=
-            present->present_source_present_id &&
-        present->native_present_completion_id != 0 &&
-        xv6_d3d12_display_target_is_runtime_resource(
-            present->display_target_kind);
+    int native_present_complete =
+        !rejected && result && xv6_d3d12_display_bind_complete(present);
     const char *progress_state = native_present_complete ?
         "NATIVE_PRESENT_COMPLETE" : "DEFERRED";
     uint64_t present_id = present ? present->present_source_present_id : 0;
@@ -1283,6 +1313,11 @@ static void xv6_d3d12_write_content_progress_evidence(
             "display_handoff_implemented=%d present_id=%lu "
             "completed=%lu d3d12_content_progress_state=%s "
             "d3d12_visible_content_progress=%s "
+            "display_bind_backend=gpup_dxg_scanout_bind "
+            "display_bind_transport=gpu-p-dxg-resource-scanout-bind "
+            "display_bind_present_id=%lu display_bind_completed_id=%lu "
+            "display_bind_resource_generation=%lu "
+            "display_bind_completion_source=%s completion_source=%s "
             "d3d12_content_progress_requires_native_present=1 "
             "d3d12_visible_content_requires_native_present_completion=1 "
             "d3d12_visible_content_credit_before_native_present=0 "
@@ -1295,6 +1330,11 @@ static void xv6_d3d12_write_content_progress_evidence(
             (unsigned long)completed,
             progress_state,
             progress_state,
+            (unsigned long)present_id,
+            (unsigned long)completed,
+            (unsigned long)(present ? present->buffer_generation : 0),
+            xv6_d3d12_display_bind_completion_source(present),
+            xv6_d3d12_display_bind_completion_source(present),
             native_present_complete,
             native_present_complete,
             native_present_complete,
@@ -1307,6 +1347,10 @@ static void xv6_d3d12_write_content_progress_evidence(
             "d3d12_visible_content_credit_before_native_present=0\n"
             "d3d12_content_progress_present_id=%lu\n"
             "d3d12_content_progress_completed=%lu\n"
+            "d3d12_content_progress_display_bind_present_id=%lu\n"
+            "d3d12_content_progress_display_bind_completed_id=%lu\n"
+            "d3d12_content_progress_display_bind_resource_generation=%lu\n"
+            "d3d12_content_progress_display_bind_completion_source=%s\n"
             "d3d12_content_progress_native_present_complete=%d\n"
             "d3d12_content_progress_visible_credit=%d\n"
             "d3d12_content_progress_native_present_credit=%d\n"
@@ -1315,6 +1359,10 @@ static void xv6_d3d12_write_content_progress_evidence(
             progress_state,
             (unsigned long)present_id,
             (unsigned long)completed,
+            (unsigned long)present_id,
+            (unsigned long)completed,
+            (unsigned long)(present ? present->buffer_generation : 0),
+            xv6_d3d12_display_bind_completion_source(present),
             native_present_complete,
             native_present_complete,
             native_present_complete);
@@ -1849,13 +1897,13 @@ static void xv6_d3d12_write_stage_evidence(const char *stage, int err)
             "d3d12_present_rejected=%d\n"
             "d3d12_native_present_unimplemented=1\n"
             "d3d12_present_path=import-observability\n"
-            "display_bind_backend=hyperv-dxg\n"
+            "display_bind_backend=gpup_dxg_scanout_bind\n"
             "display_bind_transport=gpu-p-dxg-resource-scanout-bind\n"
             "display_bind_present_id=0\n"
             "display_bind_completed_id=0\n"
             "display_bind_resource_generation=0\n"
-            "display_bind_completion_source=display\n"
-            "completion_source=display\n"
+            "display_bind_completion_source=missing\n"
+            "completion_source=missing\n"
             "d3d12_gpu_present_complete=0\n"
             "d3d12_gpu_present_completes=0\n"
             "d3d12_import_evidence_required=1\n"
@@ -3061,13 +3109,13 @@ static void xv6_d3d12_write_present_evidence(
                 "d3d12_present_rejected=1\n"
                 "d3d12_native_present_unimplemented=1\n"
                 "d3d12_present_path=fail-closed\n"
-                "display_bind_backend=hyperv-dxg\n"
+                "display_bind_backend=gpup_dxg_scanout_bind\n"
                 "display_bind_transport=gpu-p-dxg-resource-scanout-bind\n"
                 "display_bind_present_id=0\n"
                 "display_bind_completed_id=0\n"
                 "display_bind_resource_generation=%lu\n"
-                "display_bind_completion_source=display\n"
-                "completion_source=display\n"
+                "display_bind_completion_source=missing\n"
+                "completion_source=missing\n"
                 "d3d12_gpu_present_starts=%lu\n"
                 "d3d12_gpu_copy_completes=%lu\n"
                 "d3d12_gpu_present_completes=0\n"
@@ -3247,7 +3295,7 @@ static void xv6_d3d12_write_present_evidence(
                 "d3d12_evidence_stage=present_completed\n"
                 "d3d12_present_rejected=0\n"
                 "d3d12_present_path=d3d12-dxg-present-source-display-handoff\n"
-                "display_bind_backend=hyperv-dxg\n"
+                "display_bind_backend=gpup_dxg_scanout_bind\n"
                 "display_bind_transport=gpu-p-dxg-resource-scanout-bind\n"
                 "display_bind_present_id=%lu\n"
                 "display_bind_completed_id=%lu\n"
@@ -4068,11 +4116,11 @@ static void xv6_d3d12_write_fail_closed_display_handoff_evidence(
             "gpu_copy_complete=1 display_handoff_implemented=0 "
             "present_id=%lu completed=%lu callbacks_blocked=1 "
             "releases_blocked=1 fps_credit=0 native_present_claim=0 "
-            "display_bind_backend=hyperv-dxg "
+            "display_bind_backend=gpup_dxg_scanout_bind "
             "display_bind_transport=gpu-p-dxg-resource-scanout-bind "
             "display_bind_present_id=0 display_bind_completed_id=0 "
             "display_bind_resource_generation=%lu "
-            "display_bind_completion_source=display completion_source=display "
+            "display_bind_completion_source=missing completion_source=missing "
             "opengl_submit_credit=0 status=PASS_FAILCLOSED\n",
             (unsigned long)(source_record ? source_record->present_id : 0),
             (unsigned long)(source_record ? source_record->completed : 0),
@@ -4081,11 +4129,11 @@ static void xv6_d3d12_write_fail_closed_display_handoff_evidence(
             "wlcomp: d3d12_wayland_content_progress_matrix "
             "resource_buffer_admitted=1 gpu_copy_complete=1 "
             "display_handoff_implemented=0 present_id=%lu completed=%lu "
-            "display_bind_backend=hyperv-dxg "
+            "display_bind_backend=gpup_dxg_scanout_bind "
             "display_bind_transport=gpu-p-dxg-resource-scanout-bind "
             "display_bind_present_id=0 display_bind_completed_id=0 "
             "display_bind_resource_generation=%lu "
-            "display_bind_completion_source=display completion_source=display "
+            "display_bind_completion_source=missing completion_source=missing "
             "d3d12_content_progress_state=DEFERRED "
             "d3d12_visible_content_progress=DEFERRED "
             "d3d12_content_progress_requires_native_present=1 "
@@ -4601,7 +4649,7 @@ static void xv6_d3d12_finish_present_after_display(struct wlcomp_buffer *buf)
             "gpu_copy_complete=1 display_handoff_implemented=1 "
             "present_id=%lu completed=%lu callbacks_blocked=0 "
             "releases_blocked=0 fps_credit=1 native_present_claim=1 "
-            "display_bind_backend=hyperv-dxg "
+            "display_bind_backend=gpup_dxg_scanout_bind "
             "display_bind_transport=gpu-p-dxg-resource-scanout-bind "
             "display_bind_present_id=%lu display_bind_completed_id=%lu "
             "display_bind_resource_generation=%lu "
@@ -4616,7 +4664,7 @@ static void xv6_d3d12_finish_present_after_display(struct wlcomp_buffer *buf)
             "wlcomp: d3d12_wayland_content_progress_matrix "
             "resource_buffer_admitted=1 gpu_copy_complete=1 "
             "display_handoff_implemented=1 present_id=%lu completed=%lu "
-            "display_bind_backend=hyperv-dxg "
+            "display_bind_backend=gpup_dxg_scanout_bind "
             "display_bind_transport=gpu-p-dxg-resource-scanout-bind "
             "display_bind_present_id=%lu display_bind_completed_id=%lu "
             "display_bind_resource_generation=%lu "

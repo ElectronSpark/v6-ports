@@ -128,11 +128,23 @@ struct d3d12_present_evidence {
     unsigned long native_present_count;
     unsigned long present_id;
     unsigned long completed;
+    unsigned long display_bind_present_id;
+    unsigned long display_bind_completed_id;
+    unsigned long display_bind_resource_generation;
     unsigned long generation;
     unsigned long evidence_time_us;
     unsigned long resource;
     unsigned long buffer_generation;
+    unsigned long content_visible_credit;
+    unsigned long content_native_present_credit;
+    unsigned long callback_release_same_frame;
+    unsigned long display_handoff_implemented;
+    unsigned long no_readback;
+    unsigned long requirements;
     int client_pid;
+    char display_bind_backend[64];
+    char display_bind_transport[80];
+    char display_bind_completion_source[32];
 };
 
 static EGLDisplay get_wayland_display(struct wl_display *display)
@@ -227,6 +239,10 @@ static int read_d3d12_present_evidence(struct d3d12_present_evidence *evidence)
     const char *expected_run_id = validation_run_id();
     unsigned long requirements = 0;
     unsigned long no_readback = 0;
+    unsigned long display_handoff = 0;
+    unsigned long visible_credit = 0;
+    unsigned long native_content_credit = 0;
+    unsigned long callback_release_same_frame = 0;
 
     memset(evidence, 0, sizeof(*evidence));
     fp = fopen(D3D12_PRESENT_EVIDENCE_PATH, "r");
@@ -270,6 +286,37 @@ static int read_d3d12_present_evidence(struct d3d12_present_evidence *evidence)
     (void)evidence_key_ulong(buf, "d3d12_native_present_requirements_satisfied",
                              &requirements);
     (void)evidence_key_ulong(buf, "d3d12_no_readback", &no_readback);
+    (void)evidence_key_ulong(buf, "d3d12_display_handoff_implemented",
+                             &display_handoff);
+    (void)evidence_key_ulong(buf, "d3d12_content_progress_visible_credit",
+                             &visible_credit);
+    (void)evidence_key_ulong(buf,
+                             "d3d12_content_progress_native_present_credit",
+                             &native_content_credit);
+    (void)evidence_key_ulong(buf, "d3d12_callback_release_same_frame_observed",
+                             &callback_release_same_frame);
+    (void)evidence_key_value(buf, "display_bind_backend",
+                             evidence->display_bind_backend,
+                             sizeof(evidence->display_bind_backend));
+    (void)evidence_key_value(buf, "display_bind_transport",
+                             evidence->display_bind_transport,
+                             sizeof(evidence->display_bind_transport));
+    (void)evidence_key_ulong(buf, "display_bind_present_id",
+                             &evidence->display_bind_present_id);
+    (void)evidence_key_ulong(buf, "display_bind_completed_id",
+                             &evidence->display_bind_completed_id);
+    (void)evidence_key_ulong(buf, "display_bind_resource_generation",
+                             &evidence->display_bind_resource_generation);
+    (void)evidence_key_value(buf, "display_bind_completion_source",
+                             evidence->display_bind_completion_source,
+                             sizeof(evidence->display_bind_completion_source));
+
+    evidence->requirements = requirements;
+    evidence->no_readback = no_readback;
+    evidence->display_handoff_implemented = display_handoff;
+    evidence->content_visible_credit = visible_credit;
+    evidence->content_native_present_credit = native_content_credit;
+    evidence->callback_release_same_frame = callback_release_same_frame;
 
     evidence->valid =
         expected_run_id[0] != '\0' &&
@@ -280,7 +327,21 @@ static int read_d3d12_present_evidence(struct d3d12_present_evidence *evidence)
         evidence->native_present_count > 0 &&
         evidence->present_id > 0 && evidence->completed >= evidence->present_id &&
         evidence->generation > 0 && evidence->evidence_time_us > 0 &&
-        evidence->resource > 0 && evidence->buffer_generation > 0;
+        evidence->resource > 0 && evidence->buffer_generation > 0 &&
+        display_handoff == 1 &&
+        visible_credit == 1 &&
+        native_content_credit == 1 &&
+        callback_release_same_frame == 1 &&
+        strcmp(evidence->display_bind_backend, "gpup_dxg_scanout_bind") == 0 &&
+        strcmp(evidence->display_bind_transport,
+               "gpu-p-dxg-resource-scanout-bind") == 0 &&
+        evidence->display_bind_present_id == evidence->present_id &&
+        evidence->display_bind_completed_id == evidence->completed &&
+        evidence->display_bind_completed_id >=
+            evidence->display_bind_present_id &&
+        evidence->display_bind_resource_generation ==
+            evidence->buffer_generation &&
+        strcmp(evidence->display_bind_completion_source, "display") == 0;
     return 1;
 }
 
@@ -305,8 +366,8 @@ static void append_fps_evidence(struct app_state *app, double now,
         app->last_native_present_count = native_count;
         source = "native-d3d12-present-complete";
         native_fps_credit = native_delta > 0;
-        if (native_fps_credit)
-            effective_presented_fps = fps;
+        if (native_fps_credit && elapsed > 0.0)
+            effective_presented_fps = (double)native_delta / elapsed;
     }
 
     render_width = app->width / app->render_div;
@@ -331,6 +392,13 @@ static void append_fps_evidence(struct app_state *app, double now,
             "d3d12_present_evidence_time_us=%lu "
             "d3d12_present_resource=0x%lx "
             "d3d12_buffer_generation=%lu present_id=%lu completed=%lu "
+            "display_bind_backend=%s display_bind_transport=%s "
+            "display_bind_present_id=%lu display_bind_completed_id=%lu "
+            "display_bind_resource_generation=%lu "
+            "display_bind_completion_source=%s "
+            "display_handoff_implemented=%lu "
+            "content_visible_credit=%lu content_native_present_credit=%lu "
+            "callback_release_same_frame=%lu "
             "displayed_fps_context_only=%d "
             "acceptance_requires_native_present_and_content_progress=1\n",
             app->fps_sample_seq, fps, source, validation_run_id(),
@@ -340,18 +408,41 @@ static void append_fps_evidence(struct app_state *app, double now,
             app->frame, app->width, app->height, render_width, render_height,
             app->render_div, evidence.generation, evidence.evidence_time_us,
             evidence.resource, evidence.buffer_generation,
-            evidence.present_id, evidence.completed, evidence.valid ? 0 : 1);
+            evidence.present_id, evidence.completed,
+            evidence.display_bind_backend[0] ?
+                evidence.display_bind_backend : "missing",
+            evidence.display_bind_transport[0] ?
+                evidence.display_bind_transport : "missing",
+            evidence.display_bind_present_id,
+            evidence.display_bind_completed_id,
+            evidence.display_bind_resource_generation,
+            evidence.display_bind_completion_source[0] ?
+                evidence.display_bind_completion_source : "missing",
+            evidence.display_handoff_implemented,
+            evidence.content_visible_credit,
+            evidence.content_native_present_credit,
+            evidence.callback_release_same_frame,
+            evidence.valid ? 0 : 1);
     fprintf(fp,
             "mesawlegl_fps_present_credit_matrix "
             "callback_seq=%d visible_fps=%.3f effective_presented_fps=%.3f "
             "strict_anti_inflation=1 d3d12_evidence_valid=%d "
             "native_present_delta=%lu present_id=%lu completed=%lu "
+            "display_bind_present_id=%lu display_bind_completed_id=%lu "
+            "display_bind_completion_source=%s "
+            "content_visible_credit=%lu callback_release_same_frame=%lu "
             "displayed_fps_context_only=%d visible_fps_ignored=%d "
             "fps_credit_source=%s native_present_credit=%d "
             "opengl_submit_credit=0 status=PASS\n",
             app->fps_sample_seq, fps, effective_presented_fps,
             evidence.valid ? 1 : 0, native_delta, evidence.present_id,
-            evidence.completed, native_fps_credit ? 0 : 1,
+            evidence.completed, evidence.display_bind_present_id,
+            evidence.display_bind_completed_id,
+            evidence.display_bind_completion_source[0] ?
+                evidence.display_bind_completion_source : "missing",
+            evidence.content_visible_credit,
+            evidence.callback_release_same_frame,
+            native_fps_credit ? 0 : 1,
             native_fps_credit ? 0 : 1, source, native_fps_credit);
     if (!evidence.valid) {
         fprintf(fp,
