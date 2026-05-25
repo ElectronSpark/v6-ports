@@ -292,51 +292,83 @@ static int evidence_string_matches_any(const char *value,
             (d && strcmp(value, d) == 0));
 }
 
+static void evidence_set_string(char *dst, size_t dst_size, const char *value)
+{
+    if (!dst || dst_size == 0)
+        return;
+    snprintf(dst, dst_size, "%s", value ? value : "");
+}
+
+static void d3d12_native_present_evidence_normalize(
+    struct d3d12_native_present_evidence *evidence)
+{
+    if (!evidence)
+        return;
+    if (evidence_string_matches_any(evidence->display_bind_backend,
+                                    "gpup_dxg_scanout_bind",
+                                    "dxg-resource-scanout-bind",
+                                    "gpu-p-dxg-resource-scanout-bind",
+                                    "hyperv-dxg"))
+        evidence_set_string(evidence->display_bind_backend,
+                            sizeof(evidence->display_bind_backend),
+                            "gpup_dxg_scanout_bind");
+    if (evidence_string_matches_any(evidence->display_bind_transport,
+                                    "gpu-p-dxg-resource-scanout-bind",
+                                    "dxg-resource-scanout-bind",
+                                    "vmbus", "hvsock"))
+        evidence_set_string(evidence->display_bind_transport,
+                            sizeof(evidence->display_bind_transport),
+                            "gpu-p-dxg-resource-scanout-bind");
+    if (evidence_string_matches_any(
+            evidence->display_bind_completion_source,
+            "display", "host-display-channel",
+            "FB_GPU_DXG_PRESENT_COMPLETION_DISPLAY", "3"))
+        evidence_set_string(evidence->display_bind_completion_source,
+                            sizeof(evidence->display_bind_completion_source),
+                            "display");
+}
+
 static int d3d12_native_present_evidence_read(
     const char *text, struct d3d12_native_present_evidence *out)
 {
+    int ok;
+
     if (!text || !out)
         return 0;
     memset(out, 0, sizeof(*out));
-    return evidence_key_string(text, "display_bind_backend",
-                               out->display_bind_backend,
-                               sizeof(out->display_bind_backend)) &&
-           evidence_key_string(text, "display_bind_transport",
-                               out->display_bind_transport,
-                               sizeof(out->display_bind_transport)) &&
-           evidence_key_u64(text, "display_bind_present_id",
-                            &out->display_bind_present_id) &&
-           evidence_key_u64(text, "display_bind_completed_id",
-                            &out->display_bind_completed_id) &&
-           evidence_key_u64(text, "display_bind_resource_generation",
-                            &out->display_bind_resource_generation) &&
-           evidence_key_string(text, "display_bind_completion_source",
-                               out->display_bind_completion_source,
-                               sizeof(out->display_bind_completion_source));
+    ok = evidence_key_string(text, "display_bind_backend",
+                             out->display_bind_backend,
+                             sizeof(out->display_bind_backend)) &&
+         evidence_key_string(text, "display_bind_transport",
+                             out->display_bind_transport,
+                             sizeof(out->display_bind_transport)) &&
+         evidence_key_u64(text, "display_bind_present_id",
+                          &out->display_bind_present_id) &&
+         evidence_key_u64(text, "display_bind_completed_id",
+                          &out->display_bind_completed_id) &&
+         evidence_key_u64(text, "display_bind_resource_generation",
+                          &out->display_bind_resource_generation) &&
+         evidence_key_string(text, "display_bind_completion_source",
+                             out->display_bind_completion_source,
+                             sizeof(out->display_bind_completion_source));
+    if (ok)
+        d3d12_native_present_evidence_normalize(out);
+    return ok;
 }
 
 static int d3d12_native_present_evidence_valid(
     const struct d3d12_native_present_evidence *evidence)
 {
     return evidence &&
-           evidence_string_matches_any(
-               evidence->display_bind_backend,
-               "dxg-resource-scanout-bind",
-               "gpu-p-dxg-resource-scanout-bind",
-               "hyperv-dxg",
-               NULL) &&
-           evidence_string_matches_any(
-               evidence->display_bind_transport,
-               "gpu-p-dxg-resource-scanout-bind",
-               "dxg-resource-scanout-bind", "vmbus", "hvsock") &&
+           strcmp(evidence->display_bind_backend,
+                  "gpup_dxg_scanout_bind") == 0 &&
+           strcmp(evidence->display_bind_transport,
+                  "gpu-p-dxg-resource-scanout-bind") == 0 &&
            evidence->display_bind_present_id != 0 &&
            evidence->display_bind_completed_id >=
                evidence->display_bind_present_id &&
            evidence->display_bind_resource_generation != 0 &&
-           evidence_string_matches_any(
-               evidence->display_bind_completion_source,
-               "display", "host-display-channel",
-               "FB_GPU_DXG_PRESENT_COMPLETION_DISPLAY", "3");
+           strcmp(evidence->display_bind_completion_source, "display") == 0;
 }
 
 static int evidence_string_is(const char *text, const char *key,
