@@ -1194,6 +1194,69 @@ static void xv6_d3d12_write_final_handoff_evidence(
             final_success);
 }
 
+static void xv6_d3d12_write_fps_provenance_evidence(
+    FILE *fp,
+    const struct xv6_d3d12_present_contract *present,
+    const struct xv6_d3d12_present_result *result,
+    int rejected)
+{
+    int display_handoff_implemented = !rejected && present && result &&
+        present->present_source_present_id != 0 &&
+        present->present_source_completed >=
+            present->present_source_present_id &&
+        present->native_present_completion_id != 0 &&
+        xv6_d3d12_display_target_is_runtime_resource(
+            present->display_target_kind);
+    int callbacks_blocked = !display_handoff_implemented;
+    int releases_blocked = !display_handoff_implemented;
+    int fps_credit = display_handoff_implemented;
+    uint64_t present_id = present ? present->present_source_present_id : 0;
+    uint64_t completed = present ? present->present_source_completed : 0;
+
+    if (!fp)
+        return;
+    fprintf(fp,
+            "d3d12_wayland_present_fps_provenance_matrix "
+            "resource_buffer_admitted=%d syncfile_acquire=%s "
+            "gpu_copy_complete=%d display_handoff_implemented=%d "
+            "present_id=%lu completed=%lu callbacks_blocked=%d "
+            "releases_blocked=%d fps_credit=%d native_present_claim=%d "
+            "opengl_submit_credit=0 status=%s\n",
+            present && present->resource != 0,
+            present && present->fence != 0 ? "PASS" : "ABSENT",
+            result && result->copy_sequence != 0,
+            display_handoff_implemented,
+            (unsigned long)present_id,
+            (unsigned long)completed,
+            callbacks_blocked,
+            releases_blocked,
+            fps_credit,
+            display_handoff_implemented,
+            display_handoff_implemented ? "PASS" : "PASS_FAILCLOSED");
+    fprintf(fp,
+            "d3d12_fps_provenance_resource_buffer_admitted=%d\n"
+            "d3d12_fps_provenance_syncfile_acquire=%d\n"
+            "d3d12_fps_provenance_gpu_copy_complete=%d\n"
+            "d3d12_fps_provenance_display_handoff_implemented=%d\n"
+            "d3d12_fps_provenance_present_id=%lu\n"
+            "d3d12_fps_provenance_completed=%lu\n"
+            "d3d12_fps_provenance_callbacks_blocked=%d\n"
+            "d3d12_fps_provenance_releases_blocked=%d\n"
+            "d3d12_fps_provenance_credit=%d\n"
+            "d3d12_fps_provenance_native_present_claim=%d\n"
+            "d3d12_fps_provenance_opengl_submit_credit=0\n",
+            present && present->resource != 0,
+            present && present->fence != 0,
+            result && result->copy_sequence != 0,
+            display_handoff_implemented,
+            (unsigned long)present_id,
+            (unsigned long)completed,
+            callbacks_blocked,
+            releases_blocked,
+            fps_credit,
+            display_handoff_implemented);
+}
+
 struct xv6_gpu_buffer_manager_impl {
     void (*create_buffer)(struct wl_client *client,
                           struct wl_resource *resource,
@@ -1919,6 +1982,7 @@ static void xv6_d3d12_write_stage_evidence(const char *stage, int err)
             (unsigned long)g_d3d12_frame_callback_completion_id,
             (unsigned long)g_d3d12_frame_callback_present_id);
     xv6_d3d12_write_final_handoff_evidence(fp, NULL, NULL, 1);
+    xv6_d3d12_write_fps_provenance_evidence(fp, NULL, NULL, 1);
     xv6_d3d12_write_phase2_negative_evidence(fp);
     fclose(fp);
 }
@@ -3592,6 +3656,7 @@ static void xv6_d3d12_write_present_evidence(
             (unsigned long)(present ? present->cpu_plane_rejects_at_present :
                 0));
     xv6_d3d12_write_final_handoff_evidence(fp, present, result, rejected);
+    xv6_d3d12_write_fps_provenance_evidence(fp, present, result, rejected);
     xv6_d3d12_write_phase2_negative_evidence(fp);
     fclose(fp);
 }
