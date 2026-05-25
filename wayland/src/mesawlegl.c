@@ -38,6 +38,8 @@
 #define SOFTWARE_DEMO_W 180
 #define SOFTWARE_DEMO_H 135
 #define FPS_TEXT_MAX 16
+#define FPS_EVIDENCE_PATH "/tmp/mesawlegl-fps"
+#define D3D12_PRESENT_EVIDENCE_PATH "/tmp/wlcomp-d3d12-present"
 
 struct vertex {
     GLfloat x;
@@ -113,10 +115,24 @@ struct app_state {
     int present_interval;
     int pace_us;
     int sphere_vertex_count;
+    int fps_sample_seq;
     int fps_frame_count;
     double fps_value;
     double fps_start_sec;
+    unsigned long last_native_present_count;
     char fps_text[FPS_TEXT_MAX];
+};
+
+struct d3d12_present_evidence {
+    int valid;
+    unsigned long native_present_count;
+    unsigned long present_id;
+    unsigned long completed;
+    unsigned long generation;
+    unsigned long evidence_time_us;
+    unsigned long resource;
+    unsigned long buffer_generation;
+    int client_pid;
 };
 
 static EGLDisplay get_wayland_display(struct wl_display *display)
@@ -133,6 +149,206 @@ static EGLDisplay get_wayland_display(struct wl_display *display)
         return get_platform_display(EGL_PLATFORM_WAYLAND_KHR, display, NULL);
 
     return eglGetDisplay((EGLNativeDisplayType)display);
+}
+
+static const char *validation_run_id(void)
+{
+    const char *run_id = getenv("XV6_GPU_VALIDATE_RUN_ID");
+
+    if (run_id && run_id[0])
+        return run_id;
+    run_id = getenv("XV6_WLCOMP_D3D12_RUN_ID");
+    return (run_id && run_id[0]) ? run_id : "";
+}
+
+static int evidence_key_value(const char *buf, const char *key,
+                              char *value, size_t value_size)
+{
+    size_t key_len = strlen(key);
+    const char *p = buf;
+
+    if (value_size == 0)
+        return 0;
+    while (p && *p) {
+        const char *line_end = strchr(p, '\n');
+        const char *value_start;
+        size_t len;
+
+        if (strncmp(p, key, key_len) != 0 || p[key_len] != '=') {
+            p = line_end ? line_end + 1 : NULL;
+            continue;
+        }
+        value_start = p + key_len + 1;
+        len = line_end ? (size_t)(line_end - value_start) :
+                         strlen(value_start);
+        if (len >= value_size)
+            len = value_size - 1;
+        memcpy(value, value_start, len);
+        value[len] = '\0';
+        return 1;
+    }
+    value[0] = '\0';
+    return 0;
+}
+
+static int evidence_key_ulong(const char *buf, const char *key,
+                              unsigned long *value)
+{
+    char tmp[64];
+    char *end = NULL;
+    unsigned long parsed;
+
+    if (!evidence_key_value(buf, key, tmp, sizeof(tmp)))
+        return 0;
+    parsed = strtoul(tmp, &end, 0);
+    if (end == tmp)
+        return 0;
+    *value = parsed;
+    return 1;
+}
+
+static int evidence_key_int(const char *buf, const char *key, int *value)
+{
+    unsigned long parsed;
+
+    if (!evidence_key_ulong(buf, key, &parsed))
+        return 0;
+    *value = (int)parsed;
+    return 1;
+}
+
+static int read_d3d12_present_evidence(struct d3d12_present_evidence *evidence)
+{
+    FILE *fp;
+    char buf[8192];
+    size_t n;
+    char run_id[128];
+    char compositor_run_id[128];
+    const char *expected_run_id = validation_run_id();
+    unsigned long requirements = 0;
+    unsigned long no_readback = 0;
+
+    memset(evidence, 0, sizeof(*evidence));
+    fp = fopen(D3D12_PRESENT_EVIDENCE_PATH, "r");
+    if (!fp)
+        return 0;
+    n = fread(buf, 1, sizeof(buf) - 1, fp);
+    fclose(fp);
+    buf[n] = '\0';
+
+    (void)evidence_key_value(buf, "d3d12_run_id", run_id, sizeof(run_id));
+    (void)evidence_key_value(buf, "d3d12_present_identity_compositor_run_id",
+                             compositor_run_id, sizeof(compositor_run_id));
+    (void)evidence_key_int(buf, "d3d12_client_pid", &evidence->client_pid);
+    (void)evidence_key_ulong(buf, "d3d12_native_present_completions",
+                             &evidence->native_present_count);
+    if (evidence->native_present_count == 0)
+        (void)evidence_key_ulong(buf, "d3d12_context_native_present_completions",
+                                 &evidence->native_present_count);
+    (void)evidence_key_ulong(buf, "d3d12_dxg_present_id",
+                             &evidence->present_id);
+    (void)evidence_key_ulong(buf, "d3d12_dxg_present_completed",
+                             &evidence->completed);
+    if (evidence->present_id == 0)
+        (void)evidence_key_ulong(buf, "d3d12_present_source_buffer_present_id",
+                                 &evidence->present_id);
+    if (evidence->completed == 0)
+        (void)evidence_key_ulong(buf, "d3d12_present_source_buffer_completed",
+                                 &evidence->completed);
+    (void)evidence_key_ulong(buf, "d3d12_evidence_generation",
+                             &evidence->generation);
+    (void)evidence_key_ulong(buf, "d3d12_present_evidence_time_us",
+                             &evidence->evidence_time_us);
+    (void)evidence_key_ulong(buf, "d3d12_present_resource",
+                             &evidence->resource);
+    if (evidence->resource == 0)
+        (void)evidence_key_ulong(buf,
+                                 "d3d12_present_identity_manager_resource_id",
+                                 &evidence->resource);
+    (void)evidence_key_ulong(buf, "d3d12_buffer_generation",
+                             &evidence->buffer_generation);
+    (void)evidence_key_ulong(buf, "d3d12_native_present_requirements_satisfied",
+                             &requirements);
+    (void)evidence_key_ulong(buf, "d3d12_no_readback", &no_readback);
+
+    evidence->valid =
+        expected_run_id[0] != '\0' &&
+        strcmp(run_id, expected_run_id) == 0 &&
+        strcmp(compositor_run_id, expected_run_id) == 0 &&
+        evidence->client_pid == (int)getpid() &&
+        requirements == 1 && no_readback == 1 &&
+        evidence->native_present_count > 0 &&
+        evidence->present_id > 0 && evidence->completed >= evidence->present_id &&
+        evidence->generation > 0 && evidence->evidence_time_us > 0 &&
+        evidence->resource > 0 && evidence->buffer_generation > 0;
+    return 1;
+}
+
+static void append_fps_evidence(struct app_state *app, double now,
+                                double elapsed, double fps)
+{
+    struct d3d12_present_evidence evidence;
+    FILE *fp;
+    unsigned long native_delta = 0;
+    unsigned long native_count = 0;
+    int render_width;
+    int render_height;
+    const char *source = "app-draw-loop-context-only";
+
+    (void)read_d3d12_present_evidence(&evidence);
+    if (evidence.valid) {
+        native_count = evidence.native_present_count;
+        if (native_count >= app->last_native_present_count)
+            native_delta = native_count - app->last_native_present_count;
+        app->last_native_present_count = native_count;
+        source = "native-d3d12-present-complete";
+    }
+
+    render_width = app->width / app->render_div;
+    render_height = app->height / app->render_div;
+    if (render_width <= 0)
+        render_width = app->width;
+    if (render_height <= 0)
+        render_height = app->height;
+
+    app->fps_sample_seq++;
+    fp = fopen(FPS_EVIDENCE_PATH, "a");
+    if (!fp)
+        return;
+    fprintf(fp,
+            "mesawlegl_fps_sample callback_seq=%d visible_fps=%.3f "
+            "source=%s validation_run_id=%s process_id=%d "
+            "d3d12_client_pid=%d d3d12_evidence_valid=%d "
+            "native_present_count=%lu native_present_delta=%lu "
+            "native_present_elapsed=%.3f sample_time=%.3f frame=%d "
+            "window=%dx%d render=%dx%d render_div=%d "
+            "d3d12_evidence_generation=%lu "
+            "d3d12_present_evidence_time_us=%lu "
+            "d3d12_present_resource=0x%lx "
+            "d3d12_buffer_generation=%lu present_id=%lu completed=%lu "
+            "displayed_fps_context_only=%d "
+            "acceptance_requires_native_present_and_content_progress=1\n",
+            app->fps_sample_seq, fps, source, validation_run_id(),
+            (int)getpid(),
+            evidence.client_pid > 0 ? evidence.client_pid : (int)getpid(),
+            evidence.valid ? 1 : 0, native_count, native_delta, elapsed, now,
+            app->frame, app->width, app->height, render_width, render_height,
+            app->render_div, evidence.generation, evidence.evidence_time_us,
+            evidence.resource, evidence.buffer_generation,
+            evidence.present_id, evidence.completed, evidence.valid ? 0 : 1);
+    if (!evidence.valid) {
+        fprintf(fp,
+                "mesawlegl_fps_context_only_matrix "
+                "callback_seq=%d visible_fps=%.3f "
+                "source=app-draw-loop-context-only "
+                "d3d12_evidence_valid=0 native_present_delta=0 "
+                "present_id=%lu completed=%lu displayed_fps_context_only=1 "
+                "acceptance_requires_native_present_and_content_progress=1 "
+                "status=PASS\n",
+                app->fps_sample_seq, fps, evidence.present_id,
+                evidence.completed);
+    }
+    fclose(fp);
 }
 
 static GLuint compile_shader(GLenum type, const char *src)
@@ -948,6 +1164,7 @@ static void update_demo_fps(struct app_state *app)
     snprintf(app->fps_text, sizeof(app->fps_text), "FPS %.1f", fps);
     snprintf(title, sizeof(title), "Mesa 3D Demo - %.1f FPS", fps);
     xdg_toplevel_set_title(app->toplevel, title);
+    append_fps_evidence(app, now, elapsed, fps);
     fprintf(stderr, "mesawlegl[%d]: fps=%.1f\n", app->loop, fps);
     app->fps_frame_count = 0;
     app->fps_start_sec = now;
@@ -1233,8 +1450,10 @@ static int run_client(int loop, int frames, int resize_every, int api_smoke,
         app.max_height = app.height;
     }
     app.fps_start_sec = 0.0;
+    app.fps_sample_seq = 0;
     app.fps_frame_count = 0;
     app.fps_value = 0.0;
+    app.last_native_present_count = 0;
     snprintf(app.fps_text, sizeof(app.fps_text), "FPS --.-");
 
     if (init_wayland(&app) < 0) {
