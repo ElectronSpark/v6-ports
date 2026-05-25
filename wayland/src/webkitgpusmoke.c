@@ -104,6 +104,14 @@ static void title_changed_cb(GObject *object, GParamSpec *pspec, gpointer data)
         if (runtime && strstr(title, "webgl spherical poly complete")) {
             runtime->completion_seen = 1;
             g_idle_add(quit_cb, NULL);
+        } else if (runtime) {
+            const char *animated =
+                strstr(title, "native present animated content frame ");
+            if (animated &&
+                atoi(animated + strlen("native present animated content frame ")) >= 30) {
+                runtime->completion_seen = 1;
+                g_idle_add(quit_cb, NULL);
+            }
         }
         g_free(title);
     }

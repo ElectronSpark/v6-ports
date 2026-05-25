@@ -1300,10 +1300,16 @@ static void xv6_d3d12_write_content_progress_evidence(
 {
     int native_present_complete =
         !rejected && result && xv6_d3d12_display_bind_complete(present);
+    uint64_t content_crc = 0;
+    uint64_t content_frame = 0;
+    uint64_t frame_hash = 0;
+    int source_content_ready = 0;
     const char *progress_state = native_present_complete ?
         "NATIVE_PRESENT_COMPLETE" : "DEFERRED";
     uint64_t present_id = present ? present->present_source_present_id : 0;
     uint64_t completed = present ? present->present_source_completed : 0;
+    int visible_credit = native_present_complete && source_content_ready;
+    int native_content_credit = visible_credit;
 
     if (!fp)
         return;
@@ -1318,6 +1324,14 @@ static void xv6_d3d12_write_content_progress_evidence(
             "display_bind_present_id=%lu display_bind_completed_id=%lu "
             "display_bind_resource_generation=%lu "
             "display_bind_completion_source=%s completion_source=%s "
+            "d3d12_present_content_crc=%lu "
+            "d3d12_visible_content_crc=%lu "
+            "d3d12_present_content_frame=%lu "
+            "d3d12_visible_content_frame=%lu "
+            "d3d12_present_frame_hash=%lu "
+            "d3d12_visible_frame_hash=%lu "
+            "d3d12_content_progress_source_owned=%d "
+            "d3d12_content_progress_region=client-content-no-title-fps "
             "d3d12_content_progress_requires_native_present=1 "
             "d3d12_visible_content_requires_native_present_completion=1 "
             "d3d12_visible_content_credit_before_native_present=0 "
@@ -1335,13 +1349,28 @@ static void xv6_d3d12_write_content_progress_evidence(
             (unsigned long)(present ? present->buffer_generation : 0),
             xv6_d3d12_display_bind_completion_source(present),
             xv6_d3d12_display_bind_completion_source(present),
+            (unsigned long)content_crc,
+            (unsigned long)content_crc,
+            (unsigned long)content_frame,
+            (unsigned long)content_frame,
+            (unsigned long)frame_hash,
+            (unsigned long)frame_hash,
+            source_content_ready,
+            visible_credit,
+            native_content_credit,
             native_present_complete,
-            native_present_complete,
-            native_present_complete,
-            native_present_complete ? "PASS" : "PASS_FAILCLOSED");
+            native_content_credit ? "PASS" : "PASS_FAILCLOSED");
     fprintf(fp,
             "d3d12_content_progress_state=%s\n"
             "d3d12_visible_content_progress=%s\n"
+            "d3d12_present_content_crc=%lu\n"
+            "d3d12_visible_content_crc=%lu\n"
+            "d3d12_present_content_frame=%lu\n"
+            "d3d12_visible_content_frame=%lu\n"
+            "d3d12_present_frame_hash=%lu\n"
+            "d3d12_visible_frame_hash=%lu\n"
+            "d3d12_content_progress_source_owned=%d\n"
+            "d3d12_content_progress_region=client-content-no-title-fps\n"
             "d3d12_content_progress_requires_native_present=1\n"
             "d3d12_visible_content_requires_native_present_completion=1\n"
             "d3d12_visible_content_credit_before_native_present=0\n"
@@ -1357,6 +1386,13 @@ static void xv6_d3d12_write_content_progress_evidence(
             "d3d12_content_progress_opengl_submit_credit=0\n",
             progress_state,
             progress_state,
+            (unsigned long)content_crc,
+            (unsigned long)content_crc,
+            (unsigned long)content_frame,
+            (unsigned long)content_frame,
+            (unsigned long)frame_hash,
+            (unsigned long)frame_hash,
+            source_content_ready,
             (unsigned long)present_id,
             (unsigned long)completed,
             (unsigned long)present_id,
@@ -1364,8 +1400,8 @@ static void xv6_d3d12_write_content_progress_evidence(
             (unsigned long)(present ? present->buffer_generation : 0),
             xv6_d3d12_display_bind_completion_source(present),
             native_present_complete,
-            native_present_complete,
-            native_present_complete);
+            visible_credit,
+            native_content_credit);
 }
 
 struct xv6_gpu_buffer_manager_impl {

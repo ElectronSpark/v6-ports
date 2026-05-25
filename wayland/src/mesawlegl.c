@@ -117,9 +117,13 @@ struct app_state {
     int sphere_vertex_count;
     int fps_sample_seq;
     int fps_frame_count;
+    int resize_count;
+    int close_requested;
     double fps_value;
     double fps_start_sec;
     unsigned long last_native_present_count;
+    unsigned long source_content_frame;
+    unsigned long source_content_hash;
     char fps_text[FPS_TEXT_MAX];
 };
 
@@ -137,6 +141,12 @@ struct d3d12_present_evidence {
     unsigned long buffer_generation;
     unsigned long content_visible_credit;
     unsigned long content_native_present_credit;
+    unsigned long present_content_crc;
+    unsigned long visible_content_crc;
+    unsigned long present_content_frame;
+    unsigned long visible_content_frame;
+    unsigned long present_frame_hash;
+    unsigned long visible_frame_hash;
     unsigned long callback_release_same_frame;
     unsigned long display_handoff_implemented;
     unsigned long no_readback;
@@ -295,6 +305,18 @@ static int read_d3d12_present_evidence(struct d3d12_present_evidence *evidence)
                              &native_content_credit);
     (void)evidence_key_ulong(buf, "d3d12_callback_release_same_frame_observed",
                              &callback_release_same_frame);
+    (void)evidence_key_ulong(buf, "d3d12_present_content_crc",
+                             &evidence->present_content_crc);
+    (void)evidence_key_ulong(buf, "d3d12_visible_content_crc",
+                             &evidence->visible_content_crc);
+    (void)evidence_key_ulong(buf, "d3d12_present_content_frame",
+                             &evidence->present_content_frame);
+    (void)evidence_key_ulong(buf, "d3d12_visible_content_frame",
+                             &evidence->visible_content_frame);
+    (void)evidence_key_ulong(buf, "d3d12_present_frame_hash",
+                             &evidence->present_frame_hash);
+    (void)evidence_key_ulong(buf, "d3d12_visible_frame_hash",
+                             &evidence->visible_frame_hash);
     (void)evidence_key_value(buf, "display_bind_backend",
                              evidence->display_bind_backend,
                              sizeof(evidence->display_bind_backend));
@@ -331,6 +353,12 @@ static int read_d3d12_present_evidence(struct d3d12_present_evidence *evidence)
         display_handoff == 1 &&
         visible_credit == 1 &&
         native_content_credit == 1 &&
+        evidence->present_content_crc != 0 &&
+        evidence->visible_content_crc != 0 &&
+        evidence->present_content_frame != 0 &&
+        evidence->visible_content_frame != 0 &&
+        evidence->present_frame_hash != 0 &&
+        evidence->visible_frame_hash != 0 &&
         callback_release_same_frame == 1 &&
         strcmp(evidence->display_bind_backend, "gpup_dxg_scanout_bind") == 0 &&
         strcmp(evidence->display_bind_transport,
@@ -398,6 +426,11 @@ static void append_fps_evidence(struct app_state *app, double now,
             "display_bind_completion_source=%s "
             "display_handoff_implemented=%lu "
             "content_visible_credit=%lu content_native_present_credit=%lu "
+            "present_content_crc=%lu visible_content_crc=%lu "
+            "present_content_frame=%lu visible_content_frame=%lu "
+            "present_frame_hash=%lu visible_frame_hash=%lu "
+            "client_content_hash=%lu client_content_frame=%lu "
+            "content_region=client-content-no-title-fps "
             "callback_release_same_frame=%lu "
             "displayed_fps_context_only=%d "
             "acceptance_requires_native_present_and_content_progress=1\n",
@@ -421,6 +454,14 @@ static void append_fps_evidence(struct app_state *app, double now,
             evidence.display_handoff_implemented,
             evidence.content_visible_credit,
             evidence.content_native_present_credit,
+            evidence.present_content_crc,
+            evidence.visible_content_crc,
+            evidence.present_content_frame,
+            evidence.visible_content_frame,
+            evidence.present_frame_hash,
+            evidence.visible_frame_hash,
+            app->source_content_hash,
+            app->source_content_frame,
             evidence.callback_release_same_frame,
             evidence.valid ? 0 : 1);
     fprintf(fp,
@@ -430,7 +471,9 @@ static void append_fps_evidence(struct app_state *app, double now,
             "native_present_delta=%lu present_id=%lu completed=%lu "
             "display_bind_present_id=%lu display_bind_completed_id=%lu "
             "display_bind_completion_source=%s "
-            "content_visible_credit=%lu callback_release_same_frame=%lu "
+            "content_visible_credit=%lu present_content_crc=%lu "
+            "visible_content_crc=%lu present_content_frame=%lu "
+            "visible_content_frame=%lu callback_release_same_frame=%lu "
             "displayed_fps_context_only=%d visible_fps_ignored=%d "
             "fps_credit_source=%s native_present_credit=%d "
             "opengl_submit_credit=0 status=PASS\n",
@@ -441,6 +484,10 @@ static void append_fps_evidence(struct app_state *app, double now,
             evidence.display_bind_completion_source[0] ?
                 evidence.display_bind_completion_source : "missing",
             evidence.content_visible_credit,
+            evidence.present_content_crc,
+            evidence.visible_content_crc,
+            evidence.present_content_frame,
+            evidence.visible_content_frame,
             evidence.callback_release_same_frame,
             native_fps_credit ? 0 : 1,
             native_fps_credit ? 0 : 1, source, native_fps_credit);
@@ -1278,6 +1325,31 @@ static void update_demo_fps(struct app_state *app)
     app->fps_start_sec = now;
 }
 
+static void update_source_content_hash(struct app_state *app)
+{
+    unsigned long hash = 1469598103934665603UL;
+    unsigned long values[8];
+
+    if (!app)
+        return;
+    values[0] = (unsigned long)app->frame;
+    values[1] = (unsigned long)app->width;
+    values[2] = (unsigned long)app->height;
+    values[3] = (unsigned long)app->render_div;
+    values[4] = (unsigned long)app->sphere_demo;
+    values[5] = (unsigned long)app->software_demo;
+    values[6] = (unsigned long)app->api_smoke;
+    values[7] = (unsigned long)app->resize_count;
+    for (size_t i = 0; i < sizeof(values) / sizeof(values[0]); i++) {
+        hash ^= values[i] + 0x9e3779b97f4a7c15UL + (hash << 6) + (hash >> 2);
+        hash *= 1099511628211UL;
+    }
+    if (hash == 0)
+        hash = 1;
+    app->source_content_hash = hash;
+    app->source_content_frame = (unsigned long)app->frame + 1;
+}
+
 static int draw_and_swap(struct app_state *app)
 {
     if (app->sphere_demo)
@@ -1286,6 +1358,7 @@ static int draw_and_swap(struct app_state *app)
         render_api_frame(app);
     else
         render_simple_frame(app);
+    update_source_content_hash(app);
     render_fps_overlay(app);
     if (glGetError() != GL_NO_ERROR) {
         fprintf(stderr, "mesawlegl[%d]: GL error during frame\n", app->loop);
@@ -1337,6 +1410,7 @@ static void toplevel_close(void *data, struct xdg_toplevel *toplevel)
 {
     struct app_state *app = data;
     (void)toplevel;
+    app->close_requested = 1;
     app->running = 0;
 }
 
@@ -1473,6 +1547,50 @@ static void cleanup(struct app_state *app)
         wl_display_disconnect(app->display);
 }
 
+static void append_demo_interaction_evidence(struct app_state *app,
+                                             double elapsed_sec, int rc)
+{
+    FILE *fp;
+    int render_width;
+    int render_height;
+    int visible_demo;
+    int closeable_demo;
+    int resizable_demo;
+
+    if (!app || !app->sphere_demo)
+        return;
+    render_width = app->width / app->render_div;
+    render_height = app->height / app->render_div;
+    if (render_width <= 0)
+        render_width = app->width;
+    if (render_height <= 0)
+        render_height = app->height;
+    visible_demo = rc == 0 && app->frame > 0 &&
+        app->source_content_hash != 0 && app->source_content_frame != 0;
+    closeable_demo = app->toplevel != NULL;
+    resizable_demo = app->resize_every <= 0 || app->resize_count > 0;
+
+    fp = fopen(FPS_EVIDENCE_PATH, "a");
+    if (!fp)
+        return;
+    fprintf(fp,
+            "mesawlegl_demo_interaction_matrix "
+            "visible_demo=%d closeable_demo=%d resizable_demo=%d "
+            "resize_count=%d close_requested=%d frames=%d rc=%d "
+            "elapsed=%.3f window=%dx%d render=%dx%d render_div=%d "
+            "client_content_hash=%lu client_content_frame=%lu "
+            "content_region=client-content-no-title-fps "
+            "native_present_credit=0 opengl_submit_credit=0 status=%s\n",
+            visible_demo, closeable_demo, resizable_demo,
+            app->resize_count, app->close_requested, app->frame, rc,
+            elapsed_sec, app->width, app->height, render_width, render_height,
+            app->render_div, app->source_content_hash,
+            app->source_content_frame,
+            visible_demo && closeable_demo && resizable_demo ?
+                "PASS" : "FAIL");
+    fclose(fp);
+}
+
 static int parse_positive_arg(const char *arg, const char *prefix,
                               int fallback)
 {
@@ -1602,6 +1720,7 @@ static int run_client(int loop, int frames, int resize_every, int api_smoke,
                 rc = 1;
                 break;
             }
+            app.resize_count++;
         }
         if (draw_and_swap(&app) < 0) {
             rc = 1;
@@ -1614,6 +1733,7 @@ static int run_client(int loop, int frames, int resize_every, int api_smoke,
     elapsed_sec = monotonic_seconds() - start_sec;
     if (!app.configured)
         rc = 1;
+    append_demo_interaction_evidence(&app, elapsed_sec, rc);
     cleanup(&app);
     fprintf(stderr,
             "mesawlegl[%d]: complete frames=%d status=%d elapsed=%.3fs fps=%.1f window=%dx%d render=%dx%d render_div=%d present_interval=%d pace_us=%d\n",

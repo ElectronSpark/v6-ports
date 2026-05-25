@@ -227,9 +227,8 @@ static void launcher_d3d12_native_present_evidence_normalize(
     if (launcher_evidence_string_matches_any(
             evidence->display_bind_backend,
             "gpup_dxg_scanout_bind",
-            "dxg-resource-scanout-bind",
             "gpu-p-dxg-resource-scanout-bind",
-            "hyperv-dxg"))
+            NULL, NULL))
         launcher_evidence_set_string(
             evidence->display_bind_backend,
             sizeof(evidence->display_bind_backend),
@@ -237,7 +236,7 @@ static void launcher_d3d12_native_present_evidence_normalize(
     if (launcher_evidence_string_matches_any(
             evidence->display_bind_transport,
             "gpu-p-dxg-resource-scanout-bind",
-            "dxg-resource-scanout-bind", "vmbus", "hvsock"))
+            NULL, NULL, NULL))
         launcher_evidence_set_string(
             evidence->display_bind_transport,
             sizeof(evidence->display_bind_transport),
