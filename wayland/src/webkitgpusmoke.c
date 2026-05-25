@@ -347,6 +347,7 @@ static int validate_gpu_contract(void)
     char source_luid[32] = { 0 };
     char matched_luid[32] = { 0 };
     char evidence_run_id[64] = { 0 };
+    char evidence_compositor_run_id[64] = { 0 };
     char evidence_content_progress_state[96] = { 0 };
     char evidence_visible_content_progress[96] = { 0 };
     uint64_t evidence_resource = 0;
@@ -368,6 +369,14 @@ static int validate_gpu_contract(void)
     uint64_t evidence_display_handoff = 0;
     uint64_t evidence_native_requirements = 0;
     uint64_t evidence_identity_current = 0;
+    uint64_t evidence_client_pid = 0;
+    uint64_t evidence_identity_client_pid = 0;
+    uint64_t evidence_client_buffer_id = 0;
+    uint64_t evidence_identity_client_buffer_id = 0;
+    uint64_t evidence_manager_resource_id = 0;
+    uint64_t evidence_identity_manager_resource_id = 0;
+    uint64_t evidence_buffer_generation = 0;
+    uint64_t evidence_identity_buffer_generation = 0;
     uint64_t evidence_source_luid_valid = 0;
     uint64_t evidence_present_same_luid = 0;
     uint64_t evidence_native_present_attempt_id = 0;
@@ -395,6 +404,9 @@ static int validate_gpu_contract(void)
     uint64_t evidence_content_visible_credit = 0;
     uint64_t evidence_content_native_credit = 0;
     uint64_t evidence_content_source_owned = 0;
+    uint64_t evidence_content_present_id = 0;
+    uint64_t evidence_content_completed = 0;
+    uint64_t evidence_content_resource_generation = 0;
     uint64_t evidence_cpu_readback = 1;
     uint64_t evidence_cpu_mapping = 1;
     uint64_t evidence_cpu_copy = 1;
@@ -562,6 +574,26 @@ static int validate_gpu_contract(void)
         (void)evidence_key_u64(evidence,
                                "d3d12_present_identity_current_run_valid",
                                &evidence_identity_current);
+        (void)evidence_key_u64(evidence, "d3d12_client_pid",
+                               &evidence_client_pid);
+        (void)evidence_key_u64(evidence,
+                               "d3d12_present_identity_client_pid",
+                               &evidence_identity_client_pid);
+        (void)evidence_key_u64(evidence, "d3d12_client_buffer_id",
+                               &evidence_client_buffer_id);
+        (void)evidence_key_u64(evidence,
+                               "d3d12_present_identity_client_buffer_id",
+                               &evidence_identity_client_buffer_id);
+        (void)evidence_key_u64(evidence, "d3d12_manager_resource_id",
+                               &evidence_manager_resource_id);
+        (void)evidence_key_u64(evidence,
+                               "d3d12_present_identity_manager_resource_id",
+                               &evidence_identity_manager_resource_id);
+        (void)evidence_key_u64(evidence, "d3d12_buffer_generation",
+                               &evidence_buffer_generation);
+        (void)evidence_key_u64(evidence,
+                               "d3d12_present_identity_buffer_generation",
+                               &evidence_identity_buffer_generation);
         (void)evidence_key_u64(evidence, "d3d12_present_source_luid_valid",
                                &evidence_source_luid_valid);
         (void)evidence_key_u64(evidence, "d3d12_present_same_luid",
@@ -573,6 +605,9 @@ static int validate_gpu_contract(void)
         (void)evidence_key_string(evidence, "d3d12_run_id",
                                   evidence_run_id,
                                   sizeof(evidence_run_id));
+        (void)evidence_key_string(
+            evidence, "d3d12_present_identity_compositor_run_id",
+            evidence_compositor_run_id, sizeof(evidence_compositor_run_id));
         (void)evidence_key_u64(evidence,
                                "d3d12_callback_release_same_frame_required",
                                &evidence_callback_release_same_frame_required);
@@ -639,6 +674,15 @@ static int validate_gpu_contract(void)
         (void)evidence_key_u64(
             evidence, "d3d12_content_progress_source_owned",
             &evidence_content_source_owned);
+        (void)evidence_key_u64(
+            evidence, "d3d12_content_progress_present_id",
+            &evidence_content_present_id);
+        (void)evidence_key_u64(
+            evidence, "d3d12_content_progress_completed",
+            &evidence_content_completed);
+        (void)evidence_key_u64(
+            evidence, "d3d12_content_progress_display_bind_resource_generation",
+            &evidence_content_resource_generation);
         (void)evidence_key_u64(evidence, "d3d12_cpu_readback",
                                &evidence_cpu_readback);
         (void)evidence_key_u64(evidence, "d3d12_cpu_mapping",
@@ -757,7 +801,9 @@ static int validate_gpu_contract(void)
                 "d3d12-dxg-present-source-display-handoff");
         evidence_run_id_match =
             env_run_id_present && evidence_run_id[0] &&
-            strcmp(evidence_run_id, env_run_id) == 0;
+            evidence_compositor_run_id[0] &&
+            strcmp(evidence_run_id, env_run_id) == 0 &&
+            strcmp(evidence_compositor_run_id, env_run_id) == 0;
     }
     evidence_terminal_success =
         evidence_stage[0] != '\0' &&
@@ -837,8 +883,17 @@ static int validate_gpu_contract(void)
         evidence_final_release_fence != 0 &&
         evidence_final_release_fence == evidence_release_fence &&
         evidence_final_success == 1;
-    evidence_identity_ok = evidence_identity_current == 1 &&
-        (!env_d3d12_run_id_required || evidence_run_id_match);
+    evidence_identity_ok =
+        evidence_identity_current == 1 &&
+        (!env_d3d12_run_id_required || evidence_run_id_match) &&
+        evidence_client_pid != 0 &&
+        evidence_identity_client_pid == evidence_client_pid &&
+        evidence_client_buffer_id != 0 &&
+        evidence_identity_client_buffer_id == evidence_client_buffer_id &&
+        evidence_manager_resource_id != 0 &&
+        evidence_identity_manager_resource_id == evidence_manager_resource_id &&
+        evidence_buffer_generation != 0 &&
+        evidence_identity_buffer_generation == evidence_buffer_generation;
     evidence_callback_release_ok =
         evidence_callback_release_same_frame_required == 1 &&
         evidence_callback_release_same_frame == 1 &&
@@ -873,7 +928,10 @@ static int validate_gpu_contract(void)
         evidence_content_native_complete == 1 &&
         evidence_content_visible_credit == 1 &&
         evidence_content_native_credit == 1 &&
-        evidence_content_source_owned == 1;
+        evidence_content_source_owned == 1 &&
+        evidence_content_present_id == evidence_dxg_present_id &&
+        evidence_content_completed >= evidence_content_present_id &&
+        evidence_content_resource_generation == evidence_buffer_generation;
     evidence_ok =
         evidence_terminal_success && !evidence_fail_closed_rejected &&
         !evidence_soft_claim_rejected &&
@@ -970,8 +1028,16 @@ static int validate_gpu_contract(void)
             "d3d12_final_handoff_present_id=%lu "
             "d3d12_final_handoff_completed=%lu "
             "d3d12_final_handoff_success=%lu "
-            "d3d12_identity_current=%lu d3d12_run_id=%s "
-            "env_run_id=%s d3d12_run_id_match=%d "
+            "d3d12_identity_current=%lu d3d12_client_pid=%lu "
+            "d3d12_identity_client_pid=%lu d3d12_client_buffer_id=%lu "
+            "d3d12_identity_client_buffer_id=%lu "
+            "d3d12_manager_resource_id=%lu "
+            "d3d12_identity_manager_resource_id=%lu "
+            "d3d12_buffer_generation=%lu "
+            "d3d12_identity_buffer_generation=%lu "
+            "d3d12_identity_ok=%d d3d12_run_id=%s "
+            "d3d12_compositor_run_id=%s env_run_id=%s "
+            "d3d12_run_id_match=%d "
             "d3d12_source_luid_valid=%lu d3d12_present_same_luid=%lu "
             "d3d12_native_present_attempt_id=%lu "
             "d3d12_native_present_completion_id=%lu "
@@ -990,6 +1056,9 @@ static int validate_gpu_contract(void)
             "d3d12_content_visible_credit=%lu "
             "d3d12_content_native_credit=%lu "
             "d3d12_content_source_owned=%lu "
+            "d3d12_content_present_id=%lu "
+            "d3d12_content_completed=%lu "
+            "d3d12_content_resource_generation=%lu "
             "d3d12_no_cpu_map=%lu "
             "d3d12_final_no_cpu_map=%lu d3d12_fb_blit_used=%lu "
             "d3d12_cpu_map_used=%lu d3d12_cpu_readback_used=%lu "
@@ -1049,7 +1118,17 @@ static int validate_gpu_contract(void)
             (unsigned long)evidence_final_completed,
             (unsigned long)evidence_final_success,
             (unsigned long)evidence_identity_current,
+            (unsigned long)evidence_client_pid,
+            (unsigned long)evidence_identity_client_pid,
+            (unsigned long)evidence_client_buffer_id,
+            (unsigned long)evidence_identity_client_buffer_id,
+            (unsigned long)evidence_manager_resource_id,
+            (unsigned long)evidence_identity_manager_resource_id,
+            (unsigned long)evidence_buffer_generation,
+            (unsigned long)evidence_identity_buffer_generation,
+            evidence_identity_ok,
             evidence_run_id[0] ? evidence_run_id : "none",
+            evidence_compositor_run_id[0] ? evidence_compositor_run_id : "none",
             env_run_id_present ? env_run_id : "none",
             evidence_run_id_match,
             (unsigned long)evidence_source_luid_valid,
@@ -1076,6 +1155,9 @@ static int validate_gpu_contract(void)
             (unsigned long)evidence_content_visible_credit,
             (unsigned long)evidence_content_native_credit,
             (unsigned long)evidence_content_source_owned,
+            (unsigned long)evidence_content_present_id,
+            (unsigned long)evidence_content_completed,
+            (unsigned long)evidence_content_resource_generation,
             (unsigned long)evidence_no_cpu_map_no_readback,
             (unsigned long)evidence_final_no_cpu_map_no_readback,
             (unsigned long)evidence_fb_blit_used,

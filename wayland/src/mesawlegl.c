@@ -384,16 +384,68 @@ static void append_fps_evidence(struct app_state *app, double now,
     int render_height;
     const char *source = "app-draw-loop-context-only";
     int native_fps_credit = 0;
+    int native_present_complete = 0;
+    int same_resource_generation = 0;
+    int compositor_owned_visible_crc = 0;
+    int compositor_owned_visible_frame = 0;
+    int compositor_owned_visible_hash = 0;
+    int client_content_progress = 0;
+    int demo_visible = 0;
+    int demo_closeable = 0;
+    int demo_resizable = 0;
+    int strict_finite_fps_evidence = 0;
     double effective_presented_fps = 0.0;
 
     (void)read_d3d12_present_evidence(&evidence);
+    native_present_complete =
+        evidence.valid &&
+        evidence.present_id > 0 &&
+        evidence.completed >= evidence.present_id &&
+        evidence.display_bind_present_id == evidence.present_id &&
+        evidence.display_bind_completed_id == evidence.completed &&
+        evidence.display_bind_completed_id >= evidence.display_bind_present_id;
+    same_resource_generation =
+        evidence.valid &&
+        evidence.buffer_generation > 0 &&
+        evidence.display_bind_resource_generation == evidence.buffer_generation;
+    compositor_owned_visible_crc =
+        evidence.valid &&
+        evidence.content_visible_credit == 1 &&
+        evidence.content_native_present_credit == 1 &&
+        evidence.present_content_crc != 0 &&
+        evidence.visible_content_crc != 0;
+    compositor_owned_visible_frame =
+        evidence.valid &&
+        evidence.present_content_frame != 0 &&
+        evidence.visible_content_frame != 0;
+    compositor_owned_visible_hash =
+        evidence.valid &&
+        evidence.present_frame_hash != 0 &&
+        evidence.visible_frame_hash != 0;
+    client_content_progress =
+        app->source_content_hash != 0 && app->source_content_frame != 0;
+    demo_visible = app->frame > 0 && client_content_progress;
+    demo_closeable = app->toplevel != NULL;
+    demo_resizable = app->resize_count > 0;
     if (evidence.valid) {
         native_count = evidence.native_present_count;
         if (native_count >= app->last_native_present_count)
             native_delta = native_count - app->last_native_present_count;
         app->last_native_present_count = native_count;
         source = "native-d3d12-present-complete";
-        native_fps_credit = native_delta > 0;
+        strict_finite_fps_evidence =
+            native_delta > 0 &&
+            native_present_complete &&
+            same_resource_generation &&
+            compositor_owned_visible_crc &&
+            compositor_owned_visible_frame &&
+            compositor_owned_visible_hash &&
+            evidence.callback_release_same_frame == 1 &&
+            client_content_progress &&
+            demo_visible &&
+            demo_closeable &&
+            demo_resizable;
+        native_fps_credit = strict_finite_fps_evidence;
         if (native_fps_credit && elapsed > 0.0)
             effective_presented_fps = (double)native_delta / elapsed;
     }
@@ -432,8 +484,28 @@ static void append_fps_evidence(struct app_state *app, double now,
             "client_content_hash=%lu client_content_frame=%lu "
             "content_region=client-content-no-title-fps "
             "callback_release_same_frame=%lu "
+            "native_present_complete=%d "
+            "same_run_resource_generation=%d "
+            "same_resource_generation=%d "
+            "compositor_owned_visible_content_crc=%d "
+            "compositor_owned_visible_content_frame=%d "
+            "compositor_owned_visible_frame_hash=%d "
+            "client_content_progress=%d "
+            "finite_demo_visible=%d finite_demo_closeable=%d "
+            "finite_demo_resizable=%d "
+            "strict_finite_fps_evidence=%d "
+            "native_present_credit=%d "
+            "opengl_submit_credit=0 "
             "displayed_fps_context_only=%d "
-            "acceptance_requires_native_present_and_content_progress=1\n",
+            "acceptance_requires_native_present_and_content_progress=1 "
+            "acceptance_requires_native_present_completion=1 "
+            "acceptance_requires_compositor_owned_visible_content_crc=1 "
+            "acceptance_requires_compositor_owned_visible_content_frame=1 "
+            "acceptance_requires_compositor_owned_visible_frame_hash=1 "
+            "acceptance_requires_same_resource_generation=1 "
+            "acceptance_requires_demo_visible=1 "
+            "acceptance_requires_demo_closeable=1 "
+            "acceptance_requires_demo_resizable=1\n",
             app->fps_sample_seq, fps, source, validation_run_id(),
             (int)getpid(),
             evidence.client_pid > 0 ? evidence.client_pid : (int)getpid(),
@@ -463,7 +535,17 @@ static void append_fps_evidence(struct app_state *app, double now,
             app->source_content_hash,
             app->source_content_frame,
             evidence.callback_release_same_frame,
-            evidence.valid ? 0 : 1);
+            native_present_complete,
+            evidence.valid ? 1 : 0,
+            same_resource_generation,
+            compositor_owned_visible_crc,
+            compositor_owned_visible_frame,
+            compositor_owned_visible_hash,
+            client_content_progress,
+            demo_visible, demo_closeable, demo_resizable,
+            strict_finite_fps_evidence,
+            native_fps_credit,
+            native_fps_credit ? 0 : 1);
     fprintf(fp,
             "mesawlegl_fps_present_credit_matrix "
             "callback_seq=%d visible_fps=%.3f effective_presented_fps=%.3f "
@@ -474,6 +556,16 @@ static void append_fps_evidence(struct app_state *app, double now,
             "content_visible_credit=%lu present_content_crc=%lu "
             "visible_content_crc=%lu present_content_frame=%lu "
             "visible_content_frame=%lu callback_release_same_frame=%lu "
+            "native_present_complete=%d "
+            "same_run_resource_generation=%d "
+            "same_resource_generation=%d "
+            "compositor_owned_visible_content_crc=%d "
+            "compositor_owned_visible_content_frame=%d "
+            "compositor_owned_visible_frame_hash=%d "
+            "client_content_progress=%d "
+            "finite_demo_visible=%d finite_demo_closeable=%d "
+            "finite_demo_resizable=%d "
+            "strict_finite_fps_evidence=%d "
             "displayed_fps_context_only=%d visible_fps_ignored=%d "
             "fps_credit_source=%s native_present_credit=%d "
             "opengl_submit_credit=0 status=PASS\n",
@@ -489,6 +581,15 @@ static void append_fps_evidence(struct app_state *app, double now,
             evidence.present_content_frame,
             evidence.visible_content_frame,
             evidence.callback_release_same_frame,
+            native_present_complete,
+            evidence.valid ? 1 : 0,
+            same_resource_generation,
+            compositor_owned_visible_crc,
+            compositor_owned_visible_frame,
+            compositor_owned_visible_hash,
+            client_content_progress,
+            demo_visible, demo_closeable, demo_resizable,
+            strict_finite_fps_evidence,
             native_fps_credit ? 0 : 1,
             native_fps_credit ? 0 : 1, source, native_fps_credit);
     if (!evidence.valid) {
@@ -1558,6 +1659,14 @@ static void append_demo_interaction_evidence(struct app_state *app,
     int visible_demo;
     int closeable_demo;
     int resizable_demo;
+    int native_present_complete;
+    int same_resource_generation;
+    int compositor_owned_visible_crc;
+    int compositor_owned_visible_frame;
+    int compositor_owned_visible_hash;
+    int client_content_progress;
+    int content_progress_complete;
+    int strict_demo_evidence;
 
     if (!app || !app->sphere_demo)
         return;
@@ -1567,12 +1676,51 @@ static void append_demo_interaction_evidence(struct app_state *app,
         render_width = app->width;
     if (render_height <= 0)
         render_height = app->height;
-    visible_demo = rc == 0 && app->frame > 0 &&
+    client_content_progress =
         app->source_content_hash != 0 && app->source_content_frame != 0;
+    visible_demo = rc == 0 && app->frame > 0 && client_content_progress;
     closeable_demo = app->toplevel != NULL;
     resizable_demo = app->resize_count > 0;
     memset(&evidence, 0, sizeof(evidence));
     (void)read_d3d12_present_evidence(&evidence);
+    native_present_complete =
+        evidence.valid &&
+        evidence.present_id > 0 &&
+        evidence.completed >= evidence.present_id &&
+        evidence.display_bind_present_id == evidence.present_id &&
+        evidence.display_bind_completed_id == evidence.completed &&
+        evidence.display_bind_completed_id >= evidence.display_bind_present_id;
+    same_resource_generation =
+        evidence.valid &&
+        evidence.buffer_generation > 0 &&
+        evidence.display_bind_resource_generation == evidence.buffer_generation;
+    compositor_owned_visible_crc =
+        evidence.valid &&
+        evidence.content_visible_credit == 1 &&
+        evidence.content_native_present_credit == 1 &&
+        evidence.present_content_crc != 0 &&
+        evidence.visible_content_crc != 0;
+    compositor_owned_visible_frame =
+        evidence.valid &&
+        evidence.present_content_frame != 0 &&
+        evidence.visible_content_frame != 0;
+    compositor_owned_visible_hash =
+        evidence.valid &&
+        evidence.present_frame_hash != 0 &&
+        evidence.visible_frame_hash != 0;
+    content_progress_complete =
+        same_resource_generation &&
+        compositor_owned_visible_crc &&
+        compositor_owned_visible_frame &&
+        compositor_owned_visible_hash &&
+        evidence.callback_release_same_frame == 1 &&
+        client_content_progress;
+    strict_demo_evidence =
+        native_present_complete &&
+        content_progress_complete &&
+        visible_demo &&
+        closeable_demo &&
+        resizable_demo;
     run_id = validation_run_id();
 
     fp = fopen(FPS_EVIDENCE_PATH, "a");
@@ -1588,11 +1736,19 @@ static void append_demo_interaction_evidence(struct app_state *app,
             "display_bind_present_id=%lu display_bind_completed_id=%lu "
             "display_bind_resource_generation=%lu "
             "display_bind_completion_source=%s "
+            "native_present_complete=%d "
+            "same_run_resource_generation=%d "
+            "same_resource_generation=%d "
+            "compositor_owned_visible_content_crc=%d "
+            "compositor_owned_visible_content_frame=%d "
+            "compositor_owned_visible_frame_hash=%d "
+            "client_content_progress=%d "
+            "strict_demo_interaction_evidence=%d "
             "d3d12_demo_interaction_native_present_complete=%d "
             "d3d12_demo_interaction_content_progress=%d "
             "client_content_hash=%lu client_content_frame=%lu "
             "content_region=client-content-no-title-fps "
-            "native_present_credit=0 opengl_submit_credit=0 status=%s\n",
+            "native_present_credit=%d opengl_submit_credit=0 status=%s\n",
             run_id, (int)getpid(), evidence.client_pid,
             visible_demo, closeable_demo, resizable_demo,
             app->resize_count, app->close_requested, app->frame, rc,
@@ -1604,11 +1760,20 @@ static void append_demo_interaction_evidence(struct app_state *app,
             evidence.display_bind_resource_generation,
             evidence.display_bind_completion_source[0] ?
                 evidence.display_bind_completion_source : "missing",
+            native_present_complete,
             evidence.valid ? 1 : 0,
-            evidence.valid ? 1 : 0,
+            same_resource_generation,
+            compositor_owned_visible_crc,
+            compositor_owned_visible_frame,
+            compositor_owned_visible_hash,
+            client_content_progress,
+            strict_demo_evidence,
+            native_present_complete ? 1 : 0,
+            content_progress_complete ? 1 : 0,
             app->source_content_hash,
             app->source_content_frame,
-            visible_demo && closeable_demo && resizable_demo ?
+            strict_demo_evidence ? 1 : 0,
+            strict_demo_evidence ?
                 "PASS" : "FAIL");
     fclose(fp);
 }
