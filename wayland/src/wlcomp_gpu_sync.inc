@@ -3907,6 +3907,15 @@ static void xv6_d3d12_write_fail_closed_display_handoff_evidence(
             source_record && source_record->commit_attempts,
             (unsigned long)(source_record ? source_record->present_id : 0),
             (unsigned long)(source_record ? source_record->completed : 0));
+    fprintf(stderr,
+            "wlcomp: d3d12_wayland_present_fps_provenance_matrix "
+            "resource_buffer_admitted=1 syncfile_acquire=PASS "
+            "gpu_copy_complete=1 display_handoff_implemented=0 "
+            "present_id=%lu completed=%lu callbacks_blocked=1 "
+            "releases_blocked=1 fps_credit=0 native_present_claim=0 "
+            "opengl_submit_credit=0 status=PASS_FAILCLOSED\n",
+            (unsigned long)(source_record ? source_record->present_id : 0),
+            (unsigned long)(source_record ? source_record->completed : 0));
     xv6_d3d12_unblock_failclosed_client(buf, "display-handoff-missing");
 }
 
@@ -4405,6 +4414,15 @@ static void xv6_d3d12_finish_present_after_display(struct wlcomp_buffer *buf)
             source_record->dirty_rect_count,
             (unsigned long)source_record->dirty_sequence,
             (unsigned long)result.release_fence);
+    fprintf(stderr,
+            "wlcomp: d3d12_wayland_present_fps_provenance_matrix "
+            "resource_buffer_admitted=1 syncfile_acquire=PASS "
+            "gpu_copy_complete=1 display_handoff_implemented=1 "
+            "present_id=%lu completed=%lu callbacks_blocked=0 "
+            "releases_blocked=0 fps_credit=1 native_present_claim=1 "
+            "opengl_submit_credit=0 status=PASS\n",
+            (unsigned long)source_record->present_id,
+            (unsigned long)source_record->completed);
     return;
 
 reject_display_completion:

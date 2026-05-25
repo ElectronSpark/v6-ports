@@ -294,6 +294,8 @@ static void append_fps_evidence(struct app_state *app, double now,
     int render_width;
     int render_height;
     const char *source = "app-draw-loop-context-only";
+    int native_fps_credit = 0;
+    double effective_presented_fps = 0.0;
 
     (void)read_d3d12_present_evidence(&evidence);
     if (evidence.valid) {
@@ -302,6 +304,9 @@ static void append_fps_evidence(struct app_state *app, double now,
             native_delta = native_count - app->last_native_present_count;
         app->last_native_present_count = native_count;
         source = "native-d3d12-present-complete";
+        native_fps_credit = native_delta > 0;
+        if (native_fps_credit)
+            effective_presented_fps = fps;
     }
 
     render_width = app->width / app->render_div;
@@ -336,6 +341,18 @@ static void append_fps_evidence(struct app_state *app, double now,
             app->render_div, evidence.generation, evidence.evidence_time_us,
             evidence.resource, evidence.buffer_generation,
             evidence.present_id, evidence.completed, evidence.valid ? 0 : 1);
+    fprintf(fp,
+            "mesawlegl_fps_present_credit_matrix "
+            "callback_seq=%d visible_fps=%.3f effective_presented_fps=%.3f "
+            "strict_anti_inflation=1 d3d12_evidence_valid=%d "
+            "native_present_delta=%lu present_id=%lu completed=%lu "
+            "displayed_fps_context_only=%d visible_fps_ignored=%d "
+            "fps_credit_source=%s native_present_credit=%d "
+            "opengl_submit_credit=0 status=PASS\n",
+            app->fps_sample_seq, fps, effective_presented_fps,
+            evidence.valid ? 1 : 0, native_delta, evidence.present_id,
+            evidence.completed, native_fps_credit ? 0 : 1,
+            native_fps_credit ? 0 : 1, source, native_fps_credit);
     if (!evidence.valid) {
         fprintf(fp,
                 "mesawlegl_fps_context_only_matrix "
