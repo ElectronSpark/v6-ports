@@ -62,6 +62,16 @@ struct wlcomp_buffer {
     uint64_t             d3d12_present_fence_value;
     uint64_t             d3d12_native_present_attempt_id;
     uint64_t             d3d12_native_present_completion_id;
+    uint64_t             d3d12_present_content_crc;
+    uint64_t             d3d12_visible_content_crc;
+    uint64_t             d3d12_present_content_frame;
+    uint64_t             d3d12_visible_content_frame;
+    uint64_t             d3d12_present_frame_hash;
+    uint64_t             d3d12_visible_frame_hash;
+    uint64_t             d3d12_content_sample_present_id;
+    uint64_t             d3d12_content_sample_completed_id;
+    uint64_t             d3d12_content_sample_resource_generation;
+    int                  d3d12_content_sample_source_owned;
     int                  d3d12_native_present_reject_recorded;
     uint64_t             d3d12_fb_blit_attempts_at_present;
     uint64_t             d3d12_fb_blit_successes_at_present;

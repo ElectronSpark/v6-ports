@@ -528,6 +528,9 @@ static void xv6_d3d12_write_present_evidence(
     const struct xv6_d3d12_present_result *result,
     int rejected,
     int err);
+static void xv6_d3d12_record_content_sample_unavailable(
+    struct wlcomp_buffer *buf,
+    const struct xv6_d3d12_present_contract *present);
 static void xv6_d3d12_drain_failclosed_client(
     struct wlcomp_buffer *buf, const char *reason);
 
@@ -833,6 +836,28 @@ static const char *xv6_d3d12_display_bind_completion_source(
     const struct xv6_d3d12_present_contract *present)
 {
     return xv6_d3d12_display_bind_complete(present) ? "display" : "missing";
+}
+
+static void xv6_d3d12_record_content_sample_unavailable(
+    struct wlcomp_buffer *buf,
+    const struct xv6_d3d12_present_contract *present)
+{
+    if (!buf || !present)
+        return;
+
+    buf->d3d12_present_content_crc = 0;
+    buf->d3d12_visible_content_crc = 0;
+    buf->d3d12_present_content_frame = 0;
+    buf->d3d12_visible_content_frame = 0;
+    buf->d3d12_present_frame_hash = 0;
+    buf->d3d12_visible_frame_hash = 0;
+    buf->d3d12_content_sample_present_id =
+        present->present_source_present_id;
+    buf->d3d12_content_sample_completed_id =
+        present->present_source_completed;
+    buf->d3d12_content_sample_resource_generation =
+        present->buffer_generation;
+    buf->d3d12_content_sample_source_owned = 0;
 }
 
 static uint64_t xv6_d3d12_counter_delta(uint64_t current, uint64_t baseline)
@@ -1294,25 +1319,67 @@ static void xv6_d3d12_write_fps_provenance_evidence(
 
 static void xv6_d3d12_write_content_progress_evidence(
     FILE *fp,
+    const struct wlcomp_buffer *buf,
     const struct xv6_d3d12_present_contract *present,
     const struct xv6_d3d12_present_result *result,
     int rejected)
 {
+    struct wlcomp_surface *surf;
+    const struct wlcomp_buffer *sample_buf = buf;
     int native_present_complete =
         !rejected && result && xv6_d3d12_display_bind_complete(present);
-    uint64_t content_crc = 0;
-    uint64_t content_frame = 0;
-    uint64_t frame_hash = 0;
-    int source_content_ready = 0;
+    uint64_t content_crc;
+    uint64_t visible_crc;
+    uint64_t content_frame;
+    uint64_t visible_frame;
+    uint64_t frame_hash;
+    uint64_t visible_hash;
+    int source_content_ready;
     const char *progress_state = native_present_complete ?
         "NATIVE_PRESENT_COMPLETE" : "DEFERRED";
     uint64_t present_id = present ? present->present_source_present_id : 0;
     uint64_t completed = present ? present->present_source_completed : 0;
-    int visible_credit = native_present_complete && source_content_ready;
-    int native_content_credit = visible_credit;
+    int visible_credit;
+    int native_content_credit;
 
     if (!fp)
         return;
+    if (!sample_buf && present) {
+        wl_list_for_each(surf, &g_surfaces, link) {
+            const struct wlcomp_buffer *candidate = surf->committed_buf;
+
+            if (candidate && candidate->is_d3d12_shared &&
+                candidate->d3d12_client_pid == present->client_pid &&
+                candidate->d3d12_opened_resource == present->resource &&
+                candidate->d3d12_buffer_generation ==
+                    present->buffer_generation) {
+                sample_buf = candidate;
+                break;
+            }
+        }
+    }
+    content_crc = sample_buf ? sample_buf->d3d12_present_content_crc : 0;
+    visible_crc = sample_buf ? sample_buf->d3d12_visible_content_crc : 0;
+    content_frame =
+        sample_buf ? sample_buf->d3d12_present_content_frame : 0;
+    visible_frame =
+        sample_buf ? sample_buf->d3d12_visible_content_frame : 0;
+    frame_hash = sample_buf ? sample_buf->d3d12_present_frame_hash : 0;
+    visible_hash = sample_buf ? sample_buf->d3d12_visible_frame_hash : 0;
+    source_content_ready =
+        native_present_complete && sample_buf &&
+        sample_buf->d3d12_content_sample_source_owned != 0 &&
+        sample_buf->d3d12_content_sample_present_id ==
+            present->present_source_present_id &&
+        sample_buf->d3d12_content_sample_completed_id >=
+            sample_buf->d3d12_content_sample_present_id &&
+        sample_buf->d3d12_content_sample_resource_generation ==
+            present->buffer_generation &&
+        content_crc != 0 && visible_crc != 0 &&
+        content_frame != 0 && visible_frame != 0 &&
+        frame_hash != 0 && visible_hash != 0;
+    visible_credit = native_present_complete && source_content_ready;
+    native_content_credit = visible_credit;
     fprintf(fp,
             "d3d12_wayland_content_progress_matrix "
             "resource_buffer_admitted=%d gpu_copy_complete=%d "
@@ -1350,11 +1417,11 @@ static void xv6_d3d12_write_content_progress_evidence(
             xv6_d3d12_display_bind_completion_source(present),
             xv6_d3d12_display_bind_completion_source(present),
             (unsigned long)content_crc,
-            (unsigned long)content_crc,
+            (unsigned long)visible_crc,
             (unsigned long)content_frame,
-            (unsigned long)content_frame,
+            (unsigned long)visible_frame,
             (unsigned long)frame_hash,
-            (unsigned long)frame_hash,
+            (unsigned long)visible_hash,
             source_content_ready,
             visible_credit,
             native_content_credit,
@@ -1387,11 +1454,11 @@ static void xv6_d3d12_write_content_progress_evidence(
             progress_state,
             progress_state,
             (unsigned long)content_crc,
-            (unsigned long)content_crc,
+            (unsigned long)visible_crc,
             (unsigned long)content_frame,
-            (unsigned long)content_frame,
+            (unsigned long)visible_frame,
             (unsigned long)frame_hash,
-            (unsigned long)frame_hash,
+            (unsigned long)visible_hash,
             source_content_ready,
             (unsigned long)present_id,
             (unsigned long)completed,
@@ -2137,7 +2204,7 @@ static void xv6_d3d12_write_stage_evidence(const char *stage, int err)
             (unsigned long)g_d3d12_frame_callback_present_id);
     xv6_d3d12_write_final_handoff_evidence(fp, NULL, NULL, 1);
     xv6_d3d12_write_fps_provenance_evidence(fp, NULL, NULL, 1);
-    xv6_d3d12_write_content_progress_evidence(fp, NULL, NULL, 1);
+    xv6_d3d12_write_content_progress_evidence(fp, NULL, NULL, NULL, 1);
     xv6_d3d12_write_phase2_negative_evidence(fp);
     fclose(fp);
 }
@@ -3830,7 +3897,8 @@ static void xv6_d3d12_write_present_evidence(
                 0));
     xv6_d3d12_write_final_handoff_evidence(fp, present, result, rejected);
     xv6_d3d12_write_fps_provenance_evidence(fp, present, result, rejected);
-    xv6_d3d12_write_content_progress_evidence(fp, present, result, rejected);
+    xv6_d3d12_write_content_progress_evidence(fp, NULL, present, result,
+                                             rejected);
     xv6_d3d12_write_phase2_negative_evidence(fp);
     fclose(fp);
 }
@@ -4659,6 +4727,7 @@ static void xv6_d3d12_finish_present_after_display(struct wlcomp_buffer *buf)
         buf->d3d12_native_present_completion_id;
     xv6_d3d12_note_identity_present_completion(buf);
     xv6_d3d12_fill_present_identity(&present, buf);
+    xv6_d3d12_record_content_sample_unavailable(buf, &present);
     xv6_d3d12_write_present_evidence(&present, &result, 0, 0);
     fprintf(stderr,
                 "wlcomp: d3d12 dxg runtime-resource display completion observed d3d12_native_present_completions=%lu d3d12_native_present_completion_id=%lu d3d12_gpu_present_completes=%lu d3d12_gpu_present_complete=%lu client_pid=%d client_buffer_id=%u buffer_generation=%lu resource=0x%x copy_complete=%lu present_source=0x%x present_id=%lu completed=%lu target_kind=%s target_raw=%u dirty_rects=%u dirty_sequence=%lu release_fence=%lu callbacks_unblocked=1 releases_unblocked=1 no_cpu_readback=1 no_cpu_map=1 synthvid_sysmem_fallback=0\n",

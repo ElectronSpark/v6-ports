@@ -139,6 +139,16 @@ static void surface_commit(struct wl_client *client, struct wl_resource *resourc
             surf->committed_buf->d3d12_gpu_copy_complete_time = 0;
             surf->committed_buf->d3d12_native_present_attempt_id = 0;
             surf->committed_buf->d3d12_native_present_completion_id = 0;
+            surf->committed_buf->d3d12_present_content_crc = 0;
+            surf->committed_buf->d3d12_visible_content_crc = 0;
+            surf->committed_buf->d3d12_present_content_frame = 0;
+            surf->committed_buf->d3d12_visible_content_frame = 0;
+            surf->committed_buf->d3d12_present_frame_hash = 0;
+            surf->committed_buf->d3d12_visible_frame_hash = 0;
+            surf->committed_buf->d3d12_content_sample_present_id = 0;
+            surf->committed_buf->d3d12_content_sample_completed_id = 0;
+            surf->committed_buf->d3d12_content_sample_resource_generation = 0;
+            surf->committed_buf->d3d12_content_sample_source_owned = 0;
             surf->committed_buf->d3d12_fb_blit_attempts_at_present =
                 g_fb_blit_present_attempt_count;
             surf->committed_buf->d3d12_fb_blit_successes_at_present =
