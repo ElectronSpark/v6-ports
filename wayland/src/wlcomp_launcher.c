@@ -249,6 +249,14 @@ static int launcher_d3d12_present_evidence_valid(
     uint64_t display_handoff = 0;
     uint64_t requirements_satisfied = 0;
     uint64_t current_run_valid = 0;
+    uint64_t client_pid = 0;
+    uint64_t identity_client_pid = 0;
+    uint64_t client_buffer_id = 0;
+    uint64_t identity_client_buffer_id = 0;
+    uint64_t manager_resource_id = 0;
+    uint64_t identity_manager_resource_id = 0;
+    uint64_t buffer_generation = 0;
+    uint64_t identity_buffer_generation = 0;
     uint64_t source_luid_valid = 0;
     uint64_t present_same_luid = 0;
     uint64_t buffer_completion_correlated = 0;
@@ -258,6 +266,18 @@ static int launcher_d3d12_present_evidence_valid(
     uint64_t same_frame_observed = 0;
     uint64_t frame_callback_observed = 0;
     uint64_t buffer_release_observed = 0;
+    uint64_t buffer_release_same_resource = 0;
+    uint64_t buffer_release_same_generation = 0;
+    uint64_t buffer_release_same_attempt = 0;
+    uint64_t buffer_release_same_present_id = 0;
+    uint64_t buffer_release_present_id = 0;
+    uint64_t buffer_release_completion_id = 0;
+    uint64_t frame_callback_same_resource = 0;
+    uint64_t frame_callback_same_generation = 0;
+    uint64_t frame_callback_same_attempt = 0;
+    uint64_t frame_callback_same_present_id = 0;
+    uint64_t frame_callback_present_id = 0;
+    uint64_t frame_callback_completion_id = 0;
     uint64_t content_crc = 0;
     uint64_t content_frame = 0;
     uint64_t content_requires_native = 0;
@@ -281,6 +301,7 @@ static int launcher_d3d12_present_evidence_valid(
     int shared_resource;
     int fence_ok;
     int run_id_match;
+    int client_identity_ok;
     int native_present_ok;
     int callback_release_ok;
     int content_progress_ok;
@@ -346,6 +367,26 @@ static int launcher_d3d12_present_evidence_valid(
         (void)launcher_evidence_key_u64(evidence,
                                         "d3d12_present_identity_current_run_valid",
                                         &current_run_valid);
+        (void)launcher_evidence_key_u64(evidence, "d3d12_client_pid",
+                                        &client_pid);
+        (void)launcher_evidence_key_u64(evidence,
+                                        "d3d12_present_identity_client_pid",
+                                        &identity_client_pid);
+        (void)launcher_evidence_key_u64(evidence, "d3d12_client_buffer_id",
+                                        &client_buffer_id);
+        (void)launcher_evidence_key_u64(evidence,
+                                        "d3d12_present_identity_client_buffer_id",
+                                        &identity_client_buffer_id);
+        (void)launcher_evidence_key_u64(evidence, "d3d12_manager_resource_id",
+                                        &manager_resource_id);
+        (void)launcher_evidence_key_u64(evidence,
+                                        "d3d12_present_identity_manager_resource_id",
+                                        &identity_manager_resource_id);
+        (void)launcher_evidence_key_u64(evidence, "d3d12_buffer_generation",
+                                        &buffer_generation);
+        (void)launcher_evidence_key_u64(evidence,
+                                        "d3d12_present_identity_buffer_generation",
+                                        &identity_buffer_generation);
         (void)launcher_evidence_key_u64(evidence,
                                         "d3d12_present_source_luid_valid",
                                         &source_luid_valid);
@@ -369,6 +410,42 @@ static int launcher_d3d12_present_evidence_valid(
         (void)launcher_evidence_key_u64(evidence,
                                         "d3d12_buffer_release_observed",
                                         &buffer_release_observed);
+        (void)launcher_evidence_key_u64(evidence,
+                                        "d3d12_buffer_release_same_resource",
+                                        &buffer_release_same_resource);
+        (void)launcher_evidence_key_u64(evidence,
+                                        "d3d12_buffer_release_same_generation",
+                                        &buffer_release_same_generation);
+        (void)launcher_evidence_key_u64(evidence,
+                                        "d3d12_buffer_release_same_attempt",
+                                        &buffer_release_same_attempt);
+        (void)launcher_evidence_key_u64(evidence,
+                                        "d3d12_buffer_release_same_present_id",
+                                        &buffer_release_same_present_id);
+        (void)launcher_evidence_key_u64(evidence,
+                                        "d3d12_buffer_release_present_id",
+                                        &buffer_release_present_id);
+        (void)launcher_evidence_key_u64(evidence,
+                                        "d3d12_buffer_release_completion_id",
+                                        &buffer_release_completion_id);
+        (void)launcher_evidence_key_u64(evidence,
+                                        "d3d12_frame_callback_same_resource",
+                                        &frame_callback_same_resource);
+        (void)launcher_evidence_key_u64(evidence,
+                                        "d3d12_frame_callback_same_generation",
+                                        &frame_callback_same_generation);
+        (void)launcher_evidence_key_u64(evidence,
+                                        "d3d12_frame_callback_same_attempt",
+                                        &frame_callback_same_attempt);
+        (void)launcher_evidence_key_u64(evidence,
+                                        "d3d12_frame_callback_same_present_id",
+                                        &frame_callback_same_present_id);
+        (void)launcher_evidence_key_u64(evidence,
+                                        "d3d12_frame_callback_present_id",
+                                        &frame_callback_present_id);
+        (void)launcher_evidence_key_u64(evidence,
+                                        "d3d12_frame_callback_completion_id",
+                                        &frame_callback_completion_id);
         launcher_evidence_key_u64_alias_max(evidence,
                                             "d3d12_present_content_crc",
                                             &content_crc);
@@ -469,6 +546,14 @@ static int launcher_d3d12_present_evidence_valid(
                    strcmp(run_id, expected_run_id) == 0 &&
                    strcmp(compositor_run_id, expected_run_id) == 0 &&
                    current_run_valid == 1;
+    client_identity_ok =
+        client_pid != 0 && identity_client_pid == client_pid &&
+        client_buffer_id != 0 &&
+        identity_client_buffer_id == client_buffer_id &&
+        manager_resource_id != 0 &&
+        identity_manager_resource_id == manager_resource_id &&
+        buffer_generation != 0 &&
+        identity_buffer_generation == buffer_generation;
     native_present_ok =
         evidence_loaded && present_rejected == 0 && evidence_generation != 0 &&
         evidence_time_us != 0 && present_complete != 0 && present_id != 0 &&
@@ -479,7 +564,19 @@ static int launcher_d3d12_present_evidence_valid(
         strcmp(path, "d3d12-dxg-present-source-display-handoff") == 0;
     callback_release_ok =
         callback_release_required == 1 && same_frame_observed == 1 &&
-        frame_callback_observed != 0 && buffer_release_observed != 0;
+        frame_callback_observed != 0 && buffer_release_observed != 0 &&
+        buffer_release_same_resource == 1 &&
+        buffer_release_same_generation == 1 &&
+        buffer_release_same_attempt == 1 &&
+        buffer_release_same_present_id == 1 &&
+        buffer_release_present_id == present_id &&
+        buffer_release_completion_id == native_present_completion_id &&
+        frame_callback_same_resource == 1 &&
+        frame_callback_same_generation == 1 &&
+        frame_callback_same_attempt == 1 &&
+        frame_callback_same_present_id == 1 &&
+        frame_callback_present_id == present_id &&
+        frame_callback_completion_id == native_present_completion_id;
     content_progress_ok =
         content_crc != 0 && content_frame != 0 &&
         strcmp(content_progress_state, "NATIVE_PRESENT_COMPLETE") == 0 &&
@@ -492,23 +589,28 @@ static int launcher_d3d12_present_evidence_valid(
     gate_open =
         render_node && dxg_transport && d3dkmt && opengl_submit &&
         same_adapter && no_readback && shared_resource && fence_ok &&
-        run_id_match && native_present_ok && callback_release_ok &&
-        content_progress_ok;
+        run_id_match && client_identity_ok && native_present_ok &&
+        callback_release_ok && content_progress_ok;
     fprintf(stderr,
             "wlcomp: webkit_gpu_contract_matrix "
             "contract=d3d12-shared-surface "
             "run_id_match=%s same_adapter_luid=%s "
+            "same_client_resource_generation=%s "
             "syncfile_acquire=%s native_present=%s "
             "content_progress=%s content_progress_state=%s "
             "visible_content_progress=%s content_crc=%s content_frame=%s "
             "backend_opengl_submit=%d render_node=%d dxg_transport=%d "
             "d3dkmt=%d fps_gate=DEFERRED no_env_only=PASS "
+            "title_only=REJECT chrome_only=REJECT cursor_only=REJECT "
+            "render_node_only=REJECT dmabuf_only=REJECT "
             "no_dmabuf_only=PASS no_callback_only=%s "
+            "callback_release_same_resource_generation=%s "
             "native_present_credit=%d opengl_submit_credit=%d "
             "status=%s expected_run_id=%s evidence_run_id=%s "
             "compositor_run_id=%s\n",
             run_id_match ? "PASS" : "FAIL",
             same_adapter ? "PASS" : "FAIL",
+            client_identity_ok ? "PASS" : "FAIL",
             fence_ok ? "PASS" : "FAIL",
             native_present_ok ? "PASS" : "FAIL",
             content_progress_ok ? "PASS" : "FAIL",
@@ -517,6 +619,7 @@ static int launcher_d3d12_present_evidence_valid(
             content_crc != 0 ? "PASS" : "MISSING",
             content_frame != 0 ? "PASS" : "MISSING",
             opengl_submit, render_node, dxg_transport, d3dkmt,
+            callback_release_ok ? "PASS" : "FAIL",
             callback_release_ok ? "PASS" : "FAIL",
             gate_open ? 1 : 0,
             gate_open ? 1 : 0,
