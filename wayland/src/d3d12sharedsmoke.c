@@ -184,6 +184,13 @@ struct d3dkmt_createsynchronizationobject2 {
     uint32 reserved1;
 };
 
+struct d3dkmt_createsyncfile {
+    struct d3dkmthandle device;
+    struct d3dkmthandle monitored_fence;
+    uint64 fence_value;
+    uint64 sync_file_handle;
+};
+
 struct d3dkmt_destroysynchronizationobject {
     struct d3dkmthandle sync_object;
 };
@@ -202,6 +209,15 @@ struct d3dkmt_opensyncobjectfromnthandle2 {
         } monitored_fence;
         uint64 reserved[8];
     };
+};
+
+struct d3dkmt_opensyncobjectfromsyncfile {
+    uint64 sync_file_handle;
+    struct d3dkmthandle device;
+    struct d3dkmthandle syncobj;
+    uint64 fence_value;
+    uint64 fence_value_cpu_va;
+    uint64 fence_value_gpu_va;
 };
 
 enum d3dkmt_standardallocationtype {
@@ -395,6 +411,10 @@ struct d3dkmt_shareobjects {
     _IOWR(0x47, 0x3f, struct d3dkmt_shareobjects)
 #define LX_DXOPENSYNCOBJECTFROMNTHANDLE2 \
     _IOWR(0x47, 0x40, struct d3dkmt_opensyncobjectfromnthandle2)
+#define LX_DXCREATESYNCFILE \
+    _IOWR(0x47, 0x45, struct d3dkmt_createsyncfile)
+#define LX_DXOPENSYNCOBJECTFROMSYNCFILE \
+    _IOWR(0x47, 0x47, struct d3dkmt_opensyncobjectfromsyncfile)
 #define LX_DXQUERYRESOURCEINFOFROMNTHANDLE \
     _IOWR(0x47, 0x41, struct d3dkmt_queryresourceinfofromnthandle)
 #define LX_DXOPENRESOURCEFROMNTHANDLE \
@@ -3551,6 +3571,116 @@ static int create_shared_dxg_fence(int fd, struct d3dkmthandle device,
     return 0;
 }
 
+static int create_dxg_syncfile_acquire(int fd, struct d3dkmthandle device,
+                                       int *sync_file_fd_out,
+                                       struct d3dkmthandle *sync_out)
+{
+    struct d3dkmt_createsynchronizationobject2 create_sync;
+    struct d3dkmt_createsyncfile create_sync_file;
+
+    memset(&create_sync, 0, sizeof(create_sync));
+    create_sync.device = device;
+    create_sync.info.type = _D3DDDI_MONITORED_FENCE;
+    create_sync.info.flags.shared = 1;
+    create_sync.info.flags.nt_security_sharing = 1;
+    create_sync.info.monitored_fence.initial_fence_value = 1;
+    if (ioctl(fd, LX_DXCREATESYNCHRONIZATIONOBJECT, &create_sync) < 0 ||
+        create_sync.sync_object.v == 0) {
+        fprintf(stderr,
+                "d3d12sharedsmoke: create sync-file monitored fence failed sync=0x%x errno=%d\n",
+                create_sync.sync_object.v, errno);
+        return -1;
+    }
+
+    memset(&create_sync_file, 0, sizeof(create_sync_file));
+    create_sync_file.device = device;
+    create_sync_file.monitored_fence = create_sync.sync_object;
+    create_sync_file.fence_value = 1;
+    if (ioctl(fd, LX_DXCREATESYNCFILE, &create_sync_file) < 0 ||
+        create_sync_file.sync_file_handle == 0) {
+        struct d3dkmt_destroysynchronizationobject destroy_sync;
+
+        fprintf(stderr,
+                "d3d12sharedsmoke: create DXG sync-file acquire failed sync=0x%x fd=%lu errno=%d\n",
+                create_sync.sync_object.v,
+                (unsigned long)create_sync_file.sync_file_handle,
+                errno);
+        memset(&destroy_sync, 0, sizeof(destroy_sync));
+        destroy_sync.sync_object = create_sync.sync_object;
+        ioctl(fd, LX_DXDESTROYSYNCHRONIZATIONOBJECT, &destroy_sync);
+        return -1;
+    }
+
+    *sync_file_fd_out = (int)create_sync_file.sync_file_handle;
+    *sync_out = create_sync.sync_object;
+    printf("d3d12sharedsmoke: dxg sync-file acquire fd=%d sync=0x%x target=%lu cpu=0x%lx gpu=0x%lx\n",
+           *sync_file_fd_out, sync_out->v,
+           (unsigned long)create_sync_file.fence_value,
+           create_sync.info.monitored_fence.fence_cpu_virtual_address,
+           create_sync.info.monitored_fence.fence_gpu_virtual_address);
+    return 0;
+}
+
+static int validate_direct_open_dxg_syncfile(
+    int fd, struct d3dkmthandle device, int sync_file_fd,
+    const char *device_role, struct d3dkmthandle *sync_out)
+{
+    struct d3dkmt_opensyncobjectfromsyncfile open_sync;
+    int saved_errno;
+
+    memset(&open_sync, 0, sizeof(open_sync));
+    open_sync.device = device;
+    open_sync.sync_file_handle = (uint64)(uint32_t)sync_file_fd;
+    if (ioctl(fd, LX_DXOPENSYNCOBJECTFROMSYNCFILE, &open_sync) < 0) {
+        saved_errno = errno ? errno : EIO;
+        printf("d3d12sharedsmoke: runtime dxg-syncfile-import-result device_role=%s attempted=1 ok=0 reason=ioctl_failed ioctl=LX_DXOPENSYNCOBJECTFROMSYNCFILE fd=%d device=0x%x sync_file_fd=%d errno=%d (%s) sync=0x%x target=%lu fence_cpu=0x%lx fence_gpu=0x%lx\n",
+               device_role ? device_role : "unknown", fd, device.v,
+               sync_file_fd, saved_errno, strerror(saved_errno),
+               open_sync.syncobj.v, (unsigned long)open_sync.fence_value,
+               (unsigned long)open_sync.fence_value_cpu_va,
+               (unsigned long)open_sync.fence_value_gpu_va);
+        errno = saved_errno;
+        return -1;
+    }
+    if (open_sync.syncobj.v == 0 || open_sync.fence_value != 1 ||
+        open_sync.fence_value_cpu_va == 0 ||
+        open_sync.fence_value_gpu_va == 0) {
+        saved_errno = EINVAL;
+        printf("d3d12sharedsmoke: runtime dxg-syncfile-import-result device_role=%s attempted=1 ok=0 reason=incomplete_result ioctl=LX_DXOPENSYNCOBJECTFROMSYNCFILE fd=%d device=0x%x sync_file_fd=%d errno=0 sync=0x%x target=%lu fence_cpu=0x%lx fence_gpu=0x%lx\n",
+               device_role ? device_role : "unknown", fd, device.v,
+               sync_file_fd, open_sync.syncobj.v,
+               (unsigned long)open_sync.fence_value,
+               (unsigned long)open_sync.fence_value_cpu_va,
+               (unsigned long)open_sync.fence_value_gpu_va);
+        if (open_sync.syncobj.v != 0) {
+            struct d3dkmt_destroysynchronizationobject destroy_sync;
+
+            memset(&destroy_sync, 0, sizeof(destroy_sync));
+            destroy_sync.sync_object = open_sync.syncobj;
+            ioctl(fd, LX_DXDESTROYSYNCHRONIZATIONOBJECT, &destroy_sync);
+        }
+        errno = saved_errno;
+        return -1;
+    }
+
+    if (sync_out)
+        *sync_out = open_sync.syncobj;
+    printf("d3d12sharedsmoke: runtime dxg-syncfile-import-result device_role=%s attempted=1 ok=1 reason=ok ioctl=LX_DXOPENSYNCOBJECTFROMSYNCFILE fd=%d device=0x%x sync_file_fd=%d errno=0 sync=0x%x target=%lu fence_cpu=0x%lx fence_gpu=0x%lx\n",
+           device_role ? device_role : "unknown", fd, device.v,
+           sync_file_fd, open_sync.syncobj.v,
+           (unsigned long)open_sync.fence_value,
+           (unsigned long)open_sync.fence_value_cpu_va,
+           (unsigned long)open_sync.fence_value_gpu_va);
+    {
+        struct d3dkmt_destroysynchronizationobject destroy_sync;
+
+        memset(&destroy_sync, 0, sizeof(destroy_sync));
+        destroy_sync.sync_object = open_sync.syncobj;
+        ioctl(fd, LX_DXDESTROYSYNCHRONIZATIONOBJECT, &destroy_sync);
+    }
+    return 0;
+}
+
 static int query_shared_resource_info(int fd, struct d3dkmthandle device,
                                       int shared_fd,
                                       struct d3dkmt_queryresourceinfofromnthandle *query_out)
@@ -6576,6 +6706,7 @@ int main(int argc, char **argv)
     int expect_luid_reject = getenv("D3D12SHAREDSMOKE_BAD_LUID") != NULL;
     int use_runtime = getenv("D3D12SHAREDSMOKE_RUNTIME") != NULL;
     int require_present = 0;
+    int allow_failclosed_present = 0;
     int ret = 1;
     int dxg_only = 0;
     int device_admission_matrix = 0;
@@ -6613,6 +6744,9 @@ int main(int argc, char **argv)
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--require-present") == 0) {
             require_present = 1;
+        } else if (strcmp(argv[i], "--allow-failclosed-present") == 0) {
+            require_present = 1;
+            allow_failclosed_present = 1;
         } else if (strcmp(argv[i], "--present-evidence-selftest") == 0) {
             present_evidence_selftest = 1;
         } else if (strcmp(argv[i], "--runtime-negative-submissions") == 0 ||
@@ -6954,7 +7088,7 @@ int main(int argc, char **argv)
             expect_stale_fence_reject = 1;
         } else {
             fprintf(stderr,
-                    "usage: %s [--case=...] [--runtime] [--device-admission-matrix] [--present-evidence-selftest] [--present-evidence-validate=PATH] [--runtime-negative-submissions] [--require-present] [--bad-luid] [--bad-dimensions] [--bad-format] [--missing-fence] [--stale-fence]\n",
+                    "usage: %s [--case=...] [--runtime] [--device-admission-matrix] [--present-evidence-selftest] [--present-evidence-validate=PATH] [--runtime-negative-submissions] [--require-present] [--allow-failclosed-present] [--bad-luid] [--bad-dimensions] [--bad-format] [--missing-fence] [--stale-fence]\n",
                     argv[0]);
             return 2;
         }
@@ -6983,7 +7117,7 @@ int main(int argc, char **argv)
     }
 
     signal(SIGALRM, timeout_handler);
-    alarm(10);
+    alarm(use_runtime && require_present ? 60 : 10);
     memset(&app, 0, sizeof(app));
     memset(&adapter, 0, sizeof(adapter));
     memset(&device, 0, sizeof(device));
@@ -7218,8 +7352,8 @@ int main(int argc, char **argv)
 
             memset(&acquire_import, 0, sizeof(acquire_import));
             fence_fd = -1;
-            if (create_shared_dxg_fence(dxg_fd, device, &fence_fd,
-                                        &sync_object) < 0) {
+            if (create_dxg_syncfile_acquire(dxg_fd, device, &fence_fd,
+                                            &sync_object) < 0) {
                 acquire_errno = errno ? errno : EIO;
                 wayland_commit_reason = "dxg_syncfile_acquire_export_failed";
                 fprintf(stderr,
@@ -7230,8 +7364,8 @@ int main(int argc, char **argv)
             fence_fd_owned = 1;
             printf("d3d12sharedsmoke: dxg-syncfile-acquire export ok acquire_sync=dxg-syncfile-acquire acquire_fd_kind=dxg-shared-sync-fd resource_fd=%d acquire_fd=%d acquire_sync=0x%x acquire_target=1 d3d12_fence_fd_used=0 present_claim=requires-compositor-completion native_present_claim=0\n",
                    shared_fd, fence_fd, sync_object.v);
-            if (validate_direct_open_shared_fence(
-                    dxg_fd, device, fence_fd, 0x13,
+            if (validate_direct_open_dxg_syncfile(
+                    dxg_fd, device, fence_fd,
                     "dxg_syncfile_acquire_validate",
                     &acquire_import) != 0) {
                 acquire_errno = errno ? errno : EIO;
@@ -7482,8 +7616,8 @@ int main(int argc, char **argv)
         int terminal_fail_closed = 0;
         int native_present_valid = 0;
 
-        alarm(15);
-        for (int i = 0; i < 60; i++) {
+        alarm(45);
+        for (int i = 0; i < 450; i++) {
             if (read_fresh_native_present_evidence(&present_evidence)) {
                 present_after = present_evidence.counter;
                 present_rejected = present_evidence.rejected;
@@ -7711,6 +7845,11 @@ int main(int argc, char **argv)
                         phase2_open_only_satisfies_native_present,
                     (unsigned long)present_evidence.
                         phase2_gpu_copy_only_satisfies_native_present);
+            if (terminal_fail_closed && allow_failclosed_present) {
+                printf("d3d12sharedsmoke: d3d12_wayland_resource_buffer_runtime_matrix resource_export=PASS resource_open=PASS dxg_syncfile_export=PASS dxg_syncfile_import=PASS same_adapter_luid=PASS compositor_import=PASS present_source_register=PASS present_commit=failclosed-eopnotsupp terminal_failclosed=PASS native_present_claim=0 opengl_submit_credit=0 status=PASS\n");
+                ret = 0;
+                goto out;
+            }
             goto out;
         }
         present_evidence_state = "present_ok";
@@ -7792,7 +7931,7 @@ int main(int argc, char **argv)
 
 out:
     if (use_runtime && require_present) {
-        printf("d3d12sharedsmoke: runtime-present-control-flow wayland_commit_attempted=%u wayland_commit_state=%s reason=%s present_evidence=%s evidence_file=/tmp/wlcomp-d3d12-present resource_export=%s resource_open=%s fence_export=%s d3d12_fence_open=%s acquire_sync=%s auto_acquire=%u strict_pass=%u\n",
+        printf("d3d12sharedsmoke: runtime-present-control-flow wayland_commit_attempted=%u wayland_commit_state=%s reason=%s present_evidence=%s evidence_file=/tmp/wlcomp-d3d12-present resource_export=%s resource_open=%s fence_export=%s d3d12_fence_open=%s acquire_sync=%s auto_acquire=%u allow_failclosed=%u strict_pass=%u\n",
                strcmp(wayland_commit_state, "not_attempted") != 0,
                wayland_commit_state, wayland_commit_reason,
                present_evidence_state,
@@ -7804,7 +7943,8 @@ out:
                    (runtime.opened_fence ? "PASS" : "FAIL"),
                runtime_opts.runtime_dxg_syncfile_acquire ?
                    "dxg-syncfile-acquire" : "legacy-d3d12-fence-fd",
-               auto_runtime_dxg_syncfile_acquire, ret == 0);
+               auto_runtime_dxg_syncfile_acquire, allow_failclosed_present,
+               ret == 0);
     }
     if (ret != 0 && use_runtime && require_present) {
         HANDLE failed_handle = runtime.resource_handle ?

@@ -38,6 +38,8 @@ static void shm_pool_maybe_destroy(struct wlcomp_shm_pool *pool)
 }
 
 static void xv6_d3d12_close_buffer_import(struct wlcomp_buffer *buf);
+static void xv6_d3d12_unblock_failclosed_client(
+    struct wlcomp_buffer *buf, const char *reason);
 
 static void buffer_free(struct wlcomp_buffer *buf)
 {
@@ -377,6 +379,9 @@ static int buffer_acquire_ready(struct wlcomp_buffer *buf)
     if (!buf)
         return 1;
 
+    if (buf->is_d3d12_shared && buf->d3d12_failclosed_client_unblocked)
+        return 1;
+
     if (buf->is_d3d12_shared && buf->d3d12_fence_value_valid) {
         volatile uint64_t *fence;
         uint64_t current;
@@ -396,11 +401,17 @@ static int buffer_acquire_ready(struct wlcomp_buffer *buf)
         if (timeout_ms > 0 &&
             now - buf->d3d12_fence_wait_start_ms >= (uint32_t)timeout_ms) {
             fprintf(stderr,
-                    "wlcomp: d3d12 fence not ready target=%lu current=%lu wait_ms=%u\n",
+                    "wlcomp: d3d12 fence stalled failclosed_unblock=1 target=%lu current=%lu wait_ms=%u import=%s\n",
                     (unsigned long)buf->d3d12_fence_value,
                     (unsigned long)current,
-                    now - buf->d3d12_fence_wait_start_ms);
+                    now - buf->d3d12_fence_wait_start_ms,
+                    buf->d3d12_fence_imported_from_syncfile ?
+                    "dxg-syncfile" : "nt-handle");
+            xv6_d3d12_unblock_failclosed_client(
+                buf, "acquire-fence-stalled");
             buf->d3d12_fence_wait_start_ms = now;
+            if (buf->d3d12_failclosed_client_unblocked)
+                return 1;
         }
         return 0;
     }

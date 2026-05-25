@@ -318,6 +318,15 @@ struct d3dkmt_opensyncobjectfromnthandle2 {
     };
 };
 
+struct d3dkmt_opensyncobjectfromsyncfile {
+    uint64_t sync_file_handle;
+    struct d3dkmthandle device;
+    struct d3dkmthandle syncobj;
+    uint64_t fence_value;
+    uint64_t fence_value_cpu_va;
+    uint64_t fence_value_gpu_va;
+};
+
 struct d3dddicb_destroyallocation2flags {
     union {
         struct {
@@ -400,6 +409,8 @@ struct d3dkmt_queryresourceinfofromnthandle {
     _IOWR(0x47, 0x42, struct d3dkmt_openresourcefromnthandle)
 #define LX_DXOPENSYNCOBJECTFROMNTHANDLE2 \
     _IOWR(0x47, 0x40, struct d3dkmt_opensyncobjectfromnthandle2)
+#define LX_DXOPENSYNCOBJECTFROMSYNCFILE \
+    _IOWR(0x47, 0x47, struct d3dkmt_opensyncobjectfromsyncfile)
 #define LX_DXWAITFORSYNCHRONIZATIONOBJECTFROMCPU \
     _IOWR(0x47, 0x3a, struct d3dkmt_waitforsynchronizationobjectfromcpu)
 
@@ -414,6 +425,8 @@ static uint64_t g_d3d12_resource_import_attempt_count;
 static uint64_t g_d3d12_resource_import_success_count;
 static uint64_t g_d3d12_fence_import_attempt_count;
 static uint64_t g_d3d12_fence_import_success_count;
+static uint64_t g_d3d12_syncfile_fence_import_attempt_count;
+static uint64_t g_d3d12_syncfile_fence_import_success_count;
 static uint64_t g_d3d12_fence_target_observed_count;
 static uint64_t g_d3d12_framebuffer_fallback_count;
 static uint64_t g_d3d12_buffer_release_observed_count;
@@ -1506,6 +1519,7 @@ static void xv6_d3d12_close_buffer_import(struct wlcomp_buffer *buf)
            sizeof(buf->d3d12_opened_allocations));
     buf->d3d12_fence_cpu_va = 0;
     buf->d3d12_fence_gpu_va = 0;
+    buf->d3d12_fence_imported_from_syncfile = 0;
 }
 
 static int xv6_d3d12_poll_fence_ready(struct wlcomp_buffer *buf,
@@ -1763,6 +1777,8 @@ static void xv6_d3d12_write_stage_evidence(const char *stage, int err)
             "d3d12_resource_import_successes=%lu\n"
             "d3d12_fence_import_attempts=%lu\n"
             "d3d12_fence_import_successes=%lu\n"
+            "d3d12_syncfile_fence_import_attempts=%lu\n"
+            "d3d12_syncfile_fence_import_successes=%lu\n"
             "d3d12_fence_target_observed=%lu\n"
             "d3d12_gpu_copy_composite_starts=%lu\n"
             "d3d12_gpu_copy_composite_completes=%lu\n"
@@ -1812,6 +1828,8 @@ static void xv6_d3d12_write_stage_evidence(const char *stage, int err)
             (unsigned long)g_d3d12_resource_import_success_count,
             (unsigned long)g_d3d12_fence_import_attempt_count,
             (unsigned long)g_d3d12_fence_import_success_count,
+            (unsigned long)g_d3d12_syncfile_fence_import_attempt_count,
+            (unsigned long)g_d3d12_syncfile_fence_import_success_count,
             (unsigned long)g_d3d12_fence_target_observed_count,
             (unsigned long)g_d3d12_present_start_count,
             (unsigned long)g_d3d12_present_copy_complete_count,
@@ -2079,6 +2097,10 @@ static void xv6_d3d12_drain_failclosed_client(struct wlcomp_buffer *buf,
 {
     struct wlcomp_surface *surf;
     uint32_t now;
+    int pending_releases_before = 0;
+    int pending_callbacks_before = 0;
+    int pending_releases_after = 0;
+    int pending_callbacks_after = 0;
     int releases_queued = 0;
     int callbacks_sent = 0;
 
@@ -2088,6 +2110,16 @@ static void xv6_d3d12_drain_failclosed_client(struct wlcomp_buffer *buf,
         return;
 
     now = get_time_ms();
+    wl_list_for_each(surf, &g_surfaces, link) {
+        struct wlcomp_frame_callback *cb;
+
+        if (surf->committed_buf != buf)
+            continue;
+        if (!surf->buffer_released && buf->acquire_fence_fd < 0)
+            pending_releases_before++;
+        wl_list_for_each(cb, &surf->frame_callbacks, link)
+            pending_callbacks_before++;
+    }
     wl_list_for_each(surf, &g_surfaces, link) {
         if (surf->committed_buf != buf)
             continue;
@@ -2111,12 +2143,30 @@ static void xv6_d3d12_drain_failclosed_client(struct wlcomp_buffer *buf,
         }
     }
     flush_buffer_releases_after_present();
+    wl_list_for_each(surf, &g_surfaces, link) {
+        struct wlcomp_frame_callback *cb;
+
+        if (surf->committed_buf != buf)
+            continue;
+        if (!surf->buffer_released && buf->acquire_fence_fd < 0)
+            pending_releases_after++;
+        wl_list_for_each(cb, &surf->frame_callbacks, link)
+            pending_callbacks_after++;
+    }
     if (g_display)
         wl_display_flush_clients(g_display);
     fprintf(stderr,
             "wlcomp: d3d12 fail-closed client drain no_native_present_credit=1 reason=%s resource=0x%x releases_queued=%d callbacks_sent=%d backend_opengl_submit=0\n",
             reason ? reason : "unknown", buf->d3d12_opened_resource,
             releases_queued, callbacks_sent);
+    fprintf(stderr,
+            "wlcomp: d3d12_failclosed_lifecycle_matrix reason=%s resource=0x%x releases_before=%d callbacks_before=%d releases_queued=%d callbacks_sent=%d pending_release_after=%d pending_callbacks_after=%d native_present_claim=0 opengl_submit_credit=0 status=%s\n",
+            reason ? reason : "unknown", buf->d3d12_opened_resource,
+            pending_releases_before, pending_callbacks_before,
+            releases_queued, callbacks_sent, pending_releases_after,
+            pending_callbacks_after,
+            pending_releases_after == 0 && pending_callbacks_after == 0 ?
+            "PASS" : "FAIL");
 }
 
 static int xv6_d3d12_load_runtime(void)
@@ -2936,6 +2986,8 @@ static void xv6_d3d12_write_present_evidence(
                 "d3d12_resource_import_successes=%lu\n"
                 "d3d12_fence_import_attempts=%lu\n"
                 "d3d12_fence_import_successes=%lu\n"
+                "d3d12_syncfile_fence_import_attempts=%lu\n"
+                "d3d12_syncfile_fence_import_successes=%lu\n"
                 "d3d12_fence_target_observed=%lu\n"
                 "d3d12_gpu_copy_composite_starts=%lu\n"
                 "d3d12_gpu_copy_composite_completes=%lu\n"
@@ -3015,6 +3067,8 @@ static void xv6_d3d12_write_present_evidence(
                 (unsigned long)g_d3d12_resource_import_success_count,
                 (unsigned long)g_d3d12_fence_import_attempt_count,
                 (unsigned long)g_d3d12_fence_import_success_count,
+                (unsigned long)g_d3d12_syncfile_fence_import_attempt_count,
+                (unsigned long)g_d3d12_syncfile_fence_import_success_count,
                 (unsigned long)g_d3d12_fence_target_observed_count,
                 (unsigned long)g_d3d12_present_start_count,
                 (unsigned long)g_d3d12_present_copy_complete_count,
@@ -3105,6 +3159,8 @@ static void xv6_d3d12_write_present_evidence(
                 "d3d12_resource_import_successes=%lu\n"
                 "d3d12_fence_import_attempts=%lu\n"
                 "d3d12_fence_import_successes=%lu\n"
+                "d3d12_syncfile_fence_import_attempts=%lu\n"
+                "d3d12_syncfile_fence_import_successes=%lu\n"
                 "d3d12_fence_target_observed=%lu\n"
                 "d3d12_gpu_copy_composite_starts=%lu\n"
                 "d3d12_gpu_copy_composite_completes=%lu\n"
@@ -3184,6 +3240,8 @@ static void xv6_d3d12_write_present_evidence(
                 (unsigned long)g_d3d12_resource_import_success_count,
                 (unsigned long)g_d3d12_fence_import_attempt_count,
                 (unsigned long)g_d3d12_fence_import_success_count,
+                (unsigned long)g_d3d12_syncfile_fence_import_attempt_count,
+                (unsigned long)g_d3d12_syncfile_fence_import_success_count,
                 (unsigned long)g_d3d12_fence_target_observed_count,
                 (unsigned long)g_d3d12_present_start_count,
                 (unsigned long)g_d3d12_present_copy_complete_count,
@@ -4394,6 +4452,17 @@ static int xv6_d3d12_present_imported_buffer(struct wlcomp_surface *surf,
     (void)surf;
     if (!buf || !buf->is_d3d12_shared)
         return 0;
+    if (buf->d3d12_failclosed_client_unblocked) {
+        static int failclosed_logs;
+
+        if (failclosed_logs < 8) {
+            fprintf(stderr,
+                    "wlcomp: d3d12 present skipped after fail-closed unblock resource=0x%x reason=lifecycle-drained native_present_claim=0 opengl_submit_credit=0\n",
+                    buf->d3d12_opened_resource);
+            failclosed_logs++;
+        }
+        return 0;
+    }
     if (buf->d3d12_gpu_copy_complete && !buf->d3d12_present_complete)
         return 1;
     if (!xv6_d3d12_poll_fence_ready(buf, &current)) {
@@ -4501,10 +4570,12 @@ reject_present:
     return 0;
 }
 
-static int xv6_d3d12_open_shared_fence(struct wlcomp_buffer *buf,
-                                       int fence_fd)
+static int xv6_d3d12_open_syncfile_fence(struct wlcomp_buffer *buf,
+                                         int fence_fd)
 {
-    struct d3dkmt_opensyncobjectfromnthandle2 open_sync;
+    struct d3dkmt_opensyncobjectfromsyncfile open_sync;
+    struct d3dkmt_destroysynchronizationobject destroy_sync;
+    int saved_errno;
 
     if (!buf || fence_fd < 0 || buf->d3d12_dxg_fd < 0 ||
         buf->d3d12_device == 0) {
@@ -4514,14 +4585,86 @@ static int xv6_d3d12_open_shared_fence(struct wlcomp_buffer *buf,
     }
     memset(&open_sync, 0, sizeof(open_sync));
     open_sync.device.v = buf->d3d12_device;
+    open_sync.sync_file_handle = (uint64_t)fence_fd;
+    g_d3d12_syncfile_fence_import_attempt_count++;
+    fprintf(stderr,
+            "wlcomp: d3d12 sync-file acquire import attempted d3d12_syncfile_fence_import_attempts=%lu fence_fd=%d resource=0x%x device=0x%x\n",
+            (unsigned long)g_d3d12_syncfile_fence_import_attempt_count,
+            fence_fd, buf->d3d12_opened_resource, buf->d3d12_device);
+    if (ioctl(buf->d3d12_dxg_fd, LX_DXOPENSYNCOBJECTFROMSYNCFILE,
+              &open_sync) < 0)
+        return -1;
+    if (open_sync.syncobj.v == 0 || open_sync.fence_value_cpu_va == 0 ||
+        open_sync.fence_value_gpu_va == 0) {
+        saved_errno = EINVAL;
+        if (open_sync.syncobj.v != 0) {
+            memset(&destroy_sync, 0, sizeof(destroy_sync));
+            destroy_sync.sync_object = open_sync.syncobj;
+            ioctl(buf->d3d12_dxg_fd, LX_DXDESTROYSYNCHRONIZATIONOBJECT,
+                  &destroy_sync);
+        }
+        errno = saved_errno;
+        fprintf(stderr,
+                "wlcomp: d3d12 sync-file acquire import rejected incomplete_result=1 fence_fd=%d fence=0x%x cpu_va=0x%lx gpu_va=0x%lx target=%lu\n",
+                fence_fd, open_sync.syncobj.v,
+                (unsigned long)open_sync.fence_value_cpu_va,
+                (unsigned long)open_sync.fence_value_gpu_va,
+                (unsigned long)open_sync.fence_value);
+        return -1;
+    }
+    if (buf->d3d12_fence_value_valid &&
+        buf->d3d12_fence_value != open_sync.fence_value) {
+        memset(&destroy_sync, 0, sizeof(destroy_sync));
+        destroy_sync.sync_object = open_sync.syncobj;
+        ioctl(buf->d3d12_dxg_fd, LX_DXDESTROYSYNCHRONIZATIONOBJECT,
+              &destroy_sync);
+        errno = EINVAL;
+        fprintf(stderr,
+                "wlcomp: d3d12 sync-file acquire import rejected target_mismatch=1 fence_fd=%d fence=0x%x protocol_target=%lu syncfile_target=%lu\n",
+                fence_fd, open_sync.syncobj.v,
+                (unsigned long)buf->d3d12_fence_value,
+                (unsigned long)open_sync.fence_value);
+        return -1;
+    }
+
+    buf->d3d12_opened_fence = open_sync.syncobj.v;
+    buf->d3d12_fence_cpu_va = open_sync.fence_value_cpu_va;
+    buf->d3d12_fence_gpu_va = open_sync.fence_value_gpu_va;
+    buf->d3d12_fence_value = open_sync.fence_value;
+    buf->d3d12_fence_value_valid = 1;
+    buf->d3d12_fence_imported_from_syncfile = 1;
+    g_d3d12_syncfile_fence_import_success_count++;
+    g_d3d12_fence_import_success_count++;
+    fprintf(stderr,
+            "wlcomp: d3d12 sync-file acquire import succeeded d3d12_syncfile_fence_import_successes=%lu fence_fd=%d fence=0x%x target=%lu cpu_va=0x%lx gpu_va=0x%lx\n",
+            (unsigned long)g_d3d12_syncfile_fence_import_success_count,
+            fence_fd, buf->d3d12_opened_fence,
+            (unsigned long)buf->d3d12_fence_value,
+            (unsigned long)buf->d3d12_fence_cpu_va,
+            (unsigned long)buf->d3d12_fence_gpu_va);
+    fprintf(stderr,
+            "wlcomp: d3d12_wayland_dxg_syncfile_acquire_matrix syncfile_open=PASS acquire_import=dxg-syncfile resource_open=PASS same_adapter_luid=PASS opened_fence=0x%x fence_value=%lu cpu_va=0x%lx gpu_va=0x%lx present_admission=failclosed native_present_claim=0 opengl_submit_credit=0 status=PASS\n",
+            buf->d3d12_opened_fence,
+            (unsigned long)buf->d3d12_fence_value,
+            (unsigned long)buf->d3d12_fence_cpu_va,
+            (unsigned long)buf->d3d12_fence_gpu_va);
+    xv6_d3d12_write_stage_evidence("syncfile_fence_import_succeeded", 0);
+    return 0;
+}
+
+static int xv6_d3d12_open_nt_handle_fence(struct wlcomp_buffer *buf,
+                                          int fence_fd)
+{
+    struct d3dkmt_opensyncobjectfromnthandle2 open_sync;
+
+    memset(&open_sync, 0, sizeof(open_sync));
+    open_sync.device.v = buf->d3d12_device;
     open_sync.nt_handle = (uint64_t)fence_fd;
     open_sync.flags.shared = 1;
     open_sync.flags.nt_security_sharing = 1;
-    g_d3d12_fence_import_attempt_count++;
     fprintf(stderr,
-            "wlcomp: d3d12 fence import attempted d3d12_fence_import_attempts=%lu fence_fd=%d resource=0x%x device=0x%x\n",
-            (unsigned long)g_d3d12_fence_import_attempt_count, fence_fd,
-            buf->d3d12_opened_resource, buf->d3d12_device);
+            "wlcomp: d3d12 NT-handle fence import fallback attempted fence_fd=%d resource=0x%x device=0x%x\n",
+            fence_fd, buf->d3d12_opened_resource, buf->d3d12_device);
     xv6_d3d12_write_stage_evidence("fence_import_attempted", 0);
     if (ioctl(buf->d3d12_dxg_fd, LX_DXOPENSYNCOBJECTFROMNTHANDLE2,
               &open_sync) < 0) {
@@ -4584,6 +4727,7 @@ static int xv6_d3d12_open_shared_fence(struct wlcomp_buffer *buf,
         open_sync.monitored_fence.fence_value_cpu_va;
     buf->d3d12_fence_gpu_va =
         open_sync.monitored_fence.fence_value_gpu_va;
+    buf->d3d12_fence_imported_from_syncfile = 0;
     g_d3d12_fence_import_success_count++;
     fprintf(stderr,
             "wlcomp: d3d12 fence import succeeded d3d12_fence_import_successes=%lu fence_fd=%d fence=0x%x cpu_va=0x%lx gpu_va=0x%lx\n",
@@ -4593,6 +4737,34 @@ static int xv6_d3d12_open_shared_fence(struct wlcomp_buffer *buf,
             (unsigned long)buf->d3d12_fence_gpu_va);
     xv6_d3d12_write_stage_evidence("fence_import_succeeded", 0);
     return 0;
+}
+
+static int xv6_d3d12_open_shared_fence(struct wlcomp_buffer *buf,
+                                       int fence_fd)
+{
+    int syncfile_errno;
+
+    if (!buf || fence_fd < 0 || buf->d3d12_dxg_fd < 0 ||
+        buf->d3d12_device == 0) {
+        errno = EINVAL;
+        xv6_d3d12_set_missing("invalid D3D12 monitored fence import arguments");
+        return -1;
+    }
+
+    g_d3d12_fence_import_attempt_count++;
+    fprintf(stderr,
+            "wlcomp: d3d12 fence import attempted d3d12_fence_import_attempts=%lu fence_fd=%d resource=0x%x device=0x%x order=syncfile-then-nt-handle\n",
+            (unsigned long)g_d3d12_fence_import_attempt_count, fence_fd,
+            buf->d3d12_opened_resource, buf->d3d12_device);
+    xv6_d3d12_write_stage_evidence("fence_import_attempted", 0);
+
+    if (xv6_d3d12_open_syncfile_fence(buf, fence_fd) == 0)
+        return 0;
+    syncfile_errno = errno ? errno : EIO;
+    fprintf(stderr,
+            "wlcomp: d3d12 sync-file acquire import unavailable fallback=nt-handle fence_fd=%d errno=%d (%s)\n",
+            fence_fd, syncfile_errno, strerror(syncfile_errno));
+    return xv6_d3d12_open_nt_handle_fence(buf, fence_fd);
 }
 
 static int xv6_d3d12_open_shared_buffer(struct wlcomp_buffer *buf,
@@ -5209,7 +5381,7 @@ static void xv6_gpu_create_d3d12_resource_buffer_common(
                               &client_gid);
     g_d3d12_resource_protocol_accept_count++;
     fprintf(stderr,
-            "wlcomp: d3d12 shared buffer protocol accepted d3d12_protocol_accepts=%lu run_id=%s pid=%d manager_resource_id=%u client_buffer_id=%u buffer_generation=%lu size=%dx%d fmt=0x%x allocations=%u total_priv=%u fd=%d fence=%d source_luid=%08x:%08x matched_luid=%08x:%08x opened_resource=0x%x opened_fence=0x%x fence_cpu=0x%lx fence_gpu=0x%lx import_attempts=%lu import_completes=%lu\n",
+            "wlcomp: d3d12 shared buffer protocol accepted d3d12_protocol_accepts=%lu run_id=%s pid=%d manager_resource_id=%u client_buffer_id=%u buffer_generation=%lu size=%dx%d fmt=0x%x allocations=%u total_priv=%u fd=%d fence=%d source_luid=%08x:%08x matched_luid=%08x:%08x opened_resource=0x%x opened_fence=0x%x fence_cpu=0x%lx fence_gpu=0x%lx acquire_import=%s import_attempts=%lu import_completes=%lu\n",
             (unsigned long)g_d3d12_resource_protocol_accept_count,
             xv6_d3d12_present_run_id(), client_pid,
             buf->d3d12_manager_resource_id, buf->d3d12_client_buffer_id,
@@ -5222,6 +5394,8 @@ static void xv6_gpu_create_d3d12_resource_buffer_common(
             buf->d3d12_opened_resource, buf->d3d12_opened_fence,
             (unsigned long)buf->d3d12_fence_cpu_va,
             (unsigned long)buf->d3d12_fence_gpu_va,
+            buf->d3d12_fence_imported_from_syncfile ?
+            "dxg-syncfile" : "nt-handle",
             (unsigned long)g_d3d12_native_import_attempt_count,
             (unsigned long)g_d3d12_native_import_complete_count);
     fprintf(stderr,
@@ -5230,6 +5404,7 @@ static void xv6_gpu_create_d3d12_resource_buffer_common(
             "manager_resource_id=%u buffer_generation=%lu "
             "same_adapter_luid=%d resource_fd=%d fence_fd=%d "
             "resource_query=1 resource_open=1 fence_open=%d "
+            "acquire_import=%s syncfile_open=%d "
             "protocol_accepted=1 present_admission=failclosed "
             "native_present_claim=0 opengl_submit_credit=0 status=PASS\n",
             xv6_d3d12_present_run_id(), client_pid,
@@ -5241,7 +5416,10 @@ static void xv6_gpu_create_d3d12_resource_buffer_common(
                 buf->d3d12_source_luid_b == buf->d3d12_matched_luid_b,
             buf->d3d12_resource_fd >= 0,
             buf->d3d12_fence_fd >= 0,
-            buf->d3d12_opened_fence != 0);
+            buf->d3d12_opened_fence != 0,
+            buf->d3d12_fence_imported_from_syncfile ?
+            "dxg-syncfile" : "nt-handle",
+            buf->d3d12_fence_imported_from_syncfile);
     xv6_d3d12_write_stage_evidence("protocol_accepted", 0);
     if (buf->d3d12_fence_value_valid) {
         fprintf(stderr,

@@ -56,6 +56,7 @@ struct wlcomp_buffer {
     uint64_t             d3d12_fence_gpu_va;
     uint64_t             d3d12_fence_value;
     int                  d3d12_fence_value_valid;
+    int                  d3d12_fence_imported_from_syncfile;
     uint32_t             d3d12_fence_wait_start_ms;
     uint64_t             d3d12_present_sequence;
     uint64_t             d3d12_present_fence_value;
