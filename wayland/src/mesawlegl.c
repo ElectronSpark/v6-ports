@@ -147,11 +147,17 @@ struct d3d12_present_evidence {
     unsigned long visible_content_frame;
     unsigned long present_frame_hash;
     unsigned long visible_frame_hash;
+    unsigned long content_progress_source_owned;
+    unsigned long content_progress_present_id;
+    unsigned long content_progress_completed;
+    unsigned long content_progress_resource_generation;
     unsigned long callback_release_same_frame;
     unsigned long display_handoff_implemented;
     unsigned long no_readback;
     unsigned long requirements;
     int client_pid;
+    char content_progress_state[64];
+    char visible_content_progress[64];
     char display_bind_backend[64];
     char display_bind_transport[80];
     char display_bind_completion_source[32];
@@ -317,6 +323,21 @@ static int read_d3d12_present_evidence(struct d3d12_present_evidence *evidence)
                              &evidence->present_frame_hash);
     (void)evidence_key_ulong(buf, "d3d12_visible_frame_hash",
                              &evidence->visible_frame_hash);
+    (void)evidence_key_value(buf, "d3d12_content_progress_state",
+                             evidence->content_progress_state,
+                             sizeof(evidence->content_progress_state));
+    (void)evidence_key_value(buf, "d3d12_visible_content_progress",
+                             evidence->visible_content_progress,
+                             sizeof(evidence->visible_content_progress));
+    (void)evidence_key_ulong(buf, "d3d12_content_progress_source_owned",
+                             &evidence->content_progress_source_owned);
+    (void)evidence_key_ulong(buf, "d3d12_content_progress_present_id",
+                             &evidence->content_progress_present_id);
+    (void)evidence_key_ulong(buf, "d3d12_content_progress_completed",
+                             &evidence->content_progress_completed);
+    (void)evidence_key_ulong(
+        buf, "d3d12_content_progress_display_bind_resource_generation",
+        &evidence->content_progress_resource_generation);
     (void)evidence_key_value(buf, "display_bind_backend",
                              evidence->display_bind_backend,
                              sizeof(evidence->display_bind_backend));
@@ -359,6 +380,15 @@ static int read_d3d12_present_evidence(struct d3d12_present_evidence *evidence)
         evidence->visible_content_frame != 0 &&
         evidence->present_frame_hash != 0 &&
         evidence->visible_frame_hash != 0 &&
+        strcmp(evidence->content_progress_state,
+               "NATIVE_PRESENT_COMPLETE") == 0 &&
+        strcmp(evidence->visible_content_progress,
+               "NATIVE_PRESENT_COMPLETE") == 0 &&
+        evidence->content_progress_source_owned == 1 &&
+        evidence->content_progress_present_id == evidence->present_id &&
+        evidence->content_progress_completed == evidence->completed &&
+        evidence->content_progress_resource_generation ==
+            evidence->buffer_generation &&
         callback_release_same_frame == 1 &&
         strcmp(evidence->display_bind_backend, "gpup_dxg_scanout_bind") == 0 &&
         strcmp(evidence->display_bind_transport,

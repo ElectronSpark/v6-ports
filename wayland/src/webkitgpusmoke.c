@@ -886,6 +886,7 @@ static int validate_gpu_contract(void)
     evidence_identity_ok =
         evidence_identity_current == 1 &&
         (!env_d3d12_run_id_required || evidence_run_id_match) &&
+        (!(env_contract_d3d12 || env_d3d12) || evidence_run_id_match) &&
         evidence_client_pid != 0 &&
         evidence_identity_client_pid == evidence_client_pid &&
         evidence_client_buffer_id != 0 &&
@@ -930,7 +931,9 @@ static int validate_gpu_contract(void)
         evidence_content_native_credit == 1 &&
         evidence_content_source_owned == 1 &&
         evidence_content_present_id == evidence_dxg_present_id &&
-        evidence_content_completed >= evidence_content_present_id &&
+        evidence_content_completed == evidence_dxg_completed &&
+        evidence_content_present_id == evidence_final_present_id &&
+        evidence_content_completed == evidence_final_completed &&
         evidence_content_resource_generation == evidence_buffer_generation;
     evidence_ok =
         evidence_terminal_success && !evidence_fail_closed_rejected &&
