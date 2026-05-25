@@ -1217,6 +1217,7 @@ static void xv6_d3d12_write_final_handoff_evidence(
             "d3d12_final_handoff_host_display_commit_success=%d\n"
             "d3d12_final_handoff_present_id=%lu\n"
             "d3d12_final_handoff_completed=%lu\n"
+            "d3d12_final_handoff_resource_generation=%lu\n"
             "d3d12_final_handoff_dirty_rects=%u\n"
             "d3d12_final_handoff_dirty_sequence=%lu\n"
             "d3d12_final_handoff_completion_correlated=%d\n"
@@ -1229,6 +1230,7 @@ static void xv6_d3d12_write_final_handoff_evidence(
             host_commit_success,
             (unsigned long)(present ? present->present_source_present_id : 0),
             (unsigned long)(present ? present->present_source_completed : 0),
+            (unsigned long)(present ? present->buffer_generation : 0),
             present ? present->dirty_rect_count : 0,
             (unsigned long)(present ? present->dirty_sequence : 0),
             completion_correlated,
@@ -1334,6 +1336,7 @@ static void xv6_d3d12_write_content_progress_evidence(
     uint64_t visible_frame;
     uint64_t frame_hash;
     uint64_t visible_hash;
+    int content_identity_complete;
     int source_content_ready;
     const char *progress_state = native_present_complete ?
         "NATIVE_PRESENT_COMPLETE" : "DEFERRED";
@@ -1366,15 +1369,18 @@ static void xv6_d3d12_write_content_progress_evidence(
         sample_buf ? sample_buf->d3d12_visible_content_frame : 0;
     frame_hash = sample_buf ? sample_buf->d3d12_present_frame_hash : 0;
     visible_hash = sample_buf ? sample_buf->d3d12_visible_frame_hash : 0;
-    source_content_ready =
+    content_identity_complete =
         native_present_complete && sample_buf &&
         sample_buf->d3d12_content_sample_source_owned != 0 &&
+        sample_buf->d3d12_content_sample_present_id != 0 &&
         sample_buf->d3d12_content_sample_present_id ==
             present->present_source_present_id &&
-        sample_buf->d3d12_content_sample_completed_id >=
-            sample_buf->d3d12_content_sample_present_id &&
+        sample_buf->d3d12_content_sample_completed_id ==
+            present->present_source_completed &&
         sample_buf->d3d12_content_sample_resource_generation ==
-            present->buffer_generation &&
+            present->buffer_generation;
+    source_content_ready =
+        content_identity_complete &&
         content_crc != 0 && visible_crc != 0 &&
         content_frame != 0 && visible_frame != 0 &&
         frame_hash != 0 && visible_hash != 0;
@@ -1397,7 +1403,11 @@ static void xv6_d3d12_write_content_progress_evidence(
             "d3d12_visible_content_frame=%lu "
             "d3d12_present_frame_hash=%lu "
             "d3d12_visible_frame_hash=%lu "
+            "d3d12_content_progress_run_id=%s "
+            "d3d12_content_progress_compositor_run_id=%s "
+            "d3d12_content_progress_current_run_valid=%d "
             "d3d12_content_progress_source_owned=%d "
+            "d3d12_content_progress_identity_complete=%d "
             "d3d12_content_progress_region=client-content-no-title-fps "
             "d3d12_content_progress_requires_native_present=1 "
             "d3d12_visible_content_requires_native_present_completion=1 "
@@ -1422,7 +1432,11 @@ static void xv6_d3d12_write_content_progress_evidence(
             (unsigned long)visible_frame,
             (unsigned long)frame_hash,
             (unsigned long)visible_hash,
+            xv6_d3d12_present_run_id(),
+            xv6_d3d12_present_run_id(),
+            native_present_complete,
             source_content_ready,
+            content_identity_complete,
             visible_credit,
             native_content_credit,
             native_present_complete,
@@ -1436,7 +1450,11 @@ static void xv6_d3d12_write_content_progress_evidence(
             "d3d12_visible_content_frame=%lu\n"
             "d3d12_present_frame_hash=%lu\n"
             "d3d12_visible_frame_hash=%lu\n"
+            "d3d12_content_progress_run_id=%s\n"
+            "d3d12_content_progress_compositor_run_id=%s\n"
+            "d3d12_content_progress_current_run_valid=%d\n"
             "d3d12_content_progress_source_owned=%d\n"
+            "d3d12_content_progress_identity_complete=%d\n"
             "d3d12_content_progress_region=client-content-no-title-fps\n"
             "d3d12_content_progress_requires_native_present=1\n"
             "d3d12_visible_content_requires_native_present_completion=1\n"
@@ -1459,7 +1477,11 @@ static void xv6_d3d12_write_content_progress_evidence(
             (unsigned long)visible_frame,
             (unsigned long)frame_hash,
             (unsigned long)visible_hash,
+            xv6_d3d12_present_run_id(),
+            xv6_d3d12_present_run_id(),
+            native_present_complete,
             source_content_ready,
+            content_identity_complete,
             (unsigned long)present_id,
             (unsigned long)completed,
             (unsigned long)present_id,

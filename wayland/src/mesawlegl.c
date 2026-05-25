@@ -150,12 +150,22 @@ struct d3d12_present_evidence {
     unsigned long content_progress_source_owned;
     unsigned long content_progress_present_id;
     unsigned long content_progress_completed;
+    unsigned long content_progress_current_run_valid;
+    unsigned long content_progress_identity_complete;
+    unsigned long content_progress_display_bind_present_id;
+    unsigned long content_progress_display_bind_completed_id;
     unsigned long content_progress_resource_generation;
     unsigned long callback_release_same_frame;
     unsigned long display_handoff_implemented;
+    unsigned long final_handoff_success;
+    unsigned long final_handoff_present_id;
+    unsigned long final_handoff_completed;
+    unsigned long final_handoff_resource_generation;
     unsigned long no_readback;
     unsigned long requirements;
     int client_pid;
+    char content_progress_run_id[128];
+    char content_progress_compositor_run_id[128];
     char content_progress_state[64];
     char visible_content_progress[64];
     char display_bind_backend[64];
@@ -248,7 +258,7 @@ static int evidence_key_int(const char *buf, const char *key, int *value)
 static int read_d3d12_present_evidence(struct d3d12_present_evidence *evidence)
 {
     FILE *fp;
-    char buf[8192];
+    char buf[32768];
     size_t n;
     char run_id[128];
     char compositor_run_id[128];
@@ -331,10 +341,26 @@ static int read_d3d12_present_evidence(struct d3d12_present_evidence *evidence)
                              sizeof(evidence->visible_content_progress));
     (void)evidence_key_ulong(buf, "d3d12_content_progress_source_owned",
                              &evidence->content_progress_source_owned);
+    (void)evidence_key_ulong(buf, "d3d12_content_progress_current_run_valid",
+                             &evidence->content_progress_current_run_valid);
+    (void)evidence_key_ulong(buf, "d3d12_content_progress_identity_complete",
+                             &evidence->content_progress_identity_complete);
+    (void)evidence_key_value(buf, "d3d12_content_progress_run_id",
+                             evidence->content_progress_run_id,
+                             sizeof(evidence->content_progress_run_id));
+    (void)evidence_key_value(buf, "d3d12_content_progress_compositor_run_id",
+                             evidence->content_progress_compositor_run_id,
+                             sizeof(evidence->content_progress_compositor_run_id));
     (void)evidence_key_ulong(buf, "d3d12_content_progress_present_id",
                              &evidence->content_progress_present_id);
     (void)evidence_key_ulong(buf, "d3d12_content_progress_completed",
                              &evidence->content_progress_completed);
+    (void)evidence_key_ulong(
+        buf, "d3d12_content_progress_display_bind_present_id",
+        &evidence->content_progress_display_bind_present_id);
+    (void)evidence_key_ulong(
+        buf, "d3d12_content_progress_display_bind_completed_id",
+        &evidence->content_progress_display_bind_completed_id);
     (void)evidence_key_ulong(
         buf, "d3d12_content_progress_display_bind_resource_generation",
         &evidence->content_progress_resource_generation);
@@ -353,6 +379,14 @@ static int read_d3d12_present_evidence(struct d3d12_present_evidence *evidence)
     (void)evidence_key_value(buf, "display_bind_completion_source",
                              evidence->display_bind_completion_source,
                              sizeof(evidence->display_bind_completion_source));
+    (void)evidence_key_ulong(buf, "d3d12_final_handoff_success",
+                             &evidence->final_handoff_success);
+    (void)evidence_key_ulong(buf, "d3d12_final_handoff_present_id",
+                             &evidence->final_handoff_present_id);
+    (void)evidence_key_ulong(buf, "d3d12_final_handoff_completed",
+                             &evidence->final_handoff_completed);
+    (void)evidence_key_ulong(buf, "d3d12_final_handoff_resource_generation",
+                             &evidence->final_handoff_resource_generation);
 
     evidence->requirements = requirements;
     evidence->no_readback = no_readback;
@@ -384,9 +418,18 @@ static int read_d3d12_present_evidence(struct d3d12_present_evidence *evidence)
                "NATIVE_PRESENT_COMPLETE") == 0 &&
         strcmp(evidence->visible_content_progress,
                "NATIVE_PRESENT_COMPLETE") == 0 &&
+        strcmp(evidence->content_progress_run_id, expected_run_id) == 0 &&
+        strcmp(evidence->content_progress_compositor_run_id,
+               expected_run_id) == 0 &&
+        evidence->content_progress_current_run_valid == 1 &&
         evidence->content_progress_source_owned == 1 &&
+        evidence->content_progress_identity_complete == 1 &&
         evidence->content_progress_present_id == evidence->present_id &&
         evidence->content_progress_completed == evidence->completed &&
+        evidence->content_progress_display_bind_present_id ==
+            evidence->display_bind_present_id &&
+        evidence->content_progress_display_bind_completed_id ==
+            evidence->display_bind_completed_id &&
         evidence->content_progress_resource_generation ==
             evidence->buffer_generation &&
         callback_release_same_frame == 1 &&
@@ -399,7 +442,12 @@ static int read_d3d12_present_evidence(struct d3d12_present_evidence *evidence)
             evidence->display_bind_present_id &&
         evidence->display_bind_resource_generation ==
             evidence->buffer_generation &&
-        strcmp(evidence->display_bind_completion_source, "display") == 0;
+        strcmp(evidence->display_bind_completion_source, "display") == 0 &&
+        evidence->final_handoff_success == 1 &&
+        evidence->final_handoff_present_id == evidence->present_id &&
+        evidence->final_handoff_completed == evidence->completed &&
+        evidence->final_handoff_resource_generation ==
+            evidence->buffer_generation;
     return 1;
 }
 
@@ -511,6 +559,19 @@ static void append_fps_evidence(struct app_state *app, double now,
             "present_content_crc=%lu visible_content_crc=%lu "
             "present_content_frame=%lu visible_content_frame=%lu "
             "present_frame_hash=%lu visible_frame_hash=%lu "
+            "content_progress_run_id=%s "
+            "content_progress_compositor_run_id=%s "
+            "content_progress_current_run_valid=%lu "
+            "content_progress_identity_complete=%lu "
+            "content_progress_present_id=%lu "
+            "content_progress_completed=%lu "
+            "content_progress_display_bind_present_id=%lu "
+            "content_progress_display_bind_completed_id=%lu "
+            "content_progress_display_bind_resource_generation=%lu "
+            "final_handoff_success=%lu "
+            "final_handoff_present_id=%lu "
+            "final_handoff_completed=%lu "
+            "final_handoff_resource_generation=%lu "
             "client_content_hash=%lu client_content_frame=%lu "
             "content_region=client-content-no-title-fps "
             "callback_release_same_frame=%lu "
@@ -562,6 +623,21 @@ static void append_fps_evidence(struct app_state *app, double now,
             evidence.visible_content_frame,
             evidence.present_frame_hash,
             evidence.visible_frame_hash,
+            evidence.content_progress_run_id[0] ?
+                evidence.content_progress_run_id : "missing",
+            evidence.content_progress_compositor_run_id[0] ?
+                evidence.content_progress_compositor_run_id : "missing",
+            evidence.content_progress_current_run_valid,
+            evidence.content_progress_identity_complete,
+            evidence.content_progress_present_id,
+            evidence.content_progress_completed,
+            evidence.content_progress_display_bind_present_id,
+            evidence.content_progress_display_bind_completed_id,
+            evidence.content_progress_resource_generation,
+            evidence.final_handoff_success,
+            evidence.final_handoff_present_id,
+            evidence.final_handoff_completed,
+            evidence.final_handoff_resource_generation,
             app->source_content_hash,
             app->source_content_frame,
             evidence.callback_release_same_frame,
@@ -585,7 +661,15 @@ static void append_fps_evidence(struct app_state *app, double now,
             "display_bind_completion_source=%s "
             "content_visible_credit=%lu present_content_crc=%lu "
             "visible_content_crc=%lu present_content_frame=%lu "
-            "visible_content_frame=%lu callback_release_same_frame=%lu "
+            "visible_content_frame=%lu "
+            "content_progress_current_run_valid=%lu "
+            "content_progress_identity_complete=%lu "
+            "content_progress_present_id=%lu "
+            "content_progress_completed=%lu "
+            "final_handoff_success=%lu "
+            "final_handoff_present_id=%lu "
+            "final_handoff_completed=%lu "
+            "callback_release_same_frame=%lu "
             "native_present_complete=%d "
             "same_run_resource_generation=%d "
             "same_resource_generation=%d "
@@ -610,6 +694,13 @@ static void append_fps_evidence(struct app_state *app, double now,
             evidence.visible_content_crc,
             evidence.present_content_frame,
             evidence.visible_content_frame,
+            evidence.content_progress_current_run_valid,
+            evidence.content_progress_identity_complete,
+            evidence.content_progress_present_id,
+            evidence.content_progress_completed,
+            evidence.final_handoff_success,
+            evidence.final_handoff_present_id,
+            evidence.final_handoff_completed,
             evidence.callback_release_same_frame,
             native_present_complete,
             evidence.valid ? 1 : 0,
