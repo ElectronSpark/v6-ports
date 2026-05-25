@@ -168,11 +168,24 @@ static int launcher_evidence_key_string(const char *text, const char *key,
     if (!p)
         return 0;
     p += strlen(needle);
-    while (p[n] && p[n] != '\n' && p[n] != '\r' && n + 1 < out_size)
+    while (p[n] && p[n] != '\n' && p[n] != '\r' &&
+           p[n] != ' ' && p[n] != '\t' && n + 1 < out_size)
         n++;
     memcpy(out, p, n);
     out[n] = '\0';
     return n != 0;
+}
+
+static void launcher_evidence_key_u64_alias_max(const char *text,
+                                                const char *key,
+                                                uint64_t *out)
+{
+    uint64_t value = 0;
+
+    if (!out)
+        return;
+    if (launcher_evidence_key_u64(text, key, &value) && value > *out)
+        *out = value;
 }
 
 static int launcher_d3d12_present_evidence_fresh(void)
@@ -210,7 +223,9 @@ static int launcher_read_file(const char *path, char *buf, size_t buf_size)
     return 1;
 }
 
-static int launcher_d3d12_present_evidence_valid(const char *expected_run_id)
+static int launcher_d3d12_present_evidence_valid(
+    const char *expected_run_id,
+    const struct launcher_fb_gpu_backend_info *info)
 {
     char evidence[16384];
     char source_luid[32];
@@ -218,6 +233,11 @@ static int launcher_d3d12_present_evidence_valid(const char *expected_run_id)
     char run_id[128];
     char compositor_run_id[128];
     char path[96];
+    char content_progress_state[96];
+    char visible_content_progress[96];
+    uint64_t evidence_generation = 0;
+    uint64_t evidence_time_us = 0;
+    uint64_t present_rejected = 0;
     uint64_t resource = 0;
     uint64_t allocations = 0;
     uint64_t fence = 0;
@@ -229,78 +249,216 @@ static int launcher_d3d12_present_evidence_valid(const char *expected_run_id)
     uint64_t display_handoff = 0;
     uint64_t requirements_satisfied = 0;
     uint64_t current_run_valid = 0;
+    uint64_t source_luid_valid = 0;
+    uint64_t present_same_luid = 0;
+    uint64_t buffer_completion_correlated = 0;
+    uint64_t native_present_attempt_id = 0;
+    uint64_t native_present_completion_id = 0;
+    uint64_t callback_release_required = 0;
     uint64_t same_frame_observed = 0;
     uint64_t frame_callback_observed = 0;
     uint64_t buffer_release_observed = 0;
+    uint64_t content_crc = 0;
+    uint64_t content_frame = 0;
+    uint64_t content_requires_native = 0;
+    uint64_t visible_requires_native = 0;
+    uint64_t visible_credit_before_native = 1;
+    uint64_t content_native_complete = 0;
+    uint64_t content_visible_credit = 0;
+    uint64_t content_native_credit = 0;
+    uint64_t content_present_id = 0;
+    uint64_t content_completed = 0;
     uint64_t cpu_readback = 1;
     uint64_t cpu_mapping = 1;
     uint64_t cpu_copy = 1;
+    int evidence_loaded = 0;
+    int render_node = 0;
+    int dxg_transport = 0;
+    int d3dkmt = 0;
+    int opengl_submit = 0;
     int same_adapter;
     int no_readback;
     int shared_resource;
     int fence_ok;
     int run_id_match;
+    int native_present_ok;
+    int callback_release_ok;
+    int content_progress_ok;
+    int gate_open;
 
-    if (!launcher_d3d12_present_evidence_fresh() ||
-        !launcher_read_file(XV6_D3D12_PRESENT_EVIDENCE_PATH, evidence,
-                            sizeof(evidence)))
-        return 0;
-    (void)launcher_evidence_key_u64(evidence, "d3d12_present_resource",
-                                    &resource);
-    (void)launcher_evidence_key_u64(evidence,
-                                    "d3d12_present_allocation_count",
-                                    &allocations);
-    (void)launcher_evidence_key_u64(evidence, "d3d12_present_fence",
-                                    &fence);
-    (void)launcher_evidence_key_u64(evidence, "d3d12_present_fence_target",
-                                    &fence_target);
-    (void)launcher_evidence_key_u64(evidence, "d3d12_present_release_fence",
-                                    &release_fence);
-    (void)launcher_evidence_key_u64(evidence, "d3d12_gpu_present_complete",
-                                    &present_complete);
-    (void)launcher_evidence_key_u64(evidence, "d3d12_dxg_present_id",
-                                    &present_id);
-    (void)launcher_evidence_key_u64(evidence, "d3d12_dxg_present_completed",
-                                    &completed);
-    (void)launcher_evidence_key_u64(evidence,
-                                    "d3d12_display_handoff_implemented",
-                                    &display_handoff);
-    (void)launcher_evidence_key_u64(evidence,
-                                    "d3d12_native_present_requirements_satisfied",
-                                    &requirements_satisfied);
-    (void)launcher_evidence_key_u64(evidence,
-                                    "d3d12_present_identity_current_run_valid",
-                                    &current_run_valid);
-    (void)launcher_evidence_key_u64(evidence,
-                                    "d3d12_callback_release_same_frame_observed",
-                                    &same_frame_observed);
-    (void)launcher_evidence_key_u64(evidence,
-                                    "d3d12_frame_callback_observed",
-                                    &frame_callback_observed);
-    (void)launcher_evidence_key_u64(evidence,
-                                    "d3d12_buffer_release_observed",
-                                    &buffer_release_observed);
-    (void)launcher_evidence_key_u64(evidence, "d3d12_cpu_readback",
-                                    &cpu_readback);
-    (void)launcher_evidence_key_u64(evidence, "d3d12_cpu_mapping",
-                                    &cpu_mapping);
-    (void)launcher_evidence_key_u64(evidence, "d3d12_cpu_copy",
-                                    &cpu_copy);
-    if (!launcher_evidence_key_string(evidence, "d3d12_present_path",
-                                      path, sizeof(path)))
-        return 0;
+    memset(evidence, 0, sizeof(evidence));
+    source_luid[0] = '\0';
+    matched_luid[0] = '\0';
     run_id[0] = '\0';
     compositor_run_id[0] = '\0';
-    (void)launcher_evidence_key_string(evidence, "d3d12_run_id",
-                                       run_id, sizeof(run_id));
-    (void)launcher_evidence_key_string(
-        evidence, "d3d12_present_identity_compositor_run_id",
-        compositor_run_id, sizeof(compositor_run_id));
+    path[0] = '\0';
+    content_progress_state[0] = '\0';
+    visible_content_progress[0] = '\0';
+    if (info) {
+        render_node = (info->flags & FB_GPU_BACKEND_F_RENDER_NODE) != 0;
+        dxg_transport = (info->flags & FB_GPU_BACKEND_F_DXG_TRANSPORT) != 0;
+        d3dkmt = (info->flags & FB_GPU_BACKEND_F_D3DKMT) != 0;
+        opengl_submit =
+            (info->flags & FB_GPU_BACKEND_F_OPENGL_SUBMIT) != 0;
+    }
+
+    if (launcher_d3d12_present_evidence_fresh() &&
+        launcher_read_file(XV6_D3D12_PRESENT_EVIDENCE_PATH, evidence,
+                           sizeof(evidence))) {
+        evidence_loaded = 1;
+        (void)launcher_evidence_key_u64(evidence,
+                                        "d3d12_present_evidence_time_us",
+                                        &evidence_time_us);
+        (void)launcher_evidence_key_u64(evidence, "d3d12_evidence_generation",
+                                        &evidence_generation);
+        (void)launcher_evidence_key_u64(evidence, "d3d12_present_rejected",
+                                        &present_rejected);
+        (void)launcher_evidence_key_u64(evidence, "d3d12_present_resource",
+                                        &resource);
+        (void)launcher_evidence_key_u64(evidence,
+                                        "d3d12_present_allocation_count",
+                                        &allocations);
+        (void)launcher_evidence_key_u64(evidence, "d3d12_present_fence",
+                                        &fence);
+        (void)launcher_evidence_key_u64(evidence,
+                                        "d3d12_present_fence_target",
+                                        &fence_target);
+        (void)launcher_evidence_key_u64(evidence,
+                                        "d3d12_present_release_fence",
+                                        &release_fence);
+        (void)launcher_evidence_key_u64(evidence,
+                                        "d3d12_gpu_present_complete",
+                                        &present_complete);
+        (void)launcher_evidence_key_u64(evidence, "d3d12_dxg_present_id",
+                                        &present_id);
+        (void)launcher_evidence_key_u64(evidence,
+                                        "d3d12_dxg_present_completed",
+                                        &completed);
+        (void)launcher_evidence_key_u64(evidence,
+                                        "d3d12_present_source_buffer_completion_correlated",
+                                        &buffer_completion_correlated);
+        (void)launcher_evidence_key_u64(evidence,
+                                        "d3d12_display_handoff_implemented",
+                                        &display_handoff);
+        (void)launcher_evidence_key_u64(evidence,
+                                        "d3d12_native_present_requirements_satisfied",
+                                        &requirements_satisfied);
+        (void)launcher_evidence_key_u64(evidence,
+                                        "d3d12_present_identity_current_run_valid",
+                                        &current_run_valid);
+        (void)launcher_evidence_key_u64(evidence,
+                                        "d3d12_present_source_luid_valid",
+                                        &source_luid_valid);
+        (void)launcher_evidence_key_u64(evidence, "d3d12_present_same_luid",
+                                        &present_same_luid);
+        (void)launcher_evidence_key_u64(evidence,
+                                        "d3d12_native_present_attempt_id",
+                                        &native_present_attempt_id);
+        (void)launcher_evidence_key_u64(evidence,
+                                        "d3d12_native_present_completion_id",
+                                        &native_present_completion_id);
+        (void)launcher_evidence_key_u64(evidence,
+                                        "d3d12_callback_release_same_frame_required",
+                                        &callback_release_required);
+        (void)launcher_evidence_key_u64(evidence,
+                                        "d3d12_callback_release_same_frame_observed",
+                                        &same_frame_observed);
+        (void)launcher_evidence_key_u64(evidence,
+                                        "d3d12_frame_callback_observed",
+                                        &frame_callback_observed);
+        (void)launcher_evidence_key_u64(evidence,
+                                        "d3d12_buffer_release_observed",
+                                        &buffer_release_observed);
+        launcher_evidence_key_u64_alias_max(evidence,
+                                            "d3d12_present_content_crc",
+                                            &content_crc);
+        launcher_evidence_key_u64_alias_max(evidence,
+                                            "d3d12_present_region_crc",
+                                            &content_crc);
+        launcher_evidence_key_u64_alias_max(evidence,
+                                            "d3d12_client_content_crc",
+                                            &content_crc);
+        launcher_evidence_key_u64_alias_max(evidence,
+                                            "d3d12_visible_content_crc",
+                                            &content_crc);
+        launcher_evidence_key_u64_alias_max(evidence, "d3d12_present_crc",
+                                            &content_crc);
+        launcher_evidence_key_u64_alias_max(evidence,
+                                            "d3d12_present_content_frame",
+                                            &content_frame);
+        launcher_evidence_key_u64_alias_max(evidence,
+                                            "d3d12_present_content_frames",
+                                            &content_frame);
+        launcher_evidence_key_u64_alias_max(evidence,
+                                            "d3d12_present_content_change",
+                                            &content_frame);
+        launcher_evidence_key_u64_alias_max(evidence,
+                                            "d3d12_present_content_changes",
+                                            &content_frame);
+        launcher_evidence_key_u64_alias_max(evidence,
+                                            "d3d12_visible_content_frame",
+                                            &content_frame);
+        launcher_evidence_key_u64_alias_max(evidence,
+                                            "d3d12_visible_content_frames",
+                                            &content_frame);
+        (void)launcher_evidence_key_string(evidence,
+                                           "d3d12_content_progress_state",
+                                           content_progress_state,
+                                           sizeof(content_progress_state));
+        (void)launcher_evidence_key_string(evidence,
+                                           "d3d12_visible_content_progress",
+                                           visible_content_progress,
+                                           sizeof(visible_content_progress));
+        (void)launcher_evidence_key_u64(evidence,
+                                        "d3d12_content_progress_requires_native_present",
+                                        &content_requires_native);
+        (void)launcher_evidence_key_u64(evidence,
+                                        "d3d12_visible_content_requires_native_present_completion",
+                                        &visible_requires_native);
+        (void)launcher_evidence_key_u64(evidence,
+                                        "d3d12_visible_content_credit_before_native_present",
+                                        &visible_credit_before_native);
+        (void)launcher_evidence_key_u64(evidence,
+                                        "d3d12_content_progress_native_present_complete",
+                                        &content_native_complete);
+        (void)launcher_evidence_key_u64(evidence,
+                                        "d3d12_content_progress_visible_credit",
+                                        &content_visible_credit);
+        (void)launcher_evidence_key_u64(evidence,
+                                        "d3d12_content_progress_native_present_credit",
+                                        &content_native_credit);
+        (void)launcher_evidence_key_u64(evidence,
+                                        "d3d12_content_progress_present_id",
+                                        &content_present_id);
+        (void)launcher_evidence_key_u64(evidence,
+                                        "d3d12_content_progress_completed",
+                                        &content_completed);
+        (void)launcher_evidence_key_u64(evidence, "d3d12_cpu_readback",
+                                        &cpu_readback);
+        (void)launcher_evidence_key_u64(evidence, "d3d12_cpu_mapping",
+                                        &cpu_mapping);
+        (void)launcher_evidence_key_u64(evidence, "d3d12_cpu_copy",
+                                        &cpu_copy);
+        (void)launcher_evidence_key_string(evidence, "d3d12_present_path",
+                                           path, sizeof(path));
+        (void)launcher_evidence_key_string(evidence, "d3d12_run_id",
+                                           run_id, sizeof(run_id));
+        (void)launcher_evidence_key_string(
+            evidence, "d3d12_present_identity_compositor_run_id",
+            compositor_run_id, sizeof(compositor_run_id));
+        (void)launcher_evidence_key_string(evidence, "d3d12_present_luid",
+                                           source_luid,
+                                           sizeof(source_luid));
+        (void)launcher_evidence_key_string(evidence,
+                                           "d3d12_present_matched_luid",
+                                           matched_luid,
+                                           sizeof(matched_luid));
+    }
     same_adapter =
-        launcher_evidence_key_string(evidence, "d3d12_present_luid",
-                                     source_luid, sizeof(source_luid)) &&
-        launcher_evidence_key_string(evidence, "d3d12_present_matched_luid",
-                                     matched_luid, sizeof(matched_luid)) &&
+        source_luid_valid == 1 && present_same_luid == 1 &&
+        source_luid[0] != '\0' && matched_luid[0] != '\0' &&
+        strcmp(source_luid, "00000000:00000000") != 0 &&
+        strcmp(matched_luid, "00000000:00000000") != 0 &&
         strcmp(source_luid, matched_luid) == 0;
     no_readback =
         cpu_readback == 0 && cpu_mapping == 0 && cpu_copy == 0;
@@ -309,25 +467,63 @@ static int launcher_d3d12_present_evidence_valid(const char *expected_run_id)
     run_id_match = expected_run_id != NULL && expected_run_id[0] != '\0' &&
                    run_id[0] != '\0' && compositor_run_id[0] != '\0' &&
                    strcmp(run_id, expected_run_id) == 0 &&
-                   strcmp(compositor_run_id, expected_run_id) == 0;
+                   strcmp(compositor_run_id, expected_run_id) == 0 &&
+                   current_run_valid == 1;
+    native_present_ok =
+        evidence_loaded && present_rejected == 0 && evidence_generation != 0 &&
+        evidence_time_us != 0 && present_complete != 0 && present_id != 0 &&
+        completed >= present_id && buffer_completion_correlated == 1 &&
+        display_handoff == 1 && requirements_satisfied == 1 &&
+        native_present_attempt_id != 0 &&
+        native_present_completion_id != 0 &&
+        strcmp(path, "d3d12-dxg-present-source-display-handoff") == 0;
+    callback_release_ok =
+        callback_release_required == 1 && same_frame_observed == 1 &&
+        frame_callback_observed != 0 && buffer_release_observed != 0;
+    content_progress_ok =
+        content_crc != 0 && content_frame != 0 &&
+        strcmp(content_progress_state, "NATIVE_PRESENT_COMPLETE") == 0 &&
+        strcmp(visible_content_progress, "NATIVE_PRESENT_COMPLETE") == 0 &&
+        content_requires_native == 1 && visible_requires_native == 1 &&
+        visible_credit_before_native == 0 &&
+        content_native_complete == 1 && content_visible_credit == 1 &&
+        content_native_credit == 1 && content_present_id == present_id &&
+        content_completed >= content_present_id;
+    gate_open =
+        render_node && dxg_transport && d3dkmt && opengl_submit &&
+        same_adapter && no_readback && shared_resource && fence_ok &&
+        run_id_match && native_present_ok && callback_release_ok &&
+        content_progress_ok;
     fprintf(stderr,
-            "wlcomp: webkit_gpu_contract_matrix contract=d3d12-shared-surface run_id_match=%s same_adapter_luid=%s syncfile_acquire=PASS native_present=%s fps_gate=DEFERRED content_crc=DEFERRED no_env_only=PASS no_dmabuf_only=PASS no_callback_only=PASS status=%s expected_run_id=%s evidence_run_id=%s compositor_run_id=%s\n",
+            "wlcomp: webkit_gpu_contract_matrix "
+            "contract=d3d12-shared-surface "
+            "run_id_match=%s same_adapter_luid=%s "
+            "syncfile_acquire=%s native_present=%s "
+            "content_progress=%s content_progress_state=%s "
+            "visible_content_progress=%s content_crc=%s content_frame=%s "
+            "backend_opengl_submit=%d render_node=%d dxg_transport=%d "
+            "d3dkmt=%d fps_gate=DEFERRED no_env_only=PASS "
+            "no_dmabuf_only=PASS no_callback_only=%s "
+            "native_present_credit=%d opengl_submit_credit=%d "
+            "status=%s expected_run_id=%s evidence_run_id=%s "
+            "compositor_run_id=%s\n",
             run_id_match ? "PASS" : "FAIL",
             same_adapter ? "PASS" : "FAIL",
-            (present_complete != 0 && present_id != 0 &&
-             completed >= present_id && display_handoff == 1 &&
-             requirements_satisfied == 1) ? "PASS" : "FAIL",
-            run_id_match ? "PASS" : "DEFERRED",
+            fence_ok ? "PASS" : "FAIL",
+            native_present_ok ? "PASS" : "FAIL",
+            content_progress_ok ? "PASS" : "FAIL",
+            content_progress_state[0] ? content_progress_state : "MISSING",
+            visible_content_progress[0] ? visible_content_progress : "MISSING",
+            content_crc != 0 ? "PASS" : "MISSING",
+            content_frame != 0 ? "PASS" : "MISSING",
+            opengl_submit, render_node, dxg_transport, d3dkmt,
+            callback_release_ok ? "PASS" : "FAIL",
+            gate_open ? 1 : 0,
+            gate_open ? 1 : 0,
+            gate_open ? "PASS" : "PASS_FAILCLOSED",
             expected_run_id ? expected_run_id : "",
             run_id, compositor_run_id);
-    return same_adapter && no_readback && shared_resource && fence_ok &&
-           present_complete != 0 && present_id != 0 &&
-           completed >= present_id && display_handoff == 1 &&
-           requirements_satisfied == 1 && current_run_valid == 1 &&
-           run_id_match &&
-           same_frame_observed == 1 && frame_callback_observed != 0 &&
-           buffer_release_observed != 0 &&
-           strcmp(path, "d3d12-dxg-present-source-display-handoff") == 0;
+    return gate_open;
 }
 
 static int launcher_d3d12_present_contract_available(
@@ -335,13 +531,10 @@ static int launcher_d3d12_present_contract_available(
 {
     struct launcher_fb_gpu_backend_info info;
 
-    return launcher_gpu_backend_query(&info) &&
-           info.backend == FB_GPU_BACKEND_HYPERV_DXG &&
-           (info.flags & FB_GPU_BACKEND_F_RENDER_NODE) != 0 &&
-           (info.flags & FB_GPU_BACKEND_F_DXG_TRANSPORT) != 0 &&
-           (info.flags & FB_GPU_BACKEND_F_D3DKMT) != 0 &&
-           (info.flags & FB_GPU_BACKEND_F_OPENGL_SUBMIT) != 0 &&
-           launcher_d3d12_present_evidence_valid(expected_run_id);
+    if (!launcher_gpu_backend_query(&info) ||
+        info.backend != FB_GPU_BACKEND_HYPERV_DXG)
+        return 0;
+    return launcher_d3d12_present_evidence_valid(expected_run_id, &info);
 }
 
 static void launcher_destroy_surfaces_for_pid(pid_t pid)
