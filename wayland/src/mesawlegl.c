@@ -156,6 +156,8 @@ struct d3d12_present_evidence {
     unsigned long content_progress_display_bind_completed_id;
     unsigned long content_progress_resource_generation;
     unsigned long callback_release_same_frame;
+    unsigned long host_saw_display_bind_packet;
+    unsigned long wsl_presenthistory_completion_credit;
     unsigned long display_handoff_implemented;
     unsigned long final_handoff_success;
     unsigned long final_handoff_present_id;
@@ -170,6 +172,7 @@ struct d3d12_present_evidence {
     char visible_content_progress[64];
     char display_bind_backend[64];
     char display_bind_transport[80];
+    char display_bind_transport_source[80];
     char display_bind_completion_source[32];
 };
 
@@ -394,6 +397,13 @@ static int read_d3d12_present_evidence(struct d3d12_present_evidence *evidence)
     (void)evidence_key_value(buf, "display_bind_transport",
                              evidence->display_bind_transport,
                              sizeof(evidence->display_bind_transport));
+    (void)evidence_key_value(buf, "display_bind_transport_source",
+                             evidence->display_bind_transport_source,
+                             sizeof(evidence->display_bind_transport_source));
+    (void)evidence_key_ulong(buf, "host_saw_display_bind_packet",
+                             &evidence->host_saw_display_bind_packet);
+    (void)evidence_key_ulong(buf, "wsl_presenthistory_completion_credit",
+                             &evidence->wsl_presenthistory_completion_credit);
     (void)evidence_key_ulong(buf, "display_bind_present_id",
                              &evidence->display_bind_present_id);
     (void)evidence_key_ulong(buf, "display_bind_completed_id",
@@ -466,6 +476,10 @@ static int read_d3d12_present_evidence(struct d3d12_present_evidence *evidence)
         strcmp(evidence->display_bind_backend, "gpup_dxg_scanout_bind") == 0 &&
         strcmp(evidence->display_bind_transport,
                "gpu-p-dxg-resource-scanout-bind") == 0 &&
+        strcmp(evidence->display_bind_transport_source,
+               "non_wsl_linux_dxgkrnl_extension") == 0 &&
+        evidence->host_saw_display_bind_packet == 1 &&
+        evidence->wsl_presenthistory_completion_credit == 0 &&
         evidence->display_bind_present_id == evidence->present_id &&
         evidence->display_bind_completed_id == evidence->completed &&
         evidence->display_bind_completed_id >=
@@ -521,6 +535,10 @@ static void append_fps_evidence(struct app_state *app, double now,
         strcmp(evidence.display_bind_backend, "gpup_dxg_scanout_bind") == 0 &&
         strcmp(evidence.display_bind_transport,
                "gpu-p-dxg-resource-scanout-bind") == 0 &&
+        strcmp(evidence.display_bind_transport_source,
+               "non_wsl_linux_dxgkrnl_extension") == 0 &&
+        evidence.host_saw_display_bind_packet == 1 &&
+        evidence.wsl_presenthistory_completion_credit == 0 &&
         strcmp(evidence.display_bind_completion_source, "display") == 0 &&
         evidence.display_bind_present_id > 0 &&
         evidence.display_bind_completed_id >=
@@ -620,6 +638,9 @@ static void append_fps_evidence(struct app_state *app, double now,
             "diagnostic_present_id=%lu diagnostic_completed=%lu "
             "diagnostic_display_bind_backend=%s "
             "diagnostic_display_bind_transport=%s "
+            "diagnostic_display_bind_transport_source=%s "
+            "diagnostic_host_saw_display_bind_packet=%lu "
+            "diagnostic_wsl_presenthistory_completion_credit=%lu "
             "diagnostic_display_bind_present_id=%lu "
             "diagnostic_display_bind_completed_id=%lu "
             "diagnostic_display_bind_resource_generation=%lu "
@@ -688,6 +709,10 @@ static void append_fps_evidence(struct app_state *app, double now,
                 evidence.display_bind_backend : "missing",
             evidence.display_bind_transport[0] ?
                 evidence.display_bind_transport : "missing",
+            evidence.display_bind_transport_source[0] ?
+                evidence.display_bind_transport_source : "missing",
+            evidence.host_saw_display_bind_packet,
+            evidence.wsl_presenthistory_completion_credit,
             evidence.display_bind_present_id,
             evidence.display_bind_completed_id,
             evidence.display_bind_resource_generation,
@@ -748,6 +773,9 @@ static void append_fps_evidence(struct app_state *app, double now,
             "diagnostic_display_bind_completed_id=%lu "
             "diagnostic_display_bind_backend=%s "
             "diagnostic_display_bind_transport=%s "
+            "diagnostic_display_bind_transport_source=%s "
+            "diagnostic_host_saw_display_bind_packet=%lu "
+            "diagnostic_wsl_presenthistory_completion_credit=%lu "
             "diagnostic_display_bind_completion_source=%s "
             "current_run_display_bind_complete=%d "
             "no_readback=%lu software_demo=%d "
@@ -791,6 +819,10 @@ static void append_fps_evidence(struct app_state *app, double now,
                 evidence.display_bind_backend : "missing",
             evidence.display_bind_transport[0] ?
                 evidence.display_bind_transport : "missing",
+            evidence.display_bind_transport_source[0] ?
+                evidence.display_bind_transport_source : "missing",
+            evidence.host_saw_display_bind_packet,
+            evidence.wsl_presenthistory_completion_credit,
             evidence.display_bind_completion_source[0] ?
                 evidence.display_bind_completion_source : "missing",
             current_run_display_bind_complete,
@@ -829,6 +861,9 @@ static void append_fps_evidence(struct app_state *app, double now,
             "current_run_display_bind_complete=%d "
             "diagnostic_display_bind_backend=%s "
             "diagnostic_display_bind_transport=%s "
+            "diagnostic_display_bind_transport_source=%s "
+            "diagnostic_host_saw_display_bind_packet=%lu "
+            "diagnostic_wsl_presenthistory_completion_credit=%lu "
             "diagnostic_display_bind_present_id=%lu "
             "diagnostic_display_bind_completed_id=%lu "
             "diagnostic_display_bind_resource_generation=%lu "
@@ -851,6 +886,10 @@ static void append_fps_evidence(struct app_state *app, double now,
                 evidence.display_bind_backend : "missing",
             evidence.display_bind_transport[0] ?
                 evidence.display_bind_transport : "missing",
+            evidence.display_bind_transport_source[0] ?
+                evidence.display_bind_transport_source : "missing",
+            evidence.host_saw_display_bind_packet,
+            evidence.wsl_presenthistory_completion_credit,
             evidence.display_bind_present_id,
             evidence.display_bind_completed_id,
             evidence.display_bind_resource_generation,
@@ -1982,6 +2021,10 @@ static void append_demo_interaction_evidence(struct app_state *app,
         strcmp(evidence.display_bind_backend, "gpup_dxg_scanout_bind") == 0 &&
         strcmp(evidence.display_bind_transport,
                "gpu-p-dxg-resource-scanout-bind") == 0 &&
+        strcmp(evidence.display_bind_transport_source,
+               "non_wsl_linux_dxgkrnl_extension") == 0 &&
+        evidence.host_saw_display_bind_packet == 1 &&
+        evidence.wsl_presenthistory_completion_credit == 0 &&
         strcmp(evidence.display_bind_completion_source, "display") == 0 &&
         evidence.display_bind_present_id > 0 &&
         evidence.display_bind_completed_id >=
@@ -2046,6 +2089,9 @@ static void append_demo_interaction_evidence(struct app_state *app,
             "present_id=%lu completed=%lu "
             "display_bind_present_id=%lu display_bind_completed_id=%lu "
             "display_bind_resource_generation=%lu "
+            "display_bind_transport_source=%s "
+            "host_saw_display_bind_packet=%lu "
+            "wsl_presenthistory_completion_credit=%lu "
             "display_bind_completion_source=%s "
             "current_run_display_bind_complete=%d "
             "no_readback=%lu software_demo=%d "
@@ -2073,6 +2119,10 @@ static void append_demo_interaction_evidence(struct app_state *app,
             evidence.display_bind_present_id,
             evidence.display_bind_completed_id,
             evidence.display_bind_resource_generation,
+            evidence.display_bind_transport_source[0] ?
+                evidence.display_bind_transport_source : "missing",
+            evidence.host_saw_display_bind_packet,
+            evidence.wsl_presenthistory_completion_credit,
             evidence.display_bind_completion_source[0] ?
                 evidence.display_bind_completion_source : "missing",
             current_run_display_bind_complete,
