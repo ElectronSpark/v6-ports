@@ -78,6 +78,8 @@ struct SmokeRuntime {
     int completion_seen;
 };
 
+static int animated_title_frame(const char *title);
+
 static void phase(const char *message)
 {
     fprintf(stderr, "webkitgpusmoke: %s\n", message);
@@ -105,10 +107,7 @@ static void title_changed_cb(GObject *object, GParamSpec *pspec, gpointer data)
             runtime->completion_seen = 1;
             g_idle_add(quit_cb, NULL);
         } else if (runtime) {
-            const char *animated =
-                strstr(title, "native present animated content frame ");
-            if (animated &&
-                atoi(animated + strlen("native present animated content frame ")) >= 30) {
+            if (animated_title_frame(title) >= 30) {
                 runtime->completion_seen = 1;
                 g_idle_add(quit_cb, NULL);
             }
@@ -172,6 +171,19 @@ static int env_is(const char *name, const char *expected)
     const char *value = getenv(name);
 
     return value && strcmp(value, expected) == 0;
+}
+
+static int animated_title_frame(const char *title)
+{
+    const char *needle = "native present animated content frame ";
+    const char *animated;
+
+    if (!title)
+        return -1;
+    animated = strstr(title, needle);
+    if (!animated)
+        return -1;
+    return atoi(animated + strlen(needle));
 }
 
 static int query_backend(struct fb_gpu_backend_info_compat *info)
@@ -422,6 +434,21 @@ static int evidence_soft_claim_rejected_value(const char *text)
            evidence_string_is_rejected_value(
                text, "present_claim", "requires-compositor-completion") ||
            evidence_key_is_u64(text, "require_present", 0);
+}
+
+static int evidence_run_lineage_matches(const char *text, const char *run_id)
+{
+    return evidence_string_is(text, "validation_run_id", run_id) &&
+           evidence_string_is(text, "dxg_validation_run_id", run_id) &&
+           evidence_string_is(text, "fps_validation_run_id", run_id) &&
+           evidence_string_is(text, "fps_artifact_run_id", run_id) &&
+           evidence_string_is(text, "d3d12_run_id", run_id) &&
+           evidence_string_is(text, "d3d12_present_identity_compositor_run_id",
+                              run_id) &&
+           evidence_string_is(text, "d3d12_content_progress_run_id", run_id) &&
+           evidence_string_is(text,
+                              "d3d12_content_progress_compositor_run_id",
+                              run_id);
 }
 
 static const char *last_policy_line_for(const char *text, const char *name)
@@ -1441,6 +1468,155 @@ static void set_d3d12_contract_env(void)
     setenv("WEBKIT_XV6_FORCE_COMPOSITING_MODE", "1", 1);
 }
 
+static int run_contract_parser_negative_selftest(void)
+{
+    const char *forged =
+        "xdisplay_bind_present_id=41 "
+        "display_bind_present_id_suffix=42 "
+        "display_bind_completed_id=43x "
+        "display_bind_backend=host-display-channel "
+        "display_bind_transport=rdp-frame-copy "
+        "display_bind_completion_source=host-display-channel "
+        "completion_source=1 "
+        "present_id=55 completed=55\n";
+    uint64_t value = 0;
+    int prefix_key_rejected =
+        !evidence_key_u64("xdisplay_bind_present_id=41",
+                          "display_bind_present_id", &value);
+    int suffix_key_rejected =
+        !evidence_key_u64("display_bind_present_id_suffix=42",
+                          "display_bind_present_id", &value);
+    int malformed_numeric_rejected =
+        !evidence_key_u64(forged, "display_bind_completed_id", &value);
+    int alias_completion_source_rejected =
+        !evidence_string_is(forged, "display_bind_completion_source",
+                            "display") &&
+        !evidence_string_is(forged, "completion_source", "display");
+    int backend_alias_rejected =
+        !evidence_string_is(forged, "display_bind_backend",
+                            "gpup_dxg_scanout_bind") &&
+        !evidence_string_is(forged, "display_bind_transport",
+                            "gpu-p-dxg-resource-scanout-bind");
+    int ok = prefix_key_rejected && suffix_key_rejected &&
+        malformed_numeric_rejected && alias_completion_source_rejected &&
+        backend_alias_rejected;
+
+    fprintf(stderr,
+            "webkitgpusmoke: webkit_contract_parser_negative_matrix "
+            "prefix_key_rejected=%s suffix_key_rejected=%s "
+            "malformed_numeric_rejected=%s "
+            "backend_alias_rejected=%s completion_source_alias_rejected=%s "
+            "gate=closed native_present_credit=0 opengl_submit_credit=0 "
+            "webkit_accel_credit=0 status=%s\n",
+            prefix_key_rejected ? "PASS" : "FAIL",
+            suffix_key_rejected ? "PASS" : "FAIL",
+            malformed_numeric_rejected ? "PASS" : "FAIL",
+            backend_alias_rejected ? "PASS" : "FAIL",
+            alias_completion_source_rejected ? "PASS" : "FAIL",
+            ok ? "PASS" : "FAIL");
+    fflush(stderr);
+    return ok ? 0 : 1;
+}
+
+static int run_lineage_negative_selftest(void)
+{
+    const char *current = "webkit-selftest-current";
+    const char *mixed =
+        "validation_run_id=webkit-selftest-current "
+        "dxg_validation_run_id=webkit-selftest-current "
+        "fps_validation_run_id=webkit-selftest-current "
+        "fps_artifact_run_id=stale-fps "
+        "d3d12_run_id=webkit-selftest-current "
+        "d3d12_present_identity_compositor_run_id=other-client "
+        "d3d12_content_progress_run_id=webkit-selftest-current "
+        "d3d12_content_progress_compositor_run_id=stale-content "
+        "backend_opengl_submit=0 display_bind_present_id=7 "
+        "display_bind_completed_id=7 native_present_id=7 native_completed=7";
+    const char *policy =
+        "webkit_gpu_policy name=webkitgpusmoke requested_accel=1 "
+        "effective_accel=1 gpu_contract=d3d12-shared-surface "
+        "backend_opengl_submit=0 display_bind_present_id=7 "
+        "display_bind_completed_id=7 fallback=none";
+    const char *line = last_policy_line_for(policy, "webkitgpusmoke");
+    int stale_d3d12_rejected =
+        !evidence_run_lineage_matches(mixed, current);
+    int stale_fps_rejected = stale_d3d12_rejected &&
+        !evidence_string_is(mixed, "fps_artifact_run_id", current);
+    int backend_zero_rejected =
+        policy_value(line, "backend_opengl_submit", -1) == 0 &&
+        policy_value(line, "display_bind_present_id", 0) > 0;
+    int ok = stale_d3d12_rejected && stale_fps_rejected &&
+        backend_zero_rejected;
+
+    fprintf(stderr,
+            "webkitgpusmoke: webkit_lineage_equality_negative_matrix "
+            "stale_d3d12_run_rejected=%s stale_fps_run_rejected=%s "
+            "mixed_content_run_rejected=%s backend_zero_with_ids_rejected=%s "
+            "gate=closed native_present_credit=0 opengl_submit_credit=0 "
+            "webkit_accel_credit=0 status=%s\n",
+            stale_d3d12_rejected ? "PASS" : "FAIL",
+            stale_fps_rejected ? "PASS" : "FAIL",
+            stale_d3d12_rejected ? "PASS" : "FAIL",
+            backend_zero_rejected ? "PASS" : "FAIL",
+            ok ? "PASS" : "FAIL");
+    fflush(stderr);
+    return ok ? 0 : 1;
+}
+
+static int run_animated_fixture_negative_selftest(void)
+{
+    const char *title =
+        "native present animated content frame 45";
+    const char *missing_content =
+        "d3d12_run_id=webkit-selftest-current "
+        "d3d12_present_identity_compositor_run_id=webkit-selftest-current "
+        "display_bind_present_id=0 display_bind_completed_id=0 "
+        "d3d12_visible_content_crc=0 d3d12_visible_content_frame=0 "
+        "d3d12_visible_frame_hash=0 "
+        "d3d12_content_progress_state=TITLE_ONLY";
+    uint64_t content_crc = 1;
+    uint64_t content_frame = 1;
+    uint64_t content_hash = 1;
+    int title_liveness = animated_title_frame(title) >= 30;
+    int no_content_crc =
+        !evidence_key_u64(missing_content, "d3d12_visible_content_crc",
+                          &content_crc) || content_crc == 0;
+    int no_content_frame =
+        !evidence_key_u64(missing_content, "d3d12_visible_content_frame",
+                          &content_frame) || content_frame == 0;
+    int no_content_hash =
+        !evidence_key_u64(missing_content, "d3d12_visible_frame_hash",
+                          &content_hash) || content_hash == 0;
+    int title_only_rejected = title_liveness &&
+        no_content_crc && no_content_frame && no_content_hash;
+    int ok = title_only_rejected;
+
+    fprintf(stderr,
+            "webkitgpusmoke: webkit_animated_content_fixture_negative_matrix "
+            "title_frame=%d title_only_liveness=%d "
+            "compositor_owned_visible_content=MISSING "
+            "content_crc_progress=%s frame_hash_progress=%s "
+            "title_only_rejected=%s gate=closed native_present_credit=0 "
+            "opengl_submit_credit=0 webkit_accel_credit=0 status=%s\n",
+            animated_title_frame(title), title_liveness,
+            no_content_crc && no_content_frame ? "MISSING" : "UNEXPECTED",
+            no_content_hash ? "MISSING" : "UNEXPECTED",
+            title_only_rejected ? "PASS" : "FAIL",
+            ok ? "PASS" : "FAIL");
+    fflush(stderr);
+    return ok ? 0 : 1;
+}
+
+static int run_all_negative_selftests(void)
+{
+    int failures = 0;
+
+    failures += run_contract_parser_negative_selftest() != 0;
+    failures += run_lineage_negative_selftest() != 0;
+    failures += run_animated_fixture_negative_selftest() != 0;
+    return failures == 0 ? 0 : 1;
+}
+
 int main(int argc, char **argv)
 {
     const char *uri = argc > 1 ? argv[1] : "file:///share/webkit/gpu-smoke.html";
@@ -1470,6 +1646,14 @@ int main(int argc, char **argv)
                 contract_rc);
         return contract_rc != 0 ? 0 : 3;
     }
+    if (argc > 1 && strcmp(argv[1], "--contract-parser-negative") == 0)
+        return run_contract_parser_negative_selftest();
+    if (argc > 1 && strcmp(argv[1], "--lineage-negative") == 0)
+        return run_lineage_negative_selftest();
+    if (argc > 1 && strcmp(argv[1], "--animated-fixture-negative") == 0)
+        return run_animated_fixture_negative_selftest();
+    if (argc > 1 && strcmp(argv[1], "--negative-selftests") == 0)
+        return run_all_negative_selftests();
 
     if (argc > 2) {
         timeout_ms = atoi(argv[2]);
