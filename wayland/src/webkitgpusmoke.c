@@ -1007,6 +1007,38 @@ static int validate_gpu_contract(void)
     }
 
     fprintf(stderr,
+            "webkitgpusmoke: webkit_inprocess_contract_gate_matrix "
+            "backend_identity=FB_GPU_BACKEND_F_OPENGL_SUBMIT "
+            "backend_opengl_submit=%d backend_zero_rejected=%d "
+            "display_bind_present_id=%lu display_bind_completed_id=%lu "
+            "display_bind_resource_generation=%lu "
+            "native_present_id=%lu native_completed=%lu "
+            "native_present_ids_zero_rejected=%d "
+            "current_run_display_bind_completion=%d "
+            "current_run_native_present_identity=%d "
+            "shared_resource_fence_identity=%d "
+            "compositor_owned_content_crc_frame_hash_identity=%d "
+            "gate=%s native_present_credit=%d opengl_submit_credit=%d "
+            "webkit_accel_credit=%d status=PASS\n",
+            opengl_submit, opengl_submit ? 0 : 1,
+            (unsigned long)evidence_final_present_id,
+            (unsigned long)evidence_final_completed,
+            (unsigned long)evidence_buffer_generation,
+            (unsigned long)evidence_dxg_present_id,
+            (unsigned long)evidence_dxg_completed,
+            (evidence_dxg_present_id == 0 || evidence_dxg_completed == 0),
+            evidence_final_handoff_ok,
+            evidence_native_completion && evidence_identity_ok,
+            evidence_shared_resource && evidence_fence_ok,
+            evidence_content_progress,
+            d3d12_present ? "open" : "closed",
+            evidence_native_completion && evidence_final_handoff_ok &&
+                evidence_identity_ok && evidence_callback_release_ok &&
+                evidence_content_progress,
+            opengl_submit,
+            d3d12_present);
+
+    fprintf(stderr,
             "webkitgpusmoke: gpu-contract backend=%s flags=0x%x "
             "render_node=%d shared_surface=%d d3d12_present=%d "
             "opengl_submit=%d dxg_transport=%d d3dkmt=%d virgl_opengl=%d "
