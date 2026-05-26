@@ -228,85 +228,29 @@ static void launcher_evidence_key_u64_alias_max(const char *text,
         *out = value;
 }
 
-static int launcher_evidence_string_matches_any(const char *value,
-                                                const char *a,
-                                                const char *b,
-                                                const char *c,
-                                                const char *d)
-{
-    return value && value[0] &&
-           ((a && strcmp(value, a) == 0) ||
-            (b && strcmp(value, b) == 0) ||
-            (c && strcmp(value, c) == 0) ||
-            (d && strcmp(value, d) == 0));
-}
-
-static void launcher_evidence_set_string(char *dst, size_t dst_size,
-                                         const char *value)
-{
-    if (!dst || dst_size == 0)
-        return;
-    snprintf(dst, dst_size, "%s", value ? value : "");
-}
-
-static void launcher_d3d12_native_present_evidence_normalize(
-    struct launcher_d3d12_native_present_evidence *evidence)
-{
-    if (!evidence)
-        return;
-    if (launcher_evidence_string_matches_any(
-            evidence->display_bind_backend,
-            "gpup_dxg_scanout_bind",
-            NULL, NULL, NULL))
-        launcher_evidence_set_string(
-            evidence->display_bind_backend,
-            sizeof(evidence->display_bind_backend),
-            "gpup_dxg_scanout_bind");
-    if (launcher_evidence_string_matches_any(
-            evidence->display_bind_transport,
-            "gpu-p-dxg-resource-scanout-bind",
-            NULL, NULL, NULL))
-        launcher_evidence_set_string(
-            evidence->display_bind_transport,
-            sizeof(evidence->display_bind_transport),
-            "gpu-p-dxg-resource-scanout-bind");
-    if (launcher_evidence_string_matches_any(
-            evidence->display_bind_completion_source,
-            "display", "host-display-channel",
-            "FB_GPU_DXG_PRESENT_COMPLETION_DISPLAY", "3"))
-        launcher_evidence_set_string(
-            evidence->display_bind_completion_source,
-            sizeof(evidence->display_bind_completion_source),
-            "display");
-}
-
 static int launcher_d3d12_native_present_evidence_read(
     const char *text, struct launcher_d3d12_native_present_evidence *out)
 {
-    int ok;
-
     if (!text || !out)
         return 0;
     memset(out, 0, sizeof(*out));
-    ok = launcher_evidence_key_string(text, "display_bind_backend",
-                                      out->display_bind_backend,
-                                      sizeof(out->display_bind_backend)) &&
-         launcher_evidence_key_string(text, "display_bind_transport",
-                                      out->display_bind_transport,
-                                      sizeof(out->display_bind_transport)) &&
-         launcher_evidence_key_u64(text, "display_bind_present_id",
-                                   &out->display_bind_present_id) &&
-         launcher_evidence_key_u64(text, "display_bind_completed_id",
-                                   &out->display_bind_completed_id) &&
-         launcher_evidence_key_u64(text, "display_bind_resource_generation",
-                                   &out->display_bind_resource_generation) &&
-         launcher_evidence_key_string(
-             text, "display_bind_completion_source",
-             out->display_bind_completion_source,
-             sizeof(out->display_bind_completion_source));
-    if (ok)
-        launcher_d3d12_native_present_evidence_normalize(out);
-    return ok;
+    return launcher_evidence_key_string(text, "display_bind_backend",
+                                        out->display_bind_backend,
+                                        sizeof(out->display_bind_backend)) &&
+           launcher_evidence_key_string(text, "display_bind_transport",
+                                        out->display_bind_transport,
+                                        sizeof(out->display_bind_transport)) &&
+           launcher_evidence_key_u64(text, "display_bind_present_id",
+                                     &out->display_bind_present_id) &&
+           launcher_evidence_key_u64(text, "display_bind_completed_id",
+                                     &out->display_bind_completed_id) &&
+           launcher_evidence_key_u64(
+               text, "display_bind_resource_generation",
+               &out->display_bind_resource_generation) &&
+           launcher_evidence_key_string(
+               text, "display_bind_completion_source",
+               out->display_bind_completion_source,
+               sizeof(out->display_bind_completion_source));
 }
 
 static int launcher_d3d12_native_present_evidence_valid(
@@ -426,9 +370,13 @@ static int launcher_d3d12_present_evidence_valid(
     uint64_t content_source_owned = 0;
     uint64_t content_present_id = 0;
     uint64_t content_completed = 0;
+    uint64_t content_display_bind_present_id = 0;
+    uint64_t content_display_bind_completed_id = 0;
+    uint64_t content_display_bind_resource_generation = 0;
     uint64_t cpu_readback = 1;
     uint64_t cpu_mapping = 1;
     uint64_t cpu_copy = 1;
+    char content_display_bind_completion_source[96];
     struct launcher_d3d12_native_present_evidence native_present;
     int evidence_loaded = 0;
     int render_node = 0;
@@ -455,6 +403,7 @@ static int launcher_d3d12_present_evidence_valid(
     path[0] = '\0';
     content_progress_state[0] = '\0';
     visible_content_progress[0] = '\0';
+    content_display_bind_completion_source[0] = '\0';
     memset(&native_present, 0, sizeof(native_present));
     if (info) {
         render_node = (info->flags & FB_GPU_BACKEND_F_RENDER_NODE) != 0;
@@ -637,6 +586,19 @@ static int launcher_d3d12_present_evidence_valid(
         (void)launcher_evidence_key_u64(evidence,
                                         "d3d12_content_progress_completed",
                                         &content_completed);
+        (void)launcher_evidence_key_u64(
+            evidence, "d3d12_content_progress_display_bind_present_id",
+            &content_display_bind_present_id);
+        (void)launcher_evidence_key_u64(
+            evidence, "d3d12_content_progress_display_bind_completed_id",
+            &content_display_bind_completed_id);
+        (void)launcher_evidence_key_u64(
+            evidence, "d3d12_content_progress_display_bind_resource_generation",
+            &content_display_bind_resource_generation);
+        (void)launcher_evidence_key_string(
+            evidence, "d3d12_content_progress_display_bind_completion_source",
+            content_display_bind_completion_source,
+            sizeof(content_display_bind_completion_source));
         (void)launcher_evidence_key_u64(evidence, "d3d12_cpu_readback",
                                         &cpu_readback);
         (void)launcher_evidence_key_u64(evidence, "d3d12_cpu_mapping",
@@ -689,7 +651,7 @@ static int launcher_d3d12_present_evidence_valid(
     native_present_ok =
         evidence_loaded && present_rejected == 0 && evidence_generation != 0 &&
         evidence_time_us != 0 && present_complete != 0 && present_id != 0 &&
-        completed >= present_id && buffer_completion_correlated == 1 &&
+        completed != 0 && buffer_completion_correlated == 1 &&
         display_handoff == 1 && requirements_satisfied == 1 &&
         native_present_attempt_id != 0 &&
         native_present_completion_id != 0 &&
@@ -721,8 +683,15 @@ static int launcher_d3d12_present_evidence_valid(
         visible_credit_before_native == 0 &&
         content_native_complete == 1 && content_visible_credit == 1 &&
         content_native_credit == 1 && content_source_owned == 1 &&
-        content_present_id == present_id &&
-        content_completed >= content_present_id;
+        content_present_id == native_present.display_bind_present_id &&
+        content_completed == native_present.display_bind_completed_id &&
+        content_display_bind_present_id ==
+            native_present.display_bind_present_id &&
+        content_display_bind_completed_id ==
+            native_present.display_bind_completed_id &&
+        content_display_bind_resource_generation ==
+            native_present.display_bind_resource_generation &&
+        strcmp(content_display_bind_completion_source, "display") == 0;
     gate_open =
         render_node && dxg_transport && d3dkmt && opengl_submit &&
         same_adapter && no_readback && shared_resource && fence_ok &&

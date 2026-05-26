@@ -830,6 +830,13 @@ static int xv6_d3d12_display_bind_ids_complete(
     const struct xv6_d3d12_present_contract *present)
 {
     return present &&
+        present->present_source_register_successes != 0 &&
+        present->present_source_register_errno == 0 &&
+        present->present_source != 0 &&
+        present->present_source_commit_attempts != 0 &&
+        present->present_source_commit_successes != 0 &&
+        present->present_source_commit_errno == 0 &&
+        present->present_source_commit_status == 0 &&
         present->present_source_present_id != 0 &&
         present->present_source_completed >=
             present->present_source_present_id &&
@@ -909,7 +916,11 @@ static int xv6_d3d12_final_handoff_complete(
     int runtime_target = present &&
         xv6_d3d12_display_target_is_runtime_resource(
             present->display_target_kind);
-    int host_commit_success = runtime_target &&
+    int source_register_success = runtime_target &&
+        present->present_source_register_successes != 0 &&
+        present->present_source_register_errno == 0 &&
+        present->present_source != 0;
+    int host_commit_success = source_register_success &&
         present->present_source_commit_attempts != 0 &&
         present->present_source_commit_successes != 0 &&
         present->present_source_commit_errno == 0 &&
@@ -1234,7 +1245,11 @@ static void xv6_d3d12_write_final_handoff_evidence(
     int runtime_target = present &&
         xv6_d3d12_display_target_is_runtime_resource(
             present->display_target_kind);
-    int host_commit_success = runtime_target &&
+    int source_register_success = runtime_target &&
+        present->present_source_register_successes != 0 &&
+        present->present_source_register_errno == 0 &&
+        present->present_source != 0;
+    int host_commit_success = source_register_success &&
         present->present_source_commit_attempts != 0 &&
         present->present_source_commit_successes != 0 &&
         present->present_source_commit_errno == 0 &&
@@ -4204,29 +4219,51 @@ static void xv6_d3d12_write_waiting_fence_present_evidence(
 }
 
 static int xv6_d3d12_present_source_has_display_completion(
-    const struct wlcomp_buffer *buf)
+    struct wlcomp_buffer *buf)
 {
+    struct xv6_d3d12_present_contract present;
+    struct xv6_d3d12_present_result result;
     struct xv6_d3d12_present_source_record *source_record;
 
+    if (!buf || !buf->is_d3d12_shared)
+        return 0;
     source_record = xv6_d3d12_get_present_source_record(buf, 0);
-    return source_record && source_record->register_successes &&
-           source_record->commit_successes &&
-           source_record->present_id != 0 &&
-           source_record->completed >= source_record->present_id;
+    if (!source_record)
+        return 0;
+
+    xv6_d3d12_fill_present_from_buffer(
+        &present, buf, buf->d3d12_fence_value,
+        buf->d3d12_present_dst_x, buf->d3d12_present_dst_y,
+        buf->d3d12_present_src_x, buf->d3d12_present_src_y,
+        buf->d3d12_present_src_w, buf->d3d12_present_src_h);
+    memset(&result, 0, sizeof(result));
+    result.start_sequence = buf->d3d12_gpu_present_start_time;
+    result.copy_sequence = buf->d3d12_gpu_copy_complete_time;
+    result.complete_sequence = buf->d3d12_present_sequence;
+    result.release_fence = buf->d3d12_present_complete ?
+        buf->d3d12_present_fence_value : 0;
+    return xv6_d3d12_display_bind_provider_complete(
+        &present, &result, !buf->d3d12_present_complete);
 }
 
 static int xv6_d3d12_present_source_completion_pending(
-    const struct wlcomp_buffer *buf)
+    struct wlcomp_buffer *buf)
 {
     struct xv6_d3d12_present_source_record *source_record;
 
+    if (!buf || !buf->is_d3d12_shared)
+        return 0;
     source_record = xv6_d3d12_get_present_source_record(buf, 0);
-    return source_record && source_record->register_successes &&
-           source_record->commit_successes &&
-           source_record->present_id != 0 &&
-           source_record->completed < source_record->present_id &&
-           (source_record->query_errno == 0 ||
-            source_record->query_errno == EAGAIN);
+    if (!source_record || !source_record->register_successes ||
+        !source_record->commit_successes ||
+        source_record->present_id == 0 ||
+        (source_record->query_errno != 0 &&
+         source_record->query_errno != EAGAIN))
+        return 0;
+    if (xv6_d3d12_present_source_has_display_completion(buf))
+        return 0;
+    return source_record->completed < source_record->present_id ||
+        !buf->d3d12_present_complete;
 }
 
 static int xv6_d3d12_refresh_present_source_completion(

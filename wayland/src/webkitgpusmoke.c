@@ -483,6 +483,9 @@ static int validate_gpu_contract(void)
     char evidence_compositor_run_id[64] = { 0 };
     char evidence_content_progress_state[96] = { 0 };
     char evidence_visible_content_progress[96] = { 0 };
+    char evidence_display_bind_backend[64] = { 0 };
+    char evidence_display_bind_transport[80] = { 0 };
+    char evidence_display_bind_completion_source[32] = { 0 };
     uint64_t evidence_resource = 0;
     uint64_t evidence_allocations = 0;
     uint64_t evidence_resource_import_successes = 0;
@@ -500,6 +503,9 @@ static int validate_gpu_contract(void)
     uint64_t evidence_dxg_completed = 0;
     uint64_t evidence_buffer_completion_correlated = 0;
     uint64_t evidence_display_handoff = 0;
+    uint64_t evidence_display_bind_present_id = 0;
+    uint64_t evidence_display_bind_completed_id = 0;
+    uint64_t evidence_display_bind_resource_generation = 0;
     uint64_t evidence_native_requirements = 0;
     uint64_t evidence_identity_current = 0;
     uint64_t evidence_client_pid = 0;
@@ -588,6 +594,7 @@ static int validate_gpu_contract(void)
     int evidence_fence_ok = 0;
     int evidence_terminal_success = 0;
     int evidence_native_completion = 0;
+    int evidence_display_bind_ok = 0;
     int evidence_present_path_ok = 0;
     int evidence_identity_ok = 0;
     int evidence_callback_release_ok = 0;
@@ -701,6 +708,22 @@ static int validate_gpu_contract(void)
             &evidence_buffer_completion_correlated);
         (void)evidence_key_u64(evidence, "d3d12_display_handoff_implemented",
                                &evidence_display_handoff);
+        (void)evidence_key_string(evidence, "display_bind_backend",
+                                  evidence_display_bind_backend,
+                                  sizeof(evidence_display_bind_backend));
+        (void)evidence_key_string(evidence, "display_bind_transport",
+                                  evidence_display_bind_transport,
+                                  sizeof(evidence_display_bind_transport));
+        (void)evidence_key_u64(evidence, "display_bind_present_id",
+                               &evidence_display_bind_present_id);
+        (void)evidence_key_u64(evidence, "display_bind_completed_id",
+                               &evidence_display_bind_completed_id);
+        (void)evidence_key_u64(evidence, "display_bind_resource_generation",
+                               &evidence_display_bind_resource_generation);
+        (void)evidence_key_string(
+            evidence, "display_bind_completion_source",
+            evidence_display_bind_completion_source,
+            sizeof(evidence_display_bind_completion_source));
         (void)evidence_key_u64(
             evidence, "d3d12_native_present_requirements_satisfied",
             &evidence_native_requirements);
@@ -1001,6 +1024,19 @@ static int validate_gpu_contract(void)
         evidence_buffer_completion_correlated == 1 &&
         evidence_display_handoff == 1 &&
         evidence_native_requirements == 1;
+    evidence_display_bind_ok =
+        strcmp(evidence_display_bind_backend, "gpup_dxg_scanout_bind") == 0 &&
+        strcmp(evidence_display_bind_transport,
+               "gpu-p-dxg-resource-scanout-bind") == 0 &&
+        evidence_display_bind_present_id != 0 &&
+        evidence_display_bind_present_id == evidence_dxg_present_id &&
+        evidence_display_bind_completed_id >=
+            evidence_display_bind_present_id &&
+        evidence_display_bind_completed_id == evidence_dxg_completed &&
+        evidence_display_bind_resource_generation != 0 &&
+        evidence_display_bind_resource_generation ==
+            evidence_buffer_generation &&
+        strcmp(evidence_display_bind_completion_source, "display") == 0;
     evidence_final_handoff_ok =
         evidence_final_runtime_resource_required == 1 &&
         evidence_final_runtime_resource_observed == 1 &&
@@ -1074,7 +1110,8 @@ static int validate_gpu_contract(void)
         evidence_same_adapter && evidence_no_readback &&
         evidence_shared_resource && evidence_fence_ok &&
         evidence_present_path_ok && evidence_native_completion &&
-        evidence_final_handoff_ok && evidence_identity_ok &&
+        evidence_display_bind_ok && evidence_final_handoff_ok &&
+        evidence_identity_ok &&
         evidence_callback_release_ok && evidence_content_progress;
     d3d12_present = dxg_transport && d3dkmt && render_node &&
         opengl_submit && evidence_ok;
@@ -1098,6 +1135,7 @@ static int validate_gpu_contract(void)
                       evidence_fail_closed_rejected ||
                       evidence_soft_claim_rejected ||
                       !evidence_final_handoff_ok ||
+                      !evidence_display_bind_ok ||
                       !evidence_callback_release_ok ||
                       !evidence_content_progress))
         ok = 0;
@@ -1143,8 +1181,10 @@ static int validate_gpu_contract(void)
             "webkitgpusmoke: webkit_inprocess_contract_gate_matrix "
             "backend_identity=FB_GPU_BACKEND_F_OPENGL_SUBMIT "
             "backend_opengl_submit=%d backend_zero_rejected=%d "
+            "display_bind_backend=%s display_bind_transport=%s "
             "display_bind_present_id=%lu display_bind_completed_id=%lu "
             "display_bind_resource_generation=%lu "
+            "display_bind_completion_source=%s "
             "native_present_id=%lu native_completed=%lu "
             "native_present_ids_zero_rejected=%d "
             "current_run_display_bind_completion=%d "
@@ -1154,20 +1194,26 @@ static int validate_gpu_contract(void)
             "gate=%s native_present_credit=%d opengl_submit_credit=%d "
             "webkit_accel_credit=%d status=PASS\n",
             opengl_submit, opengl_submit ? 0 : 1,
-            (unsigned long)evidence_final_present_id,
-            (unsigned long)evidence_final_completed,
-            (unsigned long)evidence_buffer_generation,
+            evidence_display_bind_backend[0] ?
+                evidence_display_bind_backend : "MISSING",
+            evidence_display_bind_transport[0] ?
+                evidence_display_bind_transport : "MISSING",
+            (unsigned long)evidence_display_bind_present_id,
+            (unsigned long)evidence_display_bind_completed_id,
+            (unsigned long)evidence_display_bind_resource_generation,
+            evidence_display_bind_completion_source[0] ?
+                evidence_display_bind_completion_source : "MISSING",
             (unsigned long)evidence_dxg_present_id,
             (unsigned long)evidence_dxg_completed,
             (evidence_dxg_present_id == 0 || evidence_dxg_completed == 0),
-            evidence_final_handoff_ok,
+            evidence_display_bind_ok,
             evidence_native_completion && evidence_identity_ok,
             evidence_shared_resource && evidence_fence_ok,
             evidence_content_progress,
             d3d12_present ? "open" : "closed",
-            evidence_native_completion && evidence_final_handoff_ok &&
-                evidence_identity_ok && evidence_callback_release_ok &&
-                evidence_content_progress,
+            evidence_native_completion && evidence_display_bind_ok &&
+                evidence_final_handoff_ok && evidence_identity_ok &&
+                evidence_callback_release_ok && evidence_content_progress,
             opengl_submit,
             d3d12_present);
 
@@ -1191,6 +1237,11 @@ static int validate_gpu_contract(void)
             "d3d12_present_id=%lu d3d12_completed=%lu "
             "d3d12_buffer_completion_correlated=%lu "
             "d3d12_display_handoff=%lu d3d12_native_requirements=%lu "
+            "d3d12_display_bind_ok=%d "
+            "display_bind_backend=%s display_bind_transport=%s "
+            "display_bind_present_id=%lu display_bind_completed_id=%lu "
+            "display_bind_resource_generation=%lu "
+            "display_bind_completion_source=%s "
             "d3d12_final_handoff_ok=%d "
             "d3d12_final_handoff_commit=%lu "
             "d3d12_final_handoff_present_id=%lu "
@@ -1280,6 +1331,16 @@ static int validate_gpu_contract(void)
             (unsigned long)evidence_buffer_completion_correlated,
             (unsigned long)evidence_display_handoff,
             (unsigned long)evidence_native_requirements,
+            evidence_display_bind_ok,
+            evidence_display_bind_backend[0] ?
+                evidence_display_bind_backend : "MISSING",
+            evidence_display_bind_transport[0] ?
+                evidence_display_bind_transport : "MISSING",
+            (unsigned long)evidence_display_bind_present_id,
+            (unsigned long)evidence_display_bind_completed_id,
+            (unsigned long)evidence_display_bind_resource_generation,
+            evidence_display_bind_completion_source[0] ?
+                evidence_display_bind_completion_source : "MISSING",
             evidence_final_handoff_ok,
             (unsigned long)evidence_final_host_display_commit_success,
             (unsigned long)evidence_final_present_id,
