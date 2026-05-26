@@ -262,7 +262,14 @@ static int read_d3d12_present_evidence(struct d3d12_present_evidence *evidence)
     size_t n;
     char run_id[128];
     char compositor_run_id[128];
+    char seal_run_id[128];
+    char seal_end_run_id[128];
     const char *expected_run_id = validation_run_id();
+    unsigned long seal_begin = 0;
+    unsigned long seal_end = 0;
+    unsigned long seal_complete = 0;
+    unsigned long seal_generation = 0;
+    unsigned long seal_end_generation = 0;
     unsigned long requirements = 0;
     unsigned long no_readback = 0;
     unsigned long display_handoff = 0;
@@ -277,6 +284,23 @@ static int read_d3d12_present_evidence(struct d3d12_present_evidence *evidence)
     n = fread(buf, 1, sizeof(buf) - 1, fp);
     fclose(fp);
     buf[n] = '\0';
+
+    seal_run_id[0] = '\0';
+    seal_end_run_id[0] = '\0';
+    (void)evidence_key_ulong(buf, "d3d12_evidence_seal_begin",
+                             &seal_begin);
+    (void)evidence_key_ulong(buf, "d3d12_evidence_seal_end",
+                             &seal_end);
+    (void)evidence_key_ulong(buf, "d3d12_evidence_seal_complete",
+                             &seal_complete);
+    (void)evidence_key_ulong(buf, "d3d12_evidence_seal_generation",
+                             &seal_generation);
+    (void)evidence_key_ulong(buf, "d3d12_evidence_seal_end_generation",
+                             &seal_end_generation);
+    (void)evidence_key_value(buf, "d3d12_evidence_seal_run_id",
+                             seal_run_id, sizeof(seal_run_id));
+    (void)evidence_key_value(buf, "d3d12_evidence_seal_end_run_id",
+                             seal_end_run_id, sizeof(seal_end_run_id));
 
     (void)evidence_key_value(buf, "d3d12_run_id", run_id, sizeof(run_id));
     (void)evidence_key_value(buf, "d3d12_present_identity_compositor_run_id",
@@ -396,6 +420,12 @@ static int read_d3d12_present_evidence(struct d3d12_present_evidence *evidence)
     evidence->callback_release_same_frame = callback_release_same_frame;
 
     evidence->valid =
+        seal_begin == 1 && seal_end == 1 && seal_complete == 1 &&
+        seal_generation != 0 &&
+        seal_generation == seal_end_generation &&
+        seal_generation == evidence->generation &&
+        strcmp(seal_run_id, run_id) == 0 &&
+        strcmp(seal_end_run_id, run_id) == 0 &&
         expected_run_id[0] != '\0' &&
         strcmp(run_id, expected_run_id) == 0 &&
         strcmp(compositor_run_id, expected_run_id) == 0 &&

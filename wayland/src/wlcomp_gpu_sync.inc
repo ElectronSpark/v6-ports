@@ -632,6 +632,74 @@ static const char *xv6_d3d12_present_run_id(void)
     return run_id;
 }
 
+static FILE *xv6_d3d12_open_present_evidence_tmp(char *tmp_path,
+                                                 size_t tmp_path_size)
+{
+    FILE *fp;
+
+    if (!tmp_path || tmp_path_size == 0)
+        return NULL;
+    snprintf(tmp_path, tmp_path_size, "%s.tmp.%ld",
+             XV6_D3D12_PRESENT_EVIDENCE_PATH, (long)getpid());
+    fp = fopen(tmp_path, "w");
+    if (!fp)
+        tmp_path[0] = '\0';
+    return fp;
+}
+
+static void xv6_d3d12_write_evidence_seal_begin(FILE *fp,
+                                                uint64_t generation,
+                                                const char *run_id)
+{
+    if (!fp)
+        return;
+    fprintf(fp,
+            "d3d12_evidence_seal_begin=1\n"
+            "d3d12_evidence_seal_generation=%lu\n"
+            "d3d12_evidence_seal_run_id=%s\n"
+            "d3d12_evidence_seal_writer=wlcomp\n",
+            (unsigned long)generation,
+            run_id && run_id[0] ? run_id : "none");
+}
+
+static void xv6_d3d12_write_evidence_seal_end(FILE *fp,
+                                              uint64_t generation,
+                                              const char *run_id)
+{
+    if (!fp)
+        return;
+    fprintf(fp,
+            "d3d12_evidence_seal_end=1\n"
+            "d3d12_evidence_seal_end_generation=%lu\n"
+            "d3d12_evidence_seal_end_run_id=%s\n"
+            "d3d12_evidence_seal_complete=1\n",
+            (unsigned long)generation,
+            run_id && run_id[0] ? run_id : "none");
+}
+
+static void xv6_d3d12_commit_present_evidence(FILE *fp,
+                                              const char *tmp_path)
+{
+    int fd;
+
+    if (!fp || !tmp_path || !tmp_path[0])
+        return;
+    fflush(fp);
+    fd = fileno(fp);
+    if (fd >= 0)
+        (void)fsync(fd);
+    if (fclose(fp) != 0) {
+        unlink(tmp_path);
+        return;
+    }
+    if (rename(tmp_path, XV6_D3D12_PRESENT_EVIDENCE_PATH) != 0) {
+        fprintf(stderr,
+                "wlcomp: failed to publish sealed D3D12 present evidence tmp=%s errno=%d\n",
+                tmp_path, errno);
+        unlink(tmp_path);
+    }
+}
+
 static struct xv6_d3d12_identity_counter_record *
 xv6_d3d12_get_identity_counter_record(const struct wlcomp_buffer *buf,
                                       int create)
@@ -2175,14 +2243,19 @@ static uint32_t xv6_d3d12_present_source_format(uint32_t wl_format)
 
 static void xv6_d3d12_write_stage_evidence(const char *stage, int err)
 {
-    FILE *fp = fopen(XV6_D3D12_PRESENT_EVIDENCE_PATH, "w");
+    char tmp_path[160];
+    FILE *fp = xv6_d3d12_open_present_evidence_tmp(
+        tmp_path, sizeof(tmp_path));
     uint64_t evidence_time_us = get_time_us();
+    uint64_t evidence_generation;
+    const char *run_id = xv6_d3d12_present_run_id();
 
     if (!fp)
         return;
     if (!stage)
         stage = "unknown";
-    g_d3d12_evidence_generation++;
+    evidence_generation = ++g_d3d12_evidence_generation;
+    xv6_d3d12_write_evidence_seal_begin(fp, evidence_generation, run_id);
     fprintf(fp,
             "d3d12_present_evidence_time_us=%lu\n"
             "d3d12_evidence_generation=%lu\n"
@@ -2269,7 +2342,7 @@ static void xv6_d3d12_write_stage_evidence(const char *stage, int err)
             "d3d12_cpu_copy=0\n"
             "d3d12_no_readback=1\n",
             (unsigned long)evidence_time_us,
-            (unsigned long)g_d3d12_evidence_generation, stage,
+            (unsigned long)evidence_generation, stage,
             err ? 1 : 0,
             (unsigned long)g_d3d12_compositor_target_create_attempt_count,
             (unsigned long)g_d3d12_compositor_target_create_success_count,
@@ -2337,7 +2410,7 @@ static void xv6_d3d12_write_stage_evidence(const char *stage, int err)
             "d3d12_dri_software_present_used=0\n"
             "d3d12_framebuffer_blit_only=0\n"
             "d3d12_fps_evidence_only=0\n",
-            xv6_d3d12_present_run_id(), (int)g_d3d12_last_client_pid,
+            run_id, (int)g_d3d12_last_client_pid,
             g_d3d12_last_client_buffer_id,
             g_d3d12_last_manager_resource_id,
             (unsigned long)g_d3d12_last_buffer_generation,
@@ -2374,7 +2447,7 @@ static void xv6_d3d12_write_stage_evidence(const char *stage, int err)
             "d3d12_frame_callback_same_attempt=0\n"
             "d3d12_frame_callback_same_present_id=0\n"
             "d3d12_callback_release_same_frame_observed=0\n",
-            xv6_d3d12_present_run_id(), (int)g_d3d12_last_client_pid,
+            run_id, (int)g_d3d12_last_client_pid,
             g_d3d12_last_client_buffer_id,
             g_d3d12_last_manager_resource_id,
             (unsigned long)g_d3d12_last_buffer_generation,
@@ -2397,7 +2470,8 @@ static void xv6_d3d12_write_stage_evidence(const char *stage, int err)
     xv6_d3d12_write_fps_provenance_evidence(fp, NULL, NULL, 1);
     xv6_d3d12_write_content_progress_evidence(fp, NULL, NULL, NULL, 1);
     xv6_d3d12_write_phase2_negative_evidence(fp);
-    fclose(fp);
+    xv6_d3d12_write_evidence_seal_end(fp, evidence_generation, run_id);
+    xv6_d3d12_commit_present_evidence(fp, tmp_path);
 }
 
 static void xv6_d3d12_observe_buffer_release(struct wlcomp_buffer *buf)
@@ -3261,8 +3335,11 @@ static void xv6_d3d12_write_present_evidence(
     int rejected,
     int err)
 {
-    FILE *fp = fopen(XV6_D3D12_PRESENT_EVIDENCE_PATH, "w");
+    char tmp_path[160];
+    FILE *fp = xv6_d3d12_open_present_evidence_tmp(
+        tmp_path, sizeof(tmp_path));
     uint64_t evidence_time_us = get_time_us();
+    uint64_t evidence_generation;
     int same_luid = xv6_d3d12_present_same_luid(present);
     const char *run_id = xv6_d3d12_present_run_id();
     int present_identity_valid = present && run_id && *run_id &&
@@ -3390,7 +3467,8 @@ static void xv6_d3d12_write_present_evidence(
 
     if (!fp)
         return;
-    g_d3d12_evidence_generation++;
+    evidence_generation = ++g_d3d12_evidence_generation;
+    xv6_d3d12_write_evidence_seal_begin(fp, evidence_generation, run_id);
     xv6_d3d12_count_identity_present_progress(
         present, &identity_client_attempts, &identity_client_completions,
         &identity_client_rejects, &identity_resource_attempts,
@@ -3511,7 +3589,7 @@ static void xv6_d3d12_write_present_evidence(
                 "callbacks_blocked=%d\n"
                 "releases_blocked=%d\n",
                 (unsigned long)evidence_time_us,
-                (unsigned long)g_d3d12_evidence_generation,
+                (unsigned long)evidence_generation,
                 (unsigned long)(present ? present->buffer_generation : 0),
                 (unsigned long)g_d3d12_present_start_count,
                 (unsigned long)g_d3d12_present_copy_complete_count,
@@ -3692,7 +3770,7 @@ static void xv6_d3d12_write_present_evidence(
                 "d3d12_present_dst=%d,%d %ux%u\n"
                 "d3d12_present_src=%d,%d %ux%u\n",
                 (unsigned long)evidence_time_us,
-                (unsigned long)g_d3d12_evidence_generation,
+                (unsigned long)evidence_generation,
                 (unsigned long)(present ? present->present_source_present_id : 0),
                 (unsigned long)(present ? present->present_source_completed : 0),
                 (unsigned long)(present ? present->buffer_generation : 0),
@@ -4093,7 +4171,8 @@ static void xv6_d3d12_write_present_evidence(
     xv6_d3d12_write_content_progress_evidence(fp, NULL, present, result,
                                              rejected);
     xv6_d3d12_write_phase2_negative_evidence(fp);
-    fclose(fp);
+    xv6_d3d12_write_evidence_seal_end(fp, evidence_generation, run_id);
+    xv6_d3d12_commit_present_evidence(fp, tmp_path);
 }
 
 static int xv6_d3d12_submit_present_contract(

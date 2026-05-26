@@ -508,6 +508,8 @@ static int validate_gpu_contract(void)
     char matched_luid[32] = { 0 };
     char evidence_run_id[64] = { 0 };
     char evidence_compositor_run_id[64] = { 0 };
+    char evidence_seal_run_id[64] = { 0 };
+    char evidence_seal_end_run_id[64] = { 0 };
     char evidence_content_progress_state[96] = { 0 };
     char evidence_visible_content_progress[96] = { 0 };
     char evidence_display_bind_backend[64] = { 0 };
@@ -524,6 +526,11 @@ static int validate_gpu_contract(void)
     uint64_t evidence_fence_import_successes = 0;
     uint64_t evidence_time_us = 0;
     uint64_t evidence_generation = 0;
+    uint64_t evidence_seal_begin = 0;
+    uint64_t evidence_seal_end = 0;
+    uint64_t evidence_seal_complete = 0;
+    uint64_t evidence_seal_generation = 0;
+    uint64_t evidence_seal_end_generation = 0;
     uint64_t evidence_present_rejected = 1;
     uint64_t evidence_present_complete = 0;
     uint64_t evidence_dxg_present_id = 0;
@@ -616,6 +623,7 @@ static int validate_gpu_contract(void)
     uint64_t evidence_final_success = 0;
     uint64_t evidence_commit_expected_eopnotsupp = 1;
     int evidence_same_adapter = 0;
+    int evidence_sealed = 0;
     int evidence_no_readback = 0;
     int evidence_shared_resource = 0;
     int evidence_fence_ok = 0;
@@ -696,6 +704,24 @@ static int validate_gpu_contract(void)
     char evidence_stage[64] = { 0 };
 
     if (evidence) {
+        (void)evidence_key_u64(evidence, "d3d12_evidence_seal_begin",
+                               &evidence_seal_begin);
+        (void)evidence_key_u64(evidence, "d3d12_evidence_seal_end",
+                               &evidence_seal_end);
+        (void)evidence_key_u64(evidence, "d3d12_evidence_seal_complete",
+                               &evidence_seal_complete);
+        (void)evidence_key_u64(evidence, "d3d12_evidence_seal_generation",
+                               &evidence_seal_generation);
+        (void)evidence_key_u64(evidence,
+                               "d3d12_evidence_seal_end_generation",
+                               &evidence_seal_end_generation);
+        (void)evidence_key_string(evidence, "d3d12_evidence_seal_run_id",
+                                  evidence_seal_run_id,
+                                  sizeof(evidence_seal_run_id));
+        (void)evidence_key_string(evidence,
+                                  "d3d12_evidence_seal_end_run_id",
+                                  evidence_seal_end_run_id,
+                                  sizeof(evidence_seal_end_run_id));
         (void)evidence_key_string(evidence, "d3d12_evidence_stage",
                                   evidence_stage, sizeof(evidence_stage));
         (void)evidence_key_u64(evidence, "d3d12_present_evidence_time_us",
@@ -1014,6 +1040,13 @@ static int validate_gpu_contract(void)
         evidence_commit_expected_eopnotsupp != 0;
     evidence_soft_claim_rejected =
         evidence && evidence_soft_claim_rejected_value(evidence);
+    evidence_sealed =
+        evidence_seal_begin == 1 && evidence_seal_end == 1 &&
+        evidence_seal_complete == 1 && evidence_seal_generation != 0 &&
+        evidence_seal_generation == evidence_generation &&
+        evidence_seal_end_generation == evidence_generation &&
+        strcmp(evidence_seal_run_id, evidence_run_id) == 0 &&
+        strcmp(evidence_seal_end_run_id, evidence_run_id) == 0;
     evidence_no_readback =
         evidence_cpu_readback == 0 && evidence_cpu_mapping == 0 &&
         evidence_cpu_copy == 0 &&
@@ -1134,6 +1167,7 @@ static int validate_gpu_contract(void)
     evidence_ok =
         evidence_terminal_success && !evidence_fail_closed_rejected &&
         !evidence_soft_claim_rejected &&
+        evidence_sealed &&
         evidence_same_adapter && evidence_no_readback &&
         evidence_shared_resource && evidence_fence_ok &&
         evidence_present_path_ok && evidence_native_completion &&
@@ -1218,6 +1252,7 @@ static int validate_gpu_contract(void)
             "current_run_native_present_identity=%d "
             "shared_resource_fence_identity=%d "
             "compositor_owned_content_crc_frame_hash_identity=%d "
+            "evidence_seal=%d "
             "gate=%s native_present_credit=%d opengl_submit_credit=%d "
             "webkit_accel_credit=%d status=PASS\n",
             opengl_submit, opengl_submit ? 0 : 1,
@@ -1237,6 +1272,7 @@ static int validate_gpu_contract(void)
             evidence_native_completion && evidence_identity_ok,
             evidence_shared_resource && evidence_fence_ok,
             evidence_content_progress,
+            evidence_sealed,
             d3d12_present ? "open" : "closed",
             evidence_native_completion && evidence_display_bind_ok &&
                 evidence_final_handoff_ok && evidence_identity_ok &&
@@ -1252,6 +1288,7 @@ static int validate_gpu_contract(void)
             "d3d12_no_readback=%d d3d12_shared_resource=%d "
             "d3d12_fence=%d d3d12_present_complete=%lu "
             "d3d12_evidence_stage=%s d3d12_evidence_generation=%lu "
+            "d3d12_evidence_seal=%d "
             "d3d12_present_evidence_time_us=%lu "
             "d3d12_terminal_success=%d d3d12_fail_closed_rejected=%d "
             "d3d12_soft_claim_rejected=%d "
@@ -1341,6 +1378,7 @@ static int validate_gpu_contract(void)
             (unsigned long)evidence_present_complete,
             evidence_stage[0] ? evidence_stage : "none",
             (unsigned long)evidence_generation,
+            evidence_sealed,
             (unsigned long)evidence_time_us,
             evidence_terminal_success,
             evidence_fail_closed_rejected,
@@ -1479,6 +1517,18 @@ static int run_contract_parser_negative_selftest(void)
         "display_bind_completion_source=host-display-channel "
         "completion_source=1 "
         "present_id=55 completed=55\n";
+    const char *unsealed =
+        "d3d12_evidence_generation=7\n"
+        "d3d12_run_id=current\n"
+        "d3d12_present_identity_compositor_run_id=current\n"
+        "display_bind_backend=gpup_dxg_scanout_bind\n"
+        "display_bind_transport=gpu-p-dxg-resource-scanout-bind\n"
+        "display_bind_present_id=55\n"
+        "display_bind_completed_id=55\n"
+        "display_bind_resource_generation=9\n"
+        "display_bind_completion_source=display\n"
+        "completion_source=display\n";
+    uint64_t seal_complete = 0;
     uint64_t value = 0;
     int prefix_key_rejected =
         !evidence_key_u64("xdisplay_bind_present_id=41",
@@ -1497,15 +1547,20 @@ static int run_contract_parser_negative_selftest(void)
                             "gpup_dxg_scanout_bind") &&
         !evidence_string_is(forged, "display_bind_transport",
                             "gpu-p-dxg-resource-scanout-bind");
+    int unsealed_display_bind_rejected =
+        !evidence_key_u64(unsealed, "d3d12_evidence_seal_complete",
+                          &seal_complete) ||
+        seal_complete != 1;
     int ok = prefix_key_rejected && suffix_key_rejected &&
         malformed_numeric_rejected && alias_completion_source_rejected &&
-        backend_alias_rejected;
+        backend_alias_rejected && unsealed_display_bind_rejected;
 
     fprintf(stderr,
             "webkitgpusmoke: webkit_contract_parser_negative_matrix "
             "prefix_key_rejected=%s suffix_key_rejected=%s "
             "malformed_numeric_rejected=%s "
             "backend_alias_rejected=%s completion_source_alias_rejected=%s "
+            "unsealed_display_bind_rejected=%s "
             "gate=closed native_present_credit=0 opengl_submit_credit=0 "
             "webkit_accel_credit=0 status=%s\n",
             prefix_key_rejected ? "PASS" : "FAIL",
@@ -1513,6 +1568,7 @@ static int run_contract_parser_negative_selftest(void)
             malformed_numeric_rejected ? "PASS" : "FAIL",
             backend_alias_rejected ? "PASS" : "FAIL",
             alias_completion_source_rejected ? "PASS" : "FAIL",
+            unsealed_display_bind_rejected ? "PASS" : "FAIL",
             ok ? "PASS" : "FAIL");
     fflush(stderr);
     return ok ? 0 : 1;

@@ -312,11 +312,18 @@ static int launcher_d3d12_present_evidence_valid(
     char matched_luid[32];
     char run_id[128];
     char compositor_run_id[128];
+    char seal_run_id[128];
+    char seal_end_run_id[128];
     char path[96];
     char content_progress_state[96];
     char visible_content_progress[96];
     uint64_t evidence_generation = 0;
     uint64_t evidence_time_us = 0;
+    uint64_t seal_begin = 0;
+    uint64_t seal_end = 0;
+    uint64_t seal_complete = 0;
+    uint64_t seal_generation = 0;
+    uint64_t seal_end_generation = 0;
     uint64_t present_rejected = 0;
     uint64_t resource = 0;
     uint64_t allocations = 0;
@@ -400,6 +407,8 @@ static int launcher_d3d12_present_evidence_valid(
     matched_luid[0] = '\0';
     run_id[0] = '\0';
     compositor_run_id[0] = '\0';
+    seal_run_id[0] = '\0';
+    seal_end_run_id[0] = '\0';
     path[0] = '\0';
     content_progress_state[0] = '\0';
     visible_content_progress[0] = '\0';
@@ -417,6 +426,29 @@ static int launcher_d3d12_present_evidence_valid(
         launcher_read_file(XV6_D3D12_PRESENT_EVIDENCE_PATH, evidence,
                            sizeof(evidence))) {
         evidence_loaded = 1;
+        (void)launcher_evidence_key_u64(evidence,
+                                        "d3d12_evidence_seal_begin",
+                                        &seal_begin);
+        (void)launcher_evidence_key_u64(evidence,
+                                        "d3d12_evidence_seal_end",
+                                        &seal_end);
+        (void)launcher_evidence_key_u64(evidence,
+                                        "d3d12_evidence_seal_complete",
+                                        &seal_complete);
+        (void)launcher_evidence_key_u64(evidence,
+                                        "d3d12_evidence_seal_generation",
+                                        &seal_generation);
+        (void)launcher_evidence_key_u64(evidence,
+                                        "d3d12_evidence_seal_end_generation",
+                                        &seal_end_generation);
+        (void)launcher_evidence_key_string(evidence,
+                                           "d3d12_evidence_seal_run_id",
+                                           seal_run_id,
+                                           sizeof(seal_run_id));
+        (void)launcher_evidence_key_string(evidence,
+                                           "d3d12_evidence_seal_end_run_id",
+                                           seal_end_run_id,
+                                           sizeof(seal_end_run_id));
         (void)launcher_evidence_key_u64(evidence,
                                         "d3d12_present_evidence_time_us",
                                         &evidence_time_us);
@@ -650,6 +682,11 @@ static int launcher_d3d12_present_evidence_valid(
         native_present.display_bind_resource_generation == buffer_generation;
     native_present_ok =
         evidence_loaded && present_rejected == 0 && evidence_generation != 0 &&
+        seal_begin == 1 && seal_end == 1 && seal_complete == 1 &&
+        seal_generation == evidence_generation &&
+        seal_end_generation == evidence_generation &&
+        strcmp(seal_run_id, run_id) == 0 &&
+        strcmp(seal_end_run_id, run_id) == 0 &&
         evidence_time_us != 0 && present_complete != 0 && present_id != 0 &&
         completed != 0 && buffer_completion_correlated == 1 &&
         display_handoff == 1 && requirements_satisfied == 1 &&
@@ -710,6 +747,7 @@ static int launcher_d3d12_present_evidence_valid(
             "display_bind_present_id=%lu display_bind_completed_id=%lu "
             "display_bind_resource_generation=%lu "
             "display_bind_completion_source=%s "
+            "evidence_seal=%s "
             "backend_opengl_submit=%d render_node=%d dxg_transport=%d "
             "d3dkmt=%d fps_gate=DEFERRED no_env_only=PASS "
             "title_only=REJECT chrome_only=REJECT cursor_only=REJECT "
@@ -739,6 +777,11 @@ static int launcher_d3d12_present_evidence_valid(
             (unsigned long)native_present.display_bind_resource_generation,
             native_present.display_bind_completion_source[0] ?
                 native_present.display_bind_completion_source : "MISSING",
+            (seal_begin == 1 && seal_end == 1 && seal_complete == 1 &&
+             seal_generation == evidence_generation &&
+             seal_end_generation == evidence_generation &&
+             strcmp(seal_run_id, run_id) == 0 &&
+             strcmp(seal_end_run_id, run_id) == 0) ? "PASS" : "FAIL",
             opengl_submit, render_node, dxg_transport, d3dkmt,
             callback_release_ok ? "PASS" : "FAIL",
             callback_release_ok ? "PASS" : "FAIL",
