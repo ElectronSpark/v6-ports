@@ -1563,8 +1563,10 @@ static int run_contract_parser_negative_selftest(void)
         "display_bind_resource_generation=9\n"
         "display_bind_completion_source=display\n"
         "completion_source=display\n";
+    uint64_t host_saw_packet = 0;
     uint64_t seal_complete = 0;
     uint64_t value = 0;
+    uint64_t wsl_credit = 0;
     int prefix_key_rejected =
         !evidence_key_u64("xdisplay_bind_present_id=41",
                           "display_bind_present_id", &value);
@@ -1582,19 +1584,30 @@ static int run_contract_parser_negative_selftest(void)
                             "gpup_dxg_scanout_bind") &&
         !evidence_string_is(forged, "display_bind_transport",
                             "gpu-p-dxg-resource-scanout-bind");
+    int source_authority_rejected =
+        !evidence_string_is(forged, "display_bind_transport_source",
+                            "non_wsl_linux_dxgkrnl_extension") &&
+        evidence_key_u64(forged, "host_saw_display_bind_packet",
+                         &host_saw_packet) &&
+        host_saw_packet != 1 &&
+        evidence_key_u64(forged, "wsl_presenthistory_completion_credit",
+                         &wsl_credit) &&
+        wsl_credit != 0;
     int unsealed_display_bind_rejected =
         !evidence_key_u64(unsealed, "d3d12_evidence_seal_complete",
                           &seal_complete) ||
         seal_complete != 1;
     int ok = prefix_key_rejected && suffix_key_rejected &&
         malformed_numeric_rejected && alias_completion_source_rejected &&
-        backend_alias_rejected && unsealed_display_bind_rejected;
+        backend_alias_rejected && source_authority_rejected &&
+        unsealed_display_bind_rejected;
 
     fprintf(stderr,
             "webkitgpusmoke: webkit_contract_parser_negative_matrix "
             "prefix_key_rejected=%s suffix_key_rejected=%s "
             "malformed_numeric_rejected=%s "
             "backend_alias_rejected=%s completion_source_alias_rejected=%s "
+            "source_authority_rejected=%s "
             "unsealed_display_bind_rejected=%s "
             "gate=closed native_present_credit=0 opengl_submit_credit=0 "
             "webkit_accel_credit=0 status=%s\n",
@@ -1603,6 +1616,7 @@ static int run_contract_parser_negative_selftest(void)
             malformed_numeric_rejected ? "PASS" : "FAIL",
             backend_alias_rejected ? "PASS" : "FAIL",
             alias_completion_source_rejected ? "PASS" : "FAIL",
+            source_authority_rejected ? "PASS" : "FAIL",
             unsealed_display_bind_rejected ? "PASS" : "FAIL",
             ok ? "PASS" : "FAIL");
     fflush(stderr);

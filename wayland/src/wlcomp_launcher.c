@@ -93,8 +93,11 @@ struct launcher_d3d12_native_present_evidence {
     uint64_t display_bind_present_id;
     uint64_t display_bind_completed_id;
     uint64_t display_bind_resource_generation;
+    uint64_t host_saw_display_bind_packet;
+    uint64_t wsl_presenthistory_completion_credit;
     char display_bind_backend[D3D12_DISPLAY_BIND_FIELD_MAX];
     char display_bind_transport[D3D12_DISPLAY_BIND_FIELD_MAX];
+    char display_bind_transport_source[D3D12_DISPLAY_BIND_FIELD_MAX];
     char display_bind_completion_source[D3D12_DISPLAY_BIND_FIELD_MAX];
 };
 
@@ -240,6 +243,16 @@ static int launcher_d3d12_native_present_evidence_read(
            launcher_evidence_key_string(text, "display_bind_transport",
                                         out->display_bind_transport,
                                         sizeof(out->display_bind_transport)) &&
+           launcher_evidence_key_string(
+               text, "display_bind_transport_source",
+               out->display_bind_transport_source,
+               sizeof(out->display_bind_transport_source)) &&
+           launcher_evidence_key_u64(
+               text, "host_saw_display_bind_packet",
+               &out->host_saw_display_bind_packet) &&
+           launcher_evidence_key_u64(
+               text, "wsl_presenthistory_completion_credit",
+               &out->wsl_presenthistory_completion_credit) &&
            launcher_evidence_key_u64(text, "display_bind_present_id",
                                      &out->display_bind_present_id) &&
            launcher_evidence_key_u64(text, "display_bind_completed_id",
@@ -261,6 +274,10 @@ static int launcher_d3d12_native_present_evidence_valid(
                   "gpup_dxg_scanout_bind") == 0 &&
            strcmp(evidence->display_bind_transport,
                   "gpu-p-dxg-resource-scanout-bind") == 0 &&
+           strcmp(evidence->display_bind_transport_source,
+                  "non_wsl_linux_dxgkrnl_extension") == 0 &&
+           evidence->host_saw_display_bind_packet == 1 &&
+           evidence->wsl_presenthistory_completion_credit == 0 &&
            evidence->display_bind_present_id != 0 &&
            evidence->display_bind_completed_id >=
                evidence->display_bind_present_id &&
@@ -744,6 +761,9 @@ static int launcher_d3d12_present_evidence_valid(
             "visible_content_progress=%s content_crc=%s content_frame=%s "
             "content_frame_hash=%s "
             "display_bind_backend=%s display_bind_transport=%s "
+            "display_bind_transport_source=%s "
+            "host_saw_display_bind_packet=%lu "
+            "wsl_presenthistory_completion_credit=%lu "
             "display_bind_present_id=%lu display_bind_completed_id=%lu "
             "display_bind_resource_generation=%lu "
             "display_bind_completion_source=%s "
@@ -772,6 +792,10 @@ static int launcher_d3d12_present_evidence_valid(
                 native_present.display_bind_backend : "MISSING",
             native_present.display_bind_transport[0] ?
                 native_present.display_bind_transport : "MISSING",
+            native_present.display_bind_transport_source[0] ?
+                native_present.display_bind_transport_source : "MISSING",
+            (unsigned long)native_present.host_saw_display_bind_packet,
+            (unsigned long)native_present.wsl_presenthistory_completion_credit,
             (unsigned long)native_present.display_bind_present_id,
             (unsigned long)native_present.display_bind_completed_id,
             (unsigned long)native_present.display_bind_resource_generation,

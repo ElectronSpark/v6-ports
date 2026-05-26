@@ -96,8 +96,11 @@ struct webkit_gpu_contract_state {
     uint64_t display_bind_present_id;
     uint64_t display_bind_completed_id;
     uint64_t display_bind_resource_generation;
+    uint64_t host_saw_display_bind_packet;
+    uint64_t wsl_presenthistory_completion_credit;
     char display_bind_backend[D3D12_DISPLAY_BIND_FIELD_MAX];
     char display_bind_transport[D3D12_DISPLAY_BIND_FIELD_MAX];
+    char display_bind_transport_source[D3D12_DISPLAY_BIND_FIELD_MAX];
     char display_bind_completion_source[D3D12_DISPLAY_BIND_FIELD_MAX];
     const char *gpu_contract;
 };
@@ -106,8 +109,11 @@ struct d3d12_native_present_evidence {
     uint64_t display_bind_present_id;
     uint64_t display_bind_completed_id;
     uint64_t display_bind_resource_generation;
+    uint64_t host_saw_display_bind_packet;
+    uint64_t wsl_presenthistory_completion_credit;
     char display_bind_backend[D3D12_DISPLAY_BIND_FIELD_MAX];
     char display_bind_transport[D3D12_DISPLAY_BIND_FIELD_MAX];
+    char display_bind_transport_source[D3D12_DISPLAY_BIND_FIELD_MAX];
     char display_bind_completion_source[D3D12_DISPLAY_BIND_FIELD_MAX];
 };
 
@@ -333,6 +339,13 @@ static int d3d12_native_present_evidence_read(
            evidence_key_string(text, "display_bind_transport",
                                out->display_bind_transport,
                                sizeof(out->display_bind_transport)) &&
+           evidence_key_string(text, "display_bind_transport_source",
+                               out->display_bind_transport_source,
+                               sizeof(out->display_bind_transport_source)) &&
+           evidence_key_u64(text, "host_saw_display_bind_packet",
+                            &out->host_saw_display_bind_packet) &&
+           evidence_key_u64(text, "wsl_presenthistory_completion_credit",
+                            &out->wsl_presenthistory_completion_credit) &&
            evidence_key_u64(text, "display_bind_present_id",
                             &out->display_bind_present_id) &&
            evidence_key_u64(text, "display_bind_completed_id",
@@ -352,6 +365,10 @@ static int d3d12_native_present_evidence_valid(
                   "gpup_dxg_scanout_bind") == 0 &&
            strcmp(evidence->display_bind_transport,
                   "gpu-p-dxg-resource-scanout-bind") == 0 &&
+           strcmp(evidence->display_bind_transport_source,
+                  "non_wsl_linux_dxgkrnl_extension") == 0 &&
+           evidence->host_saw_display_bind_packet == 1 &&
+           evidence->wsl_presenthistory_completion_credit == 0 &&
            evidence->display_bind_present_id != 0 &&
            evidence->display_bind_completed_id >=
                evidence->display_bind_present_id &&
@@ -649,6 +666,9 @@ static void compute_webkit_gpu_contract(
             memcpy(contract->display_bind_transport,
                    native_present.display_bind_transport,
                    sizeof(contract->display_bind_transport));
+            memcpy(contract->display_bind_transport_source,
+                   native_present.display_bind_transport_source,
+                   sizeof(contract->display_bind_transport_source));
             memcpy(contract->display_bind_completion_source,
                    native_present.display_bind_completion_source,
                    sizeof(contract->display_bind_completion_source));
@@ -658,6 +678,10 @@ static void compute_webkit_gpu_contract(
                 native_present.display_bind_completed_id;
             contract->display_bind_resource_generation =
                 native_present.display_bind_resource_generation;
+            contract->host_saw_display_bind_packet =
+                native_present.host_saw_display_bind_packet;
+            contract->wsl_presenthistory_completion_credit =
+                native_present.wsl_presenthistory_completion_credit;
             contract->d3d12_display_bind =
                 d3d12_native_present_evidence_valid(&native_present) &&
                 (buffer_generation == 0 ||
@@ -2602,9 +2626,17 @@ static void write_webkit_gpu_policy_file(const char *name, int requested_accel,
     const char *display_bind_transport =
         contract && contract->display_bind_transport[0] ?
             contract->display_bind_transport : "none";
+    const char *display_bind_transport_source =
+        contract && contract->display_bind_transport_source[0] ?
+            contract->display_bind_transport_source : "none";
     const char *display_bind_completion_source =
         contract && contract->display_bind_completion_source[0] ?
             contract->display_bind_completion_source : "none";
+    unsigned long host_saw_display_bind_packet =
+        contract ? (unsigned long)contract->host_saw_display_bind_packet : 0;
+    unsigned long wsl_presenthistory_completion_credit =
+        contract ?
+            (unsigned long)contract->wsl_presenthistory_completion_credit : 0;
     unsigned long display_bind_present_id =
         contract ? (unsigned long)contract->display_bind_present_id : 0;
     unsigned long display_bind_completed_id =
@@ -2627,6 +2659,9 @@ static void write_webkit_gpu_policy_file(const char *name, int requested_accel,
                  "validated_shared_surface=%d d3d12_present=%d "
                  "d3d12_contract_evidence=%d d3d12_display_bind=%d "
                  "display_bind_backend=%s display_bind_transport=%s "
+                 "display_bind_transport_source=%s "
+                 "host_saw_display_bind_packet=%lu "
+                 "wsl_presenthistory_completion_credit=%lu "
                  "display_bind_present_id=%lu "
                  "display_bind_completed_id=%lu "
                  "display_bind_resource_generation=%lu "
@@ -2644,6 +2679,9 @@ static void write_webkit_gpu_policy_file(const char *name, int requested_accel,
                  validated_shared_surface, d3d12_present,
                  d3d12_contract_evidence, d3d12_display_bind,
                  display_bind_backend, display_bind_transport,
+                 display_bind_transport_source,
+                 host_saw_display_bind_packet,
+                 wsl_presenthistory_completion_credit,
                  display_bind_present_id, display_bind_completed_id,
                  display_bind_resource_generation,
                  display_bind_completion_source, d3d12_same_adapter,
