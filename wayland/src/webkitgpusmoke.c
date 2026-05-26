@@ -514,6 +514,7 @@ static int validate_gpu_contract(void)
     char evidence_visible_content_progress[96] = { 0 };
     char evidence_display_bind_backend[64] = { 0 };
     char evidence_display_bind_transport[80] = { 0 };
+    char evidence_display_bind_transport_source[96] = { 0 };
     char evidence_display_bind_completion_source[32] = { 0 };
     uint64_t evidence_resource = 0;
     uint64_t evidence_allocations = 0;
@@ -540,6 +541,8 @@ static int validate_gpu_contract(void)
     uint64_t evidence_display_bind_present_id = 0;
     uint64_t evidence_display_bind_completed_id = 0;
     uint64_t evidence_display_bind_resource_generation = 0;
+    uint64_t evidence_host_saw_display_bind_packet = 0;
+    uint64_t evidence_wsl_presenthistory_completion_credit = 0;
     uint64_t evidence_native_requirements = 0;
     uint64_t evidence_identity_current = 0;
     uint64_t evidence_client_pid = 0;
@@ -767,6 +770,14 @@ static int validate_gpu_contract(void)
         (void)evidence_key_string(evidence, "display_bind_transport",
                                   evidence_display_bind_transport,
                                   sizeof(evidence_display_bind_transport));
+        (void)evidence_key_string(evidence, "display_bind_transport_source",
+                                  evidence_display_bind_transport_source,
+                                  sizeof(evidence_display_bind_transport_source));
+        (void)evidence_key_u64(evidence, "host_saw_display_bind_packet",
+                               &evidence_host_saw_display_bind_packet);
+        (void)evidence_key_u64(
+            evidence, "wsl_presenthistory_completion_credit",
+            &evidence_wsl_presenthistory_completion_credit);
         (void)evidence_key_u64(evidence, "display_bind_present_id",
                                &evidence_display_bind_present_id);
         (void)evidence_key_u64(evidence, "display_bind_completed_id",
@@ -1088,6 +1099,10 @@ static int validate_gpu_contract(void)
         strcmp(evidence_display_bind_backend, "gpup_dxg_scanout_bind") == 0 &&
         strcmp(evidence_display_bind_transport,
                "gpu-p-dxg-resource-scanout-bind") == 0 &&
+        strcmp(evidence_display_bind_transport_source,
+               "non_wsl_linux_dxgkrnl_extension") == 0 &&
+        evidence_host_saw_display_bind_packet == 1 &&
+        evidence_wsl_presenthistory_completion_credit == 0 &&
         evidence_display_bind_present_id != 0 &&
         evidence_display_bind_present_id == evidence_dxg_present_id &&
         evidence_display_bind_completed_id >=
@@ -1243,6 +1258,9 @@ static int validate_gpu_contract(void)
             "backend_identity=FB_GPU_BACKEND_F_OPENGL_SUBMIT "
             "backend_opengl_submit=%d backend_zero_rejected=%d "
             "display_bind_backend=%s display_bind_transport=%s "
+            "display_bind_transport_source=%s "
+            "host_saw_display_bind_packet=%lu "
+            "wsl_presenthistory_completion_credit=%lu "
             "display_bind_present_id=%lu display_bind_completed_id=%lu "
             "display_bind_resource_generation=%lu "
             "display_bind_completion_source=%s "
@@ -1260,6 +1278,10 @@ static int validate_gpu_contract(void)
                 evidence_display_bind_backend : "MISSING",
             evidence_display_bind_transport[0] ?
                 evidence_display_bind_transport : "MISSING",
+            evidence_display_bind_transport_source[0] ?
+                evidence_display_bind_transport_source : "MISSING",
+            (unsigned long)evidence_host_saw_display_bind_packet,
+            (unsigned long)evidence_wsl_presenthistory_completion_credit,
             (unsigned long)evidence_display_bind_present_id,
             (unsigned long)evidence_display_bind_completed_id,
             (unsigned long)evidence_display_bind_resource_generation,
@@ -1303,6 +1325,9 @@ static int validate_gpu_contract(void)
             "d3d12_display_handoff=%lu d3d12_native_requirements=%lu "
             "d3d12_display_bind_ok=%d "
             "display_bind_backend=%s display_bind_transport=%s "
+            "display_bind_transport_source=%s "
+            "host_saw_display_bind_packet=%lu "
+            "wsl_presenthistory_completion_credit=%lu "
             "display_bind_present_id=%lu display_bind_completed_id=%lu "
             "display_bind_resource_generation=%lu "
             "display_bind_completion_source=%s "
@@ -1401,6 +1426,10 @@ static int validate_gpu_contract(void)
                 evidence_display_bind_backend : "MISSING",
             evidence_display_bind_transport[0] ?
                 evidence_display_bind_transport : "MISSING",
+            evidence_display_bind_transport_source[0] ?
+                evidence_display_bind_transport_source : "MISSING",
+            (unsigned long)evidence_host_saw_display_bind_packet,
+            (unsigned long)evidence_wsl_presenthistory_completion_credit,
             (unsigned long)evidence_display_bind_present_id,
             (unsigned long)evidence_display_bind_completed_id,
             (unsigned long)evidence_display_bind_resource_generation,
@@ -1514,6 +1543,9 @@ static int run_contract_parser_negative_selftest(void)
         "display_bind_completed_id=43x "
         "display_bind_backend=host-display-channel "
         "display_bind_transport=rdp-frame-copy "
+        "display_bind_transport_source=wsl_presenthistory "
+        "host_saw_display_bind_packet=0 "
+        "wsl_presenthistory_completion_credit=1 "
         "display_bind_completion_source=host-display-channel "
         "completion_source=1 "
         "present_id=55 completed=55\n";
@@ -1523,6 +1555,9 @@ static int run_contract_parser_negative_selftest(void)
         "d3d12_present_identity_compositor_run_id=current\n"
         "display_bind_backend=gpup_dxg_scanout_bind\n"
         "display_bind_transport=gpu-p-dxg-resource-scanout-bind\n"
+        "display_bind_transport_source=non_wsl_linux_dxgkrnl_extension\n"
+        "host_saw_display_bind_packet=1\n"
+        "wsl_presenthistory_completion_credit=0\n"
         "display_bind_present_id=55\n"
         "display_bind_completed_id=55\n"
         "display_bind_resource_generation=9\n"

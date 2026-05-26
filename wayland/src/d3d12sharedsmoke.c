@@ -707,6 +707,10 @@ struct present_evidence {
     char wslg_user_display_helper_path[128];
     char wslg_user_display_dependency[128];
     char present_source_query_skipped_reason[96];
+    char display_bind_backend[64];
+    char display_bind_transport[96];
+    char display_bind_transport_source[96];
+    char display_bind_completion_source[64];
     int64_t mtime_ms;
     uint64_t counter;
     uint64_t starts;
@@ -737,6 +741,11 @@ struct present_evidence {
     uint64_t present_identity_completion_id;
     uint64_t present_identity_current_run_valid;
     uint64_t callback_release_same_frame_required;
+    uint64_t host_saw_display_bind_packet;
+    uint64_t wsl_presenthistory_completion_credit;
+    uint64_t display_bind_present_id;
+    uint64_t display_bind_completed_id;
+    uint64_t display_bind_resource_generation;
     uint64_t resource;
     uint64_t allocation_count;
     uint64_t fence;
@@ -1338,6 +1347,18 @@ static int read_present_evidence_file(const char *path, uint64_t *counter_out,
         parse_string_token(buf, "d3d12_present_source_query_skipped_reason",
                            evidence_out->present_source_query_skipped_reason,
                            sizeof(evidence_out->present_source_query_skipped_reason));
+        parse_string_token(buf, "display_bind_backend",
+                           evidence_out->display_bind_backend,
+                           sizeof(evidence_out->display_bind_backend));
+        parse_string_token(buf, "display_bind_transport",
+                           evidence_out->display_bind_transport,
+                           sizeof(evidence_out->display_bind_transport));
+        parse_string_token(buf, "display_bind_transport_source",
+                           evidence_out->display_bind_transport_source,
+                           sizeof(evidence_out->display_bind_transport_source));
+        parse_string_token(buf, "display_bind_completion_source",
+                           evidence_out->display_bind_completion_source,
+                           sizeof(evidence_out->display_bind_completion_source));
         parse_counter_token(buf, "d3d12_gpu_present_starts",
                             &evidence_out->starts);
         parse_counter_token(buf, "d3d12_gpu_copy_completes",
@@ -1397,6 +1418,16 @@ static int read_present_evidence_file(const char *path, uint64_t *counter_out,
                             &evidence_out->present_identity_current_run_valid);
         parse_counter_token(buf, "d3d12_callback_release_same_frame_required",
                             &evidence_out->callback_release_same_frame_required);
+        parse_counter_token(buf, "host_saw_display_bind_packet",
+                            &evidence_out->host_saw_display_bind_packet);
+        parse_counter_token(buf, "wsl_presenthistory_completion_credit",
+                            &evidence_out->wsl_presenthistory_completion_credit);
+        parse_counter_token(buf, "display_bind_present_id",
+                            &evidence_out->display_bind_present_id);
+        parse_counter_token(buf, "display_bind_completed_id",
+                            &evidence_out->display_bind_completed_id);
+        parse_counter_token(buf, "display_bind_resource_generation",
+                            &evidence_out->display_bind_resource_generation);
         parse_counter_token(buf, "d3d12_present_resource",
                             &evidence_out->resource);
         parse_counter_token(buf, "d3d12_present_allocation_count",
@@ -1871,6 +1902,19 @@ static int validate_native_present_evidence(
         evidence->present_identity_completion_id == 0 ||
         evidence->present_identity_current_run_valid == 0 ||
         evidence->callback_release_same_frame_required == 0 ||
+        strcmp(evidence->display_bind_backend,
+               "gpup_dxg_scanout_bind") != 0 ||
+        strcmp(evidence->display_bind_transport,
+               "gpu-p-dxg-resource-scanout-bind") != 0 ||
+        strcmp(evidence->display_bind_transport_source,
+               "non_wsl_linux_dxgkrnl_extension") != 0 ||
+        evidence->host_saw_display_bind_packet != 1 ||
+        evidence->wsl_presenthistory_completion_credit != 0 ||
+        evidence->display_bind_present_id == 0 ||
+        evidence->display_bind_completed_id <
+            evidence->display_bind_present_id ||
+        evidence->display_bind_resource_generation == 0 ||
+        strcmp(evidence->display_bind_completion_source, "display") != 0 ||
         evidence->resource == 0 || evidence->allocation_count == 0 ||
         evidence->descriptor_width == 0 ||
         evidence->descriptor_height == 0 ||
@@ -1969,6 +2013,10 @@ static int validate_native_present_evidence(
         evidence->dxg_present_source_commit_expected_eopnotsupp != 0 ||
         evidence->dxg_present_id == 0 ||
         evidence->dxg_present_completed == 0 ||
+        evidence->display_bind_present_id != evidence->dxg_present_id ||
+        evidence->display_bind_completed_id != evidence->dxg_present_completed ||
+        evidence->display_bind_resource_generation !=
+            evidence->buffer_generation ||
         evidence->buffer_present_source_register_attempts == 0 ||
         evidence->buffer_present_source_register_successes == 0 ||
         evidence->buffer_present_source_register_errno != 0 ||
@@ -2312,10 +2360,24 @@ static void print_present_evidence_matrix(
                         e ? e->source_luid : (struct winluid){ 0, 0 });
     format_winluid_text(matched_luid, sizeof(matched_luid),
                         e ? e->matched_luid : (struct winluid){ 0, 0 });
-    printf("d3d12sharedsmoke: present-evidence-matrix label=%s path=%s status=%s found=%u rejected=%u native_path=%u counter=%lu starts=%lu copy=%lu completes=%lu client_attempts=%lu client_completions=%lu client_rejects=%lu resource_attempts=%lu resource_completions=%lu resource_rejects=%lu generation_attempts=%lu generation_completions=%lu generation_rejects=%lu present_id=%lu completed=%lu buffer_present_id=%lu buffer_completed=%lu callbacks=%lu callback_native_successes=%lu callback_failclosed=%lu callback_resource=0x%lx callback_sequence=%lu releases=%lu release_native_successes=%lu release_failclosed=%lu release_resource=0x%lx release_sequence=%lu release_fence=%lu descriptor=%lux%lu pitch=%lu layout=%s sample_count=%lu dxg_fd=%lu resource_fd=%lu nt_fd=%lu device=0x%lx desc_resource=0x%lx allocation0=0x%lx desc_allocations=%lu desc_format=0x%lx total_priv=%lu desc_luid=%s desc_matches_copy=%lu handoff=%lu target_kind=%s display_correlated=%lu requirements=%lu phase2_bad_luid=%lu phase2_wrong_dimensions=%lu phase2_wrong_format=%lu phase2_missing_resource_fd=%lu phase2_missing_fence_fd=%lu phase2_stale_fence=%lu phase2_cpu_mappable_fallback=%lu cpu_readback=%lu cpu_mapping=%lu cpu_copy=%lu source_luid=%s matched_luid=%s\n",
+    printf("d3d12sharedsmoke: present-evidence-matrix label=%s path=%s status=%s found=%u rejected=%u native_path=%u display_bind_backend=%s display_bind_transport=%s display_bind_transport_source=%s host_saw_display_bind_packet=%lu wsl_presenthistory_completion_credit=%lu display_bind_present_id=%lu display_bind_completed_id=%lu display_bind_resource_generation=%lu display_bind_completion_source=%s counter=%lu starts=%lu copy=%lu completes=%lu client_attempts=%lu client_completions=%lu client_rejects=%lu resource_attempts=%lu resource_completions=%lu resource_rejects=%lu generation_attempts=%lu generation_completions=%lu generation_rejects=%lu present_id=%lu completed=%lu buffer_present_id=%lu buffer_completed=%lu callbacks=%lu callback_native_successes=%lu callback_failclosed=%lu callback_resource=0x%lx callback_sequence=%lu releases=%lu release_native_successes=%lu release_failclosed=%lu release_resource=0x%lx release_sequence=%lu release_fence=%lu descriptor=%lux%lu pitch=%lu layout=%s sample_count=%lu dxg_fd=%lu resource_fd=%lu nt_fd=%lu device=0x%lx desc_resource=0x%lx allocation0=0x%lx desc_allocations=%lu desc_format=0x%lx total_priv=%lu desc_luid=%s desc_matches_copy=%lu handoff=%lu target_kind=%s display_correlated=%lu requirements=%lu phase2_bad_luid=%lu phase2_wrong_dimensions=%lu phase2_wrong_format=%lu phase2_missing_resource_fd=%lu phase2_missing_fence_fd=%lu phase2_stale_fence=%lu phase2_cpu_mappable_fallback=%lu cpu_readback=%lu cpu_mapping=%lu cpu_copy=%lu source_luid=%s matched_luid=%s\n",
            label ? label : "present-evidence", path ? path : "none",
            valid ? "PASS" : "FAIL",
            e && e->found, e && e->rejected, e && e->native_path,
+           e && e->display_bind_backend[0] ?
+               e->display_bind_backend : "none",
+           e && e->display_bind_transport[0] ?
+               e->display_bind_transport : "none",
+           e && e->display_bind_transport_source[0] ?
+               e->display_bind_transport_source : "none",
+           (unsigned long)(e ? e->host_saw_display_bind_packet : 0),
+           (unsigned long)(e ?
+               e->wsl_presenthistory_completion_credit : 0),
+           (unsigned long)(e ? e->display_bind_present_id : 0),
+           (unsigned long)(e ? e->display_bind_completed_id : 0),
+           (unsigned long)(e ? e->display_bind_resource_generation : 0),
+           e && e->display_bind_completion_source[0] ?
+               e->display_bind_completion_source : "none",
            (unsigned long)(e ? e->counter : 0),
            (unsigned long)(e ? e->starts : 0),
            (unsigned long)(e ? e->copy_completes : 0),
@@ -2417,6 +2479,33 @@ static void print_present_evidence_matrix(
            (unsigned long)(e ? e->wslg_user_display_host_ack_required : 0),
            (unsigned long)(e ? e->wslg_user_display_host_ack_observed : 0),
            (unsigned long)(e ? e->wslg_user_display_success : 0));
+    printf("d3d12sharedsmoke: display-bind-source-authority-matrix "
+           "label=%s canonical_source=%s display_bind_backend=%s "
+           "display_bind_transport=%s display_bind_transport_source=%s "
+           "host_saw_display_bind_packet=%lu "
+           "wsl_presenthistory_completion_credit=%lu "
+           "display_bind_present_id=%lu display_bind_completed_id=%lu "
+           "display_bind_resource_generation=%lu "
+           "display_bind_completion_source=%s native_present_credit=%u "
+           "status=%s\n",
+           label ? label : "present-evidence",
+           path ? path : "none",
+           e && e->display_bind_backend[0] ?
+               e->display_bind_backend : "none",
+           e && e->display_bind_transport[0] ?
+               e->display_bind_transport : "none",
+           e && e->display_bind_transport_source[0] ?
+               e->display_bind_transport_source : "none",
+           (unsigned long)(e ? e->host_saw_display_bind_packet : 0),
+           (unsigned long)(e ?
+               e->wsl_presenthistory_completion_credit : 0),
+           (unsigned long)(e ? e->display_bind_present_id : 0),
+           (unsigned long)(e ? e->display_bind_completed_id : 0),
+           (unsigned long)(e ? e->display_bind_resource_generation : 0),
+           e && e->display_bind_completion_source[0] ?
+               e->display_bind_completion_source : "none",
+           valid ? 1 : 0,
+           valid ? "PASS" : "FAIL");
 }
 
 static int run_present_evidence_validate(const char *path)
@@ -2455,6 +2544,15 @@ static int run_present_evidence_selftest(void)
         "d3d12_present_path=d3d12-dxg-present-source-display-handoff\n"
         "d3d12_run_id=selftest\n"
         "d3d12_present_identity_compositor_run_id=selftest\n"
+        "display_bind_backend=gpup_dxg_scanout_bind\n"
+        "display_bind_transport=gpu-p-dxg-resource-scanout-bind\n"
+        "display_bind_transport_source=non_wsl_linux_dxgkrnl_extension\n"
+        "host_saw_display_bind_packet=1\n"
+        "wsl_presenthistory_completion_credit=0\n"
+        "display_bind_present_id=5\n"
+        "display_bind_completed_id=5\n"
+        "display_bind_resource_generation=12\n"
+        "display_bind_completion_source=display\n"
         "d3d12_display_target_kind=runtime-created-d3d12-resource\n"
         "d3d12_gpu_present_starts=1\n"
         "d3d12_gpu_copy_completes=1\n"
@@ -2718,6 +2816,16 @@ static int run_present_evidence_selftest(void)
           identity_mismatch_flag, "", 0 },
         { "resource-completion-from-other-client",
           identity_resource_completion_other_client, "", 0 },
+        { "wsl-source-rejected", NULL,
+          "display_bind_transport_source=wsl_presenthistory\n", 0 },
+        { "invalid-host-packet-rejected", NULL,
+          "host_saw_display_bind_packet=2\n", 0 },
+        { "wsl-presenthistory-credit-rejected", NULL,
+          "wsl_presenthistory_completion_credit=1\n", 0 },
+        { "display-bind-id-mismatch-rejected", NULL,
+          "display_bind_present_id=6\n", 0 },
+        { "display-bind-generation-mismatch-rejected", NULL,
+          "display_bind_resource_generation=13\n", 0 },
         { "native-success-has-failclosed-release",
           NULL, "d3d12_buffer_release_failclosed_unblocks=1\n", 0 },
         { "native-success-has-failclosed-callback",
@@ -7862,7 +7970,7 @@ int main(int argc, char **argv)
                                 present_evidence.source_luid);
             format_winluid_text(matched_luid_text, sizeof(matched_luid_text),
                                 present_evidence.matched_luid);
-            printf("d3d12sharedsmoke: native present evidence ok path=d3d12-dxg-present-source-display-handoff run_id=%s client_buffer_id=%lu manager_resource_id=%lu buffer_generation=%lu display_target_kind=%s dxg_present_source=0x%lx present_id=%lu completed=%lu buffer_present_id=%lu buffer_completed=%lu callbacks=%lu callback_resource=0x%lx callback_sequence=%lu releases=%lu release_resource=0x%lx release_sequence=%lu mtime_ms=%ld min_mtime_ms=%ld starts=%lu copy=%lu completes=%lu resource=0x%lx allocations=%lu fence=0x%lx target=%lu release=%lu fmt=0x%lx source_luid=%s matched_luid=%s no_cpu_readback=1\n",
+            printf("d3d12sharedsmoke: native present evidence ok path=d3d12-dxg-present-source-display-handoff run_id=%s client_buffer_id=%lu manager_resource_id=%lu buffer_generation=%lu display_target_kind=%s display_bind_backend=%s display_bind_transport=%s display_bind_transport_source=%s host_saw_display_bind_packet=%lu wsl_presenthistory_completion_credit=%lu display_bind_present_id=%lu display_bind_completed_id=%lu display_bind_resource_generation=%lu display_bind_completion_source=%s dxg_present_source=0x%lx present_id=%lu completed=%lu buffer_present_id=%lu buffer_completed=%lu callbacks=%lu callback_resource=0x%lx callback_sequence=%lu releases=%lu release_resource=0x%lx release_sequence=%lu mtime_ms=%ld min_mtime_ms=%ld starts=%lu copy=%lu completes=%lu resource=0x%lx allocations=%lu fence=0x%lx target=%lu release=%lu fmt=0x%lx source_luid=%s matched_luid=%s no_cpu_readback=1\n",
                    present_evidence.run_id[0] ? present_evidence.run_id :
                    "none",
                    (unsigned long)present_evidence.client_buffer_id,
@@ -7870,6 +7978,22 @@ int main(int argc, char **argv)
                    (unsigned long)present_evidence.buffer_generation,
                    present_evidence.display_target_kind[0] ?
                    present_evidence.display_target_kind : "unknown",
+                   present_evidence.display_bind_backend[0] ?
+                   present_evidence.display_bind_backend : "none",
+                   present_evidence.display_bind_transport[0] ?
+                   present_evidence.display_bind_transport : "none",
+                   present_evidence.display_bind_transport_source[0] ?
+                   present_evidence.display_bind_transport_source : "none",
+                   (unsigned long)present_evidence.
+                       host_saw_display_bind_packet,
+                   (unsigned long)present_evidence.
+                       wsl_presenthistory_completion_credit,
+                   (unsigned long)present_evidence.display_bind_present_id,
+                   (unsigned long)present_evidence.display_bind_completed_id,
+                   (unsigned long)present_evidence.
+                       display_bind_resource_generation,
+                   present_evidence.display_bind_completion_source[0] ?
+                   present_evidence.display_bind_completion_source : "none",
                    (unsigned long)present_evidence.dxg_present_source,
                    (unsigned long)present_evidence.dxg_present_id,
                    (unsigned long)present_evidence.dxg_present_completed,
