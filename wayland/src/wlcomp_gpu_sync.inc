@@ -608,6 +608,12 @@ struct xv6_d3d12_present_result {
     uint64_t release_fence;
 };
 
+static uint64_t xv6_d3d12_counter_delta(uint64_t current, uint64_t baseline);
+static int xv6_d3d12_final_handoff_complete(
+    const struct xv6_d3d12_present_contract *present,
+    const struct xv6_d3d12_present_result *result,
+    int rejected);
+
 static const char *xv6_d3d12_present_run_id(void)
 {
     static char run_id[96];
@@ -820,7 +826,7 @@ static int xv6_d3d12_display_target_is_synthvid_sysmem(uint32_t kind)
         XV6_D3D12_DISPLAY_TARGET_SYNTHVID_VRAM_D3D12_EXISTING_SYSMEM;
 }
 
-static int xv6_d3d12_display_bind_complete(
+static int xv6_d3d12_display_bind_ids_complete(
     const struct xv6_d3d12_present_contract *present)
 {
     return present &&
@@ -837,7 +843,8 @@ static int xv6_d3d12_display_bind_provider_complete(
     const struct xv6_d3d12_present_result *result,
     int rejected)
 {
-    return !rejected && result && xv6_d3d12_display_bind_complete(present);
+    return xv6_d3d12_display_bind_ids_complete(present) &&
+        xv6_d3d12_final_handoff_complete(present, result, rejected);
 }
 
 static const char *xv6_d3d12_display_bind_completion_source(
@@ -892,6 +899,40 @@ static void xv6_d3d12_record_content_sample_unavailable(
 static uint64_t xv6_d3d12_counter_delta(uint64_t current, uint64_t baseline)
 {
     return current >= baseline ? current - baseline : 0;
+}
+
+static int xv6_d3d12_final_handoff_complete(
+    const struct xv6_d3d12_present_contract *present,
+    const struct xv6_d3d12_present_result *result,
+    int rejected)
+{
+    int runtime_target = present &&
+        xv6_d3d12_display_target_is_runtime_resource(
+            present->display_target_kind);
+    int host_commit_success = runtime_target &&
+        present->present_source_commit_attempts != 0 &&
+        present->present_source_commit_successes != 0 &&
+        present->present_source_commit_errno == 0 &&
+        present->present_source_commit_status == 0 &&
+        present->present_source_present_id != 0;
+    int dirty_correlated = present &&
+        present->dirty_rect_count != 0 &&
+        present->dirty_sequence != 0 &&
+        present->present_source_completed >= present->dirty_sequence;
+    int completion_correlated = host_commit_success &&
+        present->present_source_completed >=
+            present->present_source_present_id &&
+        present->present_source_completion_correlated &&
+        dirty_correlated &&
+        result && result->release_fence != 0;
+    int no_cpu_readback = !present ||
+        (xv6_d3d12_counter_delta(g_d3d12_cpu_map_reject_count,
+                                 present->cpu_map_rejects_at_present) == 0 &&
+         xv6_d3d12_counter_delta(g_d3d12_cpu_plane_reject_count,
+                                 present->cpu_plane_rejects_at_present) == 0);
+
+    return !rejected && runtime_target && host_commit_success &&
+        completion_correlated && no_cpu_readback;
 }
 
 enum xv6_d3d12_phase2_negative_kind {
@@ -1214,8 +1255,8 @@ static void xv6_d3d12_write_final_handoff_evidence(
                                  present->cpu_map_rejects_at_present) == 0 &&
          xv6_d3d12_counter_delta(g_d3d12_cpu_plane_reject_count,
                                  present->cpu_plane_rejects_at_present) == 0);
-    int final_success = !rejected && runtime_target && host_commit_success &&
-        completion_correlated && no_cpu_readback;
+    int final_success =
+        xv6_d3d12_final_handoff_complete(present, result, rejected);
 
     if (!fp)
         return;

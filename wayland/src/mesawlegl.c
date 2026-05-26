@@ -121,7 +121,7 @@ struct app_state {
     int close_requested;
     double fps_value;
     double fps_start_sec;
-    unsigned long last_native_present_count;
+    unsigned long last_display_bind_completed_id;
     unsigned long source_content_frame;
     unsigned long source_content_hash;
     char fps_text[FPS_TEXT_MAX];
@@ -524,10 +524,11 @@ static void append_fps_evidence(struct app_state *app, double now,
     demo_closeable = app->toplevel != NULL;
     demo_resizable = app->resize_count > 0;
     if (evidence.valid) {
-        native_count = evidence.native_present_count;
-        if (native_count >= app->last_native_present_count)
-            native_delta = native_count - app->last_native_present_count;
-        app->last_native_present_count = native_count;
+        native_count = evidence.display_bind_completed_id;
+        if (native_count >= app->last_display_bind_completed_id)
+            native_delta =
+                native_count - app->last_display_bind_completed_id;
+        app->last_display_bind_completed_id = native_count;
         source = "native-d3d12-present-complete";
         strict_finite_fps_evidence =
             native_delta > 0 &&
@@ -2119,7 +2120,7 @@ static int run_client(int loop, int frames, int resize_every, int api_smoke,
     app.fps_sample_seq = 0;
     app.fps_frame_count = 0;
     app.fps_value = 0.0;
-    app.last_native_present_count = 0;
+    app.last_display_bind_completed_id = 0;
     snprintf(app.fps_text, sizeof(app.fps_text), "FPS --.-");
 
     if (init_wayland(&app) < 0) {
