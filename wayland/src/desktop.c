@@ -87,6 +87,8 @@ struct webkit_gpu_contract_state {
     int d3d12_shared_resource;
     int d3d12_fence;
     int d3d12_native_present_required;
+    int d3d12_run_id_match;
+    int d3d12_content_progress;
     int d3d12_copy_export;
     int d3d12_readback;
     int virgl_contract;
@@ -238,45 +240,84 @@ static int xv6_dxg_transport_available(void)
            (info.flags & FB_GPU_BACKEND_F_DXG_TRANSPORT) != 0;
 }
 
+static int evidence_token_separator(char c)
+{
+    return c == '\0' || c == '\n' || c == '\r' ||
+           c == ' ' || c == '\t';
+}
+
+static int evidence_token_start(const char *text, const char *p)
+{
+    return p == text || p[-1] == '\n' || p[-1] == '\r' ||
+           p[-1] == ' ' || p[-1] == '\t';
+}
+
+static const char *evidence_key_value(const char *text, const char *key)
+{
+    size_t key_len;
+    const char *p;
+
+    if (!text || !key || !key[0])
+        return NULL;
+    key_len = strlen(key);
+    for (p = text; *p; p++) {
+        if (!evidence_token_start(text, p))
+            continue;
+        if (strncmp(p, key, key_len) == 0 && p[key_len] == '=')
+            return p + key_len + 1;
+    }
+    return NULL;
+}
+
 static int evidence_key_u64(const char *text, const char *key, uint64_t *out)
 {
-    char needle[80];
     const char *p;
     char *end = NULL;
+    uint64_t value;
 
     if (!text || !key || !out)
         return 0;
-    snprintf(needle, sizeof(needle), "%s=", key);
-    p = strstr(text, needle);
+    p = evidence_key_value(text, key);
     if (!p)
         return 0;
-    p += strlen(needle);
     errno = 0;
-    *out = strtoull(p, &end, 0);
-    return errno == 0 && end != p;
+    value = strtoull(p, &end, 0);
+    if (errno != 0 || end == p || !evidence_token_separator(*end))
+        return 0;
+    *out = value;
+    return 1;
 }
 
 static int evidence_key_string(const char *text, const char *key,
                                char *out, size_t out_size)
 {
-    char needle[80];
     const char *p;
     size_t n = 0;
 
     if (!text || !key || !out || out_size == 0)
         return 0;
     out[0] = '\0';
-    snprintf(needle, sizeof(needle), "%s=", key);
-    p = strstr(text, needle);
+    p = evidence_key_value(text, key);
     if (!p)
         return 0;
-    p += strlen(needle);
-    while (p[n] && p[n] != '\n' && p[n] != '\r' &&
-           p[n] != ' ' && p[n] != '\t' && n + 1 < out_size)
+    while (!evidence_token_separator(p[n]))
         n++;
+    if (n == 0 || n >= out_size)
+        return 0;
     memcpy(out, p, n);
     out[n] = '\0';
-    return n != 0;
+    return 1;
+}
+
+static void evidence_key_u64_alias_max(const char *text, const char *key,
+                                       uint64_t *out)
+{
+    uint64_t value = 0;
+
+    if (!out)
+        return;
+    if (evidence_key_u64(text, key, &value) && value > *out)
+        *out = value;
 }
 
 static int d3d12_native_present_evidence_read(
@@ -366,10 +407,16 @@ static char *read_d3d12_present_evidence(void)
 
 static void compute_webkit_gpu_contract(
     int opengl_submit_available, int dxg_transport_available,
-    int render_node_available, struct webkit_gpu_contract_state *contract)
+    int render_node_available, const char *expected_run_id,
+    struct webkit_gpu_contract_state *contract)
 {
     char source_luid[32] = { 0 };
     char matched_luid[32] = { 0 };
+    char run_id[128] = { 0 };
+    char compositor_run_id[128] = { 0 };
+    char content_progress_state[96] = { 0 };
+    char visible_content_progress[96] = { 0 };
+    char content_display_bind_completion_source[96] = { 0 };
     uint64_t resource = 0;
     uint64_t allocations = 0;
     uint64_t resource_import_successes = 0;
@@ -404,9 +451,27 @@ static void compute_webkit_gpu_contract(
     uint64_t framebuffer_blit_only = 1;
     uint64_t copy_export = 0;
     uint64_t copy_export_fallback = 0;
+    uint64_t current_run_valid = 0;
+    uint64_t content_crc = 0;
+    uint64_t content_frame = 0;
+    uint64_t content_frame_hash = 0;
+    uint64_t content_requires_native = 0;
+    uint64_t visible_requires_native = 0;
+    uint64_t visible_credit_before_native = 1;
+    uint64_t content_native_complete = 0;
+    uint64_t content_visible_credit = 0;
+    uint64_t content_native_credit = 0;
+    uint64_t content_source_owned = 0;
+    uint64_t content_present_id = 0;
+    uint64_t content_completed = 0;
+    uint64_t content_display_bind_present_id = 0;
+    uint64_t content_display_bind_completed_id = 0;
+    uint64_t content_display_bind_resource_generation = 0;
     struct d3d12_native_present_evidence native_present;
     char *evidence;
     int virgl;
+    int run_id_match = 0;
+    int content_progress_ok = 0;
 
     memset(contract, 0, sizeof(*contract));
     contract->gpu_contract = "none";
@@ -485,6 +550,72 @@ static void compute_webkit_gpu_contract(
         evidence_key_u64(evidence, "d3d12_copy_export", &copy_export);
         evidence_key_u64(evidence, "d3d12_copy_export_fallback",
                          &copy_export_fallback);
+        evidence_key_u64(evidence,
+                         "d3d12_present_identity_current_run_valid",
+                         &current_run_valid);
+        evidence_key_string(evidence, "d3d12_run_id",
+                            run_id, sizeof(run_id));
+        evidence_key_string(evidence,
+                            "d3d12_present_identity_compositor_run_id",
+                            compositor_run_id, sizeof(compositor_run_id));
+        evidence_key_u64_alias_max(evidence, "d3d12_visible_content_crc",
+                                   &content_crc);
+        evidence_key_u64_alias_max(evidence, "d3d12_visible_content_frame",
+                                   &content_frame);
+        evidence_key_u64_alias_max(evidence, "d3d12_visible_content_frames",
+                                   &content_frame);
+        evidence_key_u64_alias_max(evidence, "d3d12_visible_frame_hash",
+                                   &content_frame_hash);
+        evidence_key_u64_alias_max(evidence,
+                                   "d3d12_visible_content_frame_hash",
+                                   &content_frame_hash);
+        evidence_key_string(evidence, "d3d12_content_progress_state",
+                            content_progress_state,
+                            sizeof(content_progress_state));
+        evidence_key_string(evidence, "d3d12_visible_content_progress",
+                            visible_content_progress,
+                            sizeof(visible_content_progress));
+        evidence_key_u64(evidence,
+                         "d3d12_content_progress_requires_native_present",
+                         &content_requires_native);
+        evidence_key_u64(
+            evidence,
+            "d3d12_visible_content_requires_native_present_completion",
+            &visible_requires_native);
+        evidence_key_u64(
+            evidence, "d3d12_visible_content_credit_before_native_present",
+            &visible_credit_before_native);
+        evidence_key_u64(evidence,
+                         "d3d12_content_progress_native_present_complete",
+                         &content_native_complete);
+        evidence_key_u64(evidence,
+                         "d3d12_content_progress_visible_credit",
+                         &content_visible_credit);
+        evidence_key_u64(evidence,
+                         "d3d12_content_progress_native_present_credit",
+                         &content_native_credit);
+        evidence_key_u64(evidence,
+                         "d3d12_content_progress_source_owned",
+                         &content_source_owned);
+        evidence_key_u64(evidence, "d3d12_content_progress_present_id",
+                         &content_present_id);
+        evidence_key_u64(evidence, "d3d12_content_progress_completed",
+                         &content_completed);
+        evidence_key_u64(
+            evidence, "d3d12_content_progress_display_bind_present_id",
+            &content_display_bind_present_id);
+        evidence_key_u64(
+            evidence, "d3d12_content_progress_display_bind_completed_id",
+            &content_display_bind_completed_id);
+        evidence_key_u64(
+            evidence,
+            "d3d12_content_progress_display_bind_resource_generation",
+            &content_display_bind_resource_generation);
+        evidence_key_string(
+            evidence,
+            "d3d12_content_progress_display_bind_completion_source",
+            content_display_bind_completion_source,
+            sizeof(content_display_bind_completion_source));
         if (d3d12_native_present_evidence_read(evidence, &native_present)) {
             memcpy(contract->display_bind_backend,
                    native_present.display_bind_backend,
@@ -541,6 +672,32 @@ static void compute_webkit_gpu_contract(
             identity_current == 1 &&
             callback_release_same_frame == 1 &&
             frame_callback == 1 && buffer_release == 1;
+        run_id_match =
+            expected_run_id && expected_run_id[0] &&
+            run_id[0] && compositor_run_id[0] &&
+            strcmp(run_id, expected_run_id) == 0 &&
+            strcmp(compositor_run_id, expected_run_id) == 0 &&
+            current_run_valid == 1;
+        content_progress_ok =
+            content_crc != 0 && content_frame != 0 &&
+            content_frame_hash != 0 &&
+            strcmp(content_progress_state, "NATIVE_PRESENT_COMPLETE") == 0 &&
+            strcmp(visible_content_progress, "NATIVE_PRESENT_COMPLETE") == 0 &&
+            content_requires_native == 1 && visible_requires_native == 1 &&
+            visible_credit_before_native == 0 &&
+            content_native_complete == 1 &&
+            content_visible_credit == 1 &&
+            content_native_credit == 1 &&
+            content_source_owned == 1 &&
+            content_present_id == contract->display_bind_present_id &&
+            content_completed == contract->display_bind_completed_id &&
+            content_display_bind_present_id ==
+                contract->display_bind_present_id &&
+            content_display_bind_completed_id ==
+                contract->display_bind_completed_id &&
+            content_display_bind_resource_generation ==
+                contract->display_bind_resource_generation &&
+            strcmp(content_display_bind_completion_source, "display") == 0;
         contract->d3d12_copy_export =
             copy_export != 0 || copy_export_fallback != 0;
         contract->d3d12_readback =
@@ -558,8 +715,12 @@ static void compute_webkit_gpu_contract(
         contract->d3d12_fence &&
         contract->d3d12_display_bind &&
         contract->d3d12_native_present_required &&
+        run_id_match &&
+        content_progress_ok &&
         !contract->d3d12_copy_export &&
         !contract->d3d12_readback;
+    contract->d3d12_run_id_match = run_id_match;
+    contract->d3d12_content_progress = content_progress_ok;
     contract->d3d12_present =
         dxg_transport_available && render_node_available &&
         opengl_submit_available && contract->d3d12_contract_evidence;
@@ -1710,6 +1871,7 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
         compute_webkit_gpu_contract(opengl_submit_available,
                                     dxg_transport_available,
                                     render_node_available,
+                                    NULL,
                                     &contract);
         if (dmabuf_requested && !render_node_available)
             dmabuf_requested = 0;
@@ -2236,6 +2398,7 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
         compute_webkit_gpu_contract(opengl_submit_available,
                                     dxg_transport_available,
                                     render_node_available,
+                                    webkit_gpu_run_id_value,
                                     &contract);
         if (minibrowser_dmabuf && !render_node_available) {
             fprintf(stderr,
@@ -2389,6 +2552,10 @@ static void write_webkit_gpu_policy_file(const char *name, int requested_accel,
     int d3d12_fence = contract ? contract->d3d12_fence : 0;
     int d3d12_native_present_required =
         contract ? contract->d3d12_native_present_required : 0;
+    int d3d12_run_id_match =
+        contract ? contract->d3d12_run_id_match : 0;
+    int d3d12_content_progress =
+        contract ? contract->d3d12_content_progress : 0;
     int d3d12_copy_export = contract ? contract->d3d12_copy_export : 0;
     int d3d12_readback = contract ? contract->d3d12_readback : 0;
     const char *gpu_contract = contract ? contract->gpu_contract : "none";
@@ -2430,6 +2597,7 @@ static void write_webkit_gpu_policy_file(const char *name, int requested_accel,
                  "d3d12_same_adapter=%d "
                  "d3d12_no_readback=%d d3d12_shared_resource=%d "
                  "d3d12_fence=%d d3d12_native_present_required=%d "
+                 "d3d12_run_id_match=%d d3d12_content_progress=%d "
                  "d3d12_copy_export=%d d3d12_readback=%d "
                  "gpu_contract=%s fallback=%s\n",
                  name, requested_accel, effective_accel,
@@ -2442,8 +2610,9 @@ static void write_webkit_gpu_policy_file(const char *name, int requested_accel,
                  display_bind_resource_generation,
                  display_bind_completion_source, d3d12_same_adapter,
                  d3d12_no_readback, d3d12_shared_resource, d3d12_fence,
-                 d3d12_native_present_required, d3d12_copy_export,
-                 d3d12_readback, gpu_contract, fallback);
+                 d3d12_native_present_required, d3d12_run_id_match,
+                 d3d12_content_progress, d3d12_copy_export, d3d12_readback,
+                 gpu_contract, fallback);
     if (n > 0) {
         fputs(buf, stderr);
         fflush(stderr);
