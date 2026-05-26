@@ -1712,6 +1712,99 @@ static int run_animated_fixture_negative_selftest(void)
     return ok ? 0 : 1;
 }
 
+static int run_animated_native_present_negative_selftest(void)
+{
+    const char *forged =
+        "validation_run_id=webkit-selftest-current "
+        "d3d12_run_id=webkit-selftest-current "
+        "d3d12_present_identity_compositor_run_id=webkit-selftest-current "
+        "display_bind_backend=gpup_dxg_scanout_bind "
+        "display_bind_transport=gpu-p-dxg-resource-scanout-bind "
+        "display_bind_transport_source=non_wsl_linux_dxgkrnl_extension "
+        "host_saw_display_bind_packet=1 "
+        "wsl_presenthistory_completion_credit=0 "
+        "display_bind_present_id=77 display_bind_completed_id=77 "
+        "display_bind_resource_generation=19 "
+        "display_bind_completion_source=display "
+        "d3d12_visible_content_crc=123456 "
+        "d3d12_visible_content_frame=45 "
+        "d3d12_visible_frame_hash=789012 "
+        "d3d12_content_progress_source_owned=1 "
+        "d3d12_content_progress_native_present_complete=0 "
+        "d3d12_gpu_present_complete=0 "
+        "d3d12_native_present_requirements_satisfied=0 "
+        "effective_presented_fps=0.000 "
+        "effective_presented_fps_credit=0 "
+        "backend_opengl_submit=0 "
+        "validated_shared_surface_native_d3d12_contract=0";
+    uint64_t content_crc = 0;
+    uint64_t content_frame = 0;
+    uint64_t content_hash = 0;
+    uint64_t host_saw_packet = 0;
+    uint64_t wsl_credit = 1;
+    uint64_t native_complete = 1;
+    uint64_t native_requirements = 1;
+    uint64_t fps_credit = 1;
+    uint64_t backend_submit = 1;
+    uint64_t shared_surface = 1;
+    int forged_content_present =
+        evidence_key_u64(forged, "d3d12_visible_content_crc",
+                         &content_crc) && content_crc != 0 &&
+        evidence_key_u64(forged, "d3d12_visible_content_frame",
+                         &content_frame) && content_frame != 0 &&
+        evidence_key_u64(forged, "d3d12_visible_frame_hash",
+                         &content_hash) && content_hash != 0;
+    int source_authority_present =
+        evidence_string_is(forged, "display_bind_transport_source",
+                           "non_wsl_linux_dxgkrnl_extension") &&
+        evidence_key_u64(forged, "host_saw_display_bind_packet",
+                         &host_saw_packet) && host_saw_packet == 1 &&
+        evidence_key_u64(forged, "wsl_presenthistory_completion_credit",
+                         &wsl_credit) && wsl_credit == 0;
+    int missing_native_present_rejected =
+        evidence_key_u64(forged, "d3d12_gpu_present_complete",
+                         &native_complete) && native_complete == 0 &&
+        evidence_key_u64(forged,
+                         "d3d12_native_present_requirements_satisfied",
+                         &native_requirements) && native_requirements == 0;
+    int missing_prior_fps_rejected =
+        evidence_key_u64(forged, "effective_presented_fps_credit",
+                         &fps_credit) && fps_credit == 0;
+    int backend_zero_rejected =
+        evidence_key_u64(forged, "backend_opengl_submit",
+                         &backend_submit) && backend_submit == 0;
+    int missing_shared_surface_rejected =
+        evidence_key_u64(
+            forged, "validated_shared_surface_native_d3d12_contract",
+            &shared_surface) && shared_surface == 0;
+    int forged_content_rejected =
+        forged_content_present && source_authority_present &&
+        missing_native_present_rejected && missing_prior_fps_rejected &&
+        backend_zero_rejected && missing_shared_surface_rejected;
+    int ok = forged_content_rejected;
+
+    fprintf(stderr,
+            "webkitgpusmoke: "
+            "webkit_animated_content_native_present_negative_matrix "
+            "forged_content_progress=%s source_authority_present=%s "
+            "forged_content_rejected=%s "
+            "missing_native_present_rejected=%s "
+            "missing_prior_fps_rejected=%s backend_zero_rejected=%s "
+            "missing_shared_surface_rejected=%s gate=closed "
+            "native_present_credit=0 opengl_submit_credit=0 "
+            "webkit_content_credit=0 webkit_accel_credit=0 status=%s\n",
+            forged_content_present ? "PASS" : "FAIL",
+            source_authority_present ? "PASS" : "FAIL",
+            forged_content_rejected ? "PASS" : "FAIL",
+            missing_native_present_rejected ? "PASS" : "FAIL",
+            missing_prior_fps_rejected ? "PASS" : "FAIL",
+            backend_zero_rejected ? "PASS" : "FAIL",
+            missing_shared_surface_rejected ? "PASS" : "FAIL",
+            ok ? "PASS" : "FAIL");
+    fflush(stderr);
+    return ok ? 0 : 1;
+}
+
 static int run_all_negative_selftests(void)
 {
     int failures = 0;
@@ -1719,6 +1812,7 @@ static int run_all_negative_selftests(void)
     failures += run_contract_parser_negative_selftest() != 0;
     failures += run_lineage_negative_selftest() != 0;
     failures += run_animated_fixture_negative_selftest() != 0;
+    failures += run_animated_native_present_negative_selftest() != 0;
     return failures == 0 ? 0 : 1;
 }
 
@@ -1757,6 +1851,9 @@ int main(int argc, char **argv)
         return run_lineage_negative_selftest();
     if (argc > 1 && strcmp(argv[1], "--animated-fixture-negative") == 0)
         return run_animated_fixture_negative_selftest();
+    if (argc > 1 &&
+        strcmp(argv[1], "--animated-native-present-negative") == 0)
+        return run_animated_native_present_negative_selftest();
     if (argc > 1 && strcmp(argv[1], "--negative-selftests") == 0)
         return run_all_negative_selftests();
 
