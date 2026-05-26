@@ -482,7 +482,9 @@ static int read_d3d12_present_evidence(struct d3d12_present_evidence *evidence)
 }
 
 static void append_fps_evidence(struct app_state *app, double now,
-                                double elapsed, double fps)
+                                double elapsed, double fps,
+                                double *displayed_fps_out,
+                                int *native_fps_credit_out)
 {
     struct d3d12_present_evidence evidence;
     FILE *fp;
@@ -506,6 +508,12 @@ static void append_fps_evidence(struct app_state *app, double now,
     int readback_or_software_path = 0;
     int strict_finite_fps_evidence = 0;
     double effective_presented_fps = 0.0;
+    double displayed_fps = 0.0;
+
+    if (displayed_fps_out)
+        *displayed_fps_out = 0.0;
+    if (native_fps_credit_out)
+        *native_fps_credit_out = 0;
 
     (void)read_d3d12_present_evidence(&evidence);
     current_run_display_bind_complete =
@@ -578,6 +586,12 @@ static void append_fps_evidence(struct app_state *app, double now,
         if (native_fps_credit && elapsed > 0.0)
             effective_presented_fps = (double)native_delta / elapsed;
     }
+    if (native_fps_credit)
+        displayed_fps = effective_presented_fps;
+    if (displayed_fps_out)
+        *displayed_fps_out = displayed_fps;
+    if (native_fps_credit_out)
+        *native_fps_credit_out = native_fps_credit;
 
     render_width = app->width / app->render_div;
     render_height = app->height / app->render_div;
@@ -661,7 +675,8 @@ static void append_fps_evidence(struct app_state *app, double now,
             "acceptance_requires_demo_visible=1 "
             "acceptance_requires_demo_closeable=1 "
             "acceptance_requires_demo_resizable=1\n",
-            app->fps_sample_seq, fps, fps, fps, effective_presented_fps,
+            app->fps_sample_seq, displayed_fps, fps, displayed_fps,
+            effective_presented_fps,
             source, validation_run_id(), (int)getpid(),
             evidence.client_pid > 0 ? evidence.client_pid : (int)getpid(),
             evidence.valid ? 1 : 0, native_count, native_delta, elapsed, now,
@@ -766,7 +781,8 @@ static void append_fps_evidence(struct app_state *app, double now,
             "acceptance_rejects_readback_or_software=1 "
             "acceptance_rejects_app_loop_only=1 "
             "opengl_submit_credit=0 status=PASS\n",
-            app->fps_sample_seq, fps, effective_presented_fps, fps, fps,
+            app->fps_sample_seq, displayed_fps, effective_presented_fps,
+            fps, displayed_fps,
             effective_presented_fps,
             evidence.valid ? 1 : 0, native_delta, evidence.present_id,
             evidence.completed, evidence.display_bind_present_id,
@@ -829,7 +845,7 @@ static void append_fps_evidence(struct app_state *app, double now,
             "acceptance_rejects_readback_or_software=1 "
             "acceptance_rejects_app_loop_only=1 "
             "opengl_submit_credit=0 status=PASS\n",
-            app->fps_sample_seq, fps, fps, effective_presented_fps,
+            app->fps_sample_seq, fps, displayed_fps, effective_presented_fps,
             effective_presented_fps, current_run_display_bind_complete,
             evidence.display_bind_backend[0] ?
                 evidence.display_bind_backend : "missing",
@@ -866,8 +882,9 @@ static void append_fps_evidence(struct app_state *app, double now,
                 "acceptance_rejects_readback_or_software=1 "
                 "acceptance_rejects_app_loop_only=1 "
                 "status=PASS\n",
-                app->fps_sample_seq, fps, fps, fps, evidence.present_id,
-                evidence.completed, evidence.no_readback, app->software_demo,
+                app->fps_sample_seq, displayed_fps, fps, displayed_fps,
+                evidence.present_id, evidence.completed, evidence.no_readback,
+                app->software_demo,
                 readback_or_software_path);
     }
     fclose(fp);
@@ -1668,6 +1685,8 @@ static void update_demo_fps(struct app_state *app)
     double now;
     double elapsed;
     double fps;
+    double displayed_fps = 0.0;
+    int native_fps_credit = 0;
     char title[96];
 
     if (!app->sphere_demo || !app->toplevel)
@@ -1682,12 +1701,18 @@ static void update_demo_fps(struct app_state *app)
         return;
 
     fps = elapsed > 0.0 ? (double)app->fps_frame_count / elapsed : 0.0;
-    app->fps_value = fps;
-    snprintf(app->fps_text, sizeof(app->fps_text), "FPS %.1f", fps);
-    snprintf(title, sizeof(title), "Mesa 3D Demo - %.1f FPS", fps);
+    append_fps_evidence(app, now, elapsed, fps, &displayed_fps,
+                        &native_fps_credit);
+    app->fps_value = displayed_fps;
+    snprintf(app->fps_text, sizeof(app->fps_text), "FPS %.1f",
+             displayed_fps);
+    snprintf(title, sizeof(title), "Mesa 3D Demo - %.1f FPS",
+             displayed_fps);
     xdg_toplevel_set_title(app->toplevel, title);
-    append_fps_evidence(app, now, elapsed, fps);
-    fprintf(stderr, "mesawlegl[%d]: fps=%.1f\n", app->loop, fps);
+    fprintf(stderr,
+            "mesawlegl[%d]: app_loop_fps=%.1f displayed_fps=%.1f "
+            "native_fps_credit=%d\n",
+            app->loop, fps, displayed_fps, native_fps_credit);
     app->fps_frame_count = 0;
     app->fps_start_sec = now;
 }
