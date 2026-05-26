@@ -144,46 +144,76 @@ static int launcher_opengl_submit_available(void)
            (info.flags & FB_GPU_BACKEND_F_OPENGL_SUBMIT) != 0;
 }
 
+static int launcher_evidence_token_separator(char c)
+{
+    return c == '\0' || c == '\n' || c == '\r' ||
+           c == ' ' || c == '\t';
+}
+
+static int launcher_evidence_token_start(const char *text, const char *p)
+{
+    return p == text || p[-1] == '\n' || p[-1] == '\r' ||
+           p[-1] == ' ' || p[-1] == '\t';
+}
+
+static const char *launcher_evidence_key_value(const char *text,
+                                               const char *key)
+{
+    size_t key_len;
+    const char *p;
+
+    if (!text || !key || !key[0])
+        return NULL;
+    key_len = strlen(key);
+    for (p = text; *p; p++) {
+        if (!launcher_evidence_token_start(text, p))
+            continue;
+        if (strncmp(p, key, key_len) == 0 && p[key_len] == '=')
+            return p + key_len + 1;
+    }
+    return NULL;
+}
+
 static int launcher_evidence_key_u64(const char *text, const char *key,
                                      uint64_t *out)
 {
-    char needle[80];
     const char *p;
     char *end = NULL;
+    uint64_t value;
 
     if (!text || !key || !out)
         return 0;
-    snprintf(needle, sizeof(needle), "%s=", key);
-    p = strstr(text, needle);
+    p = launcher_evidence_key_value(text, key);
     if (!p)
         return 0;
-    p += strlen(needle);
     errno = 0;
-    *out = strtoull(p, &end, 0);
-    return errno == 0 && end != p;
+    value = strtoull(p, &end, 0);
+    if (errno != 0 || end == p ||
+        !launcher_evidence_token_separator(*end))
+        return 0;
+    *out = value;
+    return 1;
 }
 
 static int launcher_evidence_key_string(const char *text, const char *key,
                                         char *out, size_t out_size)
 {
-    char needle[80];
     const char *p;
     size_t n = 0;
 
     if (!text || !key || !out || out_size == 0)
         return 0;
     out[0] = '\0';
-    snprintf(needle, sizeof(needle), "%s=", key);
-    p = strstr(text, needle);
+    p = launcher_evidence_key_value(text, key);
     if (!p)
         return 0;
-    p += strlen(needle);
-    while (p[n] && p[n] != '\n' && p[n] != '\r' &&
-           p[n] != ' ' && p[n] != '\t' && n + 1 < out_size)
+    while (!launcher_evidence_token_separator(p[n]))
         n++;
+    if (n == 0 || n >= out_size)
+        return 0;
     memcpy(out, p, n);
     out[n] = '\0';
-    return n != 0;
+    return 1;
 }
 
 static void launcher_evidence_key_u64_alias_max(const char *text,
@@ -227,8 +257,7 @@ static void launcher_d3d12_native_present_evidence_normalize(
     if (launcher_evidence_string_matches_any(
             evidence->display_bind_backend,
             "gpup_dxg_scanout_bind",
-            "gpu-p-dxg-resource-scanout-bind",
-            NULL, NULL))
+            NULL, NULL, NULL))
         launcher_evidence_set_string(
             evidence->display_bind_backend,
             sizeof(evidence->display_bind_backend),

@@ -217,38 +217,154 @@ static const char *backend_name(const struct fb_gpu_backend_info_compat *info)
     }
 }
 
+static int token_separator(char c)
+{
+    return c == '\0' || c == ' ' || c == '\t' ||
+           c == '\n' || c == '\r';
+}
+
+static const char *line_end(const char *line)
+{
+    const char *end = line;
+
+    while (*end && *end != '\n' && *end != '\r')
+        end++;
+    return end;
+}
+
+static int find_key_value_token_in_range(const char *start, const char *end,
+                                         const char *key,
+                                         const char **value,
+                                         size_t *value_len)
+{
+    size_t key_len;
+    const char *p;
+
+    if (!start || !end || !key || !value || !value_len)
+        return 0;
+    key_len = strlen(key);
+    p = start;
+    while (p < end) {
+        const char *token_start;
+        const char *token_end;
+
+        while (p < end && token_separator(*p))
+            p++;
+        token_start = p;
+        while (p < end && !token_separator(*p))
+            p++;
+        token_end = p;
+        if ((size_t)(token_end - token_start) > key_len &&
+            memcmp(token_start, key, key_len) == 0 &&
+            token_start[key_len] == '=') {
+            *value = token_start + key_len + 1;
+            *value_len = (size_t)(token_end - *value);
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int find_key_value_token(const char *text, const char *key,
+                                const char **value, size_t *value_len)
+{
+    const char *line = text;
+
+    if (!text)
+        return 0;
+    while (*line) {
+        const char *end = line_end(line);
+
+        if (find_key_value_token_in_range(line, end, key, value, value_len))
+            return 1;
+        line = *end ? end + 1 : end;
+    }
+    return 0;
+}
+
+static int line_has_token(const char *line, const char *end,
+                          const char *token)
+{
+    const char *p = line;
+    size_t token_len;
+
+    if (!line || !end || !token)
+        return 0;
+    token_len = strlen(token);
+    while (p < end) {
+        const char *token_start;
+        const char *token_end;
+
+        while (p < end && token_separator(*p))
+            p++;
+        token_start = p;
+        while (p < end && !token_separator(*p))
+            p++;
+        token_end = p;
+        if ((size_t)(token_end - token_start) == token_len &&
+            memcmp(token_start, token, token_len) == 0)
+            return 1;
+    }
+    return 0;
+}
+
 static int policy_value(const char *line, const char *key, int fallback)
 {
-    size_t key_len = strlen(key);
-    const char *p = line;
+    const char *value;
+    const char *end;
+    size_t value_len;
+    char *parse_end = NULL;
+    long parsed;
 
-    while (p && *p) {
-        p = strstr(p, key);
-        if (!p)
-            break;
-        if ((p == line || p[-1] == ' ') && p[key_len] == '=')
-            return atoi(p + key_len + 1);
-        p += key_len;
-    }
-    return fallback;
+    if (!line)
+        return fallback;
+    end = line_end(line);
+    if (!find_key_value_token_in_range(line, end, key, &value, &value_len) ||
+        value_len == 0)
+        return fallback;
+    errno = 0;
+    parsed = strtol(value, &parse_end, 10);
+    if (errno != 0 || parse_end != value + value_len)
+        return fallback;
+    return (int)parsed;
+}
+
+static int evidence_key_u64_checked(const char *text, const char *key,
+                                    uint64_t *out)
+{
+    const char *value;
+    size_t value_len;
+    char *end = NULL;
+    uint64_t parsed;
+
+    if (!text || !key || !out)
+        return 0;
+    if (!find_key_value_token(text, key, &value, &value_len))
+        return 0;
+    if (value_len == 0)
+        return -1;
+    errno = 0;
+    parsed = strtoull(value, &end, 0);
+    if (errno != 0 || end != value + value_len)
+        return -1;
+    *out = parsed;
+    return 1;
+}
+
+static int evidence_key_is_u64(const char *text, const char *key,
+                               uint64_t expected)
+{
+    uint64_t value = 0;
+    int rc = evidence_key_u64_checked(text, key, &value);
+
+    if (rc < 0)
+        return 1;
+    return rc > 0 && value == expected;
 }
 
 static int evidence_key_u64(const char *text, const char *key, uint64_t *out)
 {
-    char needle[80];
-    const char *p;
-    char *end = NULL;
-
-    if (!text || !key || !out)
-        return 0;
-    snprintf(needle, sizeof(needle), "%s=", key);
-    p = strstr(text, needle);
-    if (!p)
-        return 0;
-    p += strlen(needle);
-    errno = 0;
-    *out = strtoull(p, &end, 0);
-    return errno == 0 && end != p;
+    return evidence_key_u64_checked(text, key, out) > 0;
 }
 
 static void evidence_key_u64_alias_max(const char *text, const char *key,
@@ -263,23 +379,18 @@ static void evidence_key_u64_alias_max(const char *text, const char *key,
 static int evidence_key_string(const char *text, const char *key,
                                char *out, size_t out_size)
 {
-    char needle[80];
-    const char *p;
-    size_t n = 0;
+    const char *value;
+    size_t value_len;
 
     if (!text || !key || !out || out_size == 0)
         return 0;
     out[0] = '\0';
-    snprintf(needle, sizeof(needle), "%s=", key);
-    p = strstr(text, needle);
-    if (!p)
+    if (!find_key_value_token(text, key, &value, &value_len) ||
+        value_len == 0 || value_len >= out_size)
         return 0;
-    p += strlen(needle);
-    while (p[n] && p[n] != '\n' && p[n] != '\r' && n + 1 < out_size)
-        n++;
-    memcpy(out, p, n);
-    out[n] = '\0';
-    return n != 0;
+    memcpy(out, value, value_len);
+    out[value_len] = '\0';
+    return 1;
 }
 
 static int evidence_string_is(const char *text, const char *key,
@@ -289,6 +400,47 @@ static int evidence_string_is(const char *text, const char *key,
 
     return evidence_key_string(text, key, value, sizeof(value)) &&
            strcmp(value, expected) == 0;
+}
+
+static int evidence_string_is_rejected_value(const char *text,
+                                             const char *key,
+                                             const char *expected)
+{
+    const char *value;
+    size_t value_len;
+
+    if (!find_key_value_token(text, key, &value, &value_len))
+        return 0;
+    if (value_len != strlen(expected))
+        return 0;
+    return memcmp(value, expected, value_len) == 0;
+}
+
+static int evidence_soft_claim_rejected_value(const char *text)
+{
+    return evidence_key_is_u64(text, "native_present_claim", 0) ||
+           evidence_string_is_rejected_value(
+               text, "present_claim", "requires-compositor-completion") ||
+           evidence_key_is_u64(text, "require_present", 0);
+}
+
+static const char *last_policy_line_for(const char *text, const char *name)
+{
+    const char *line = text;
+    const char *best = NULL;
+    char name_token[64];
+
+    if (!text)
+        return NULL;
+    snprintf(name_token, sizeof(name_token), "name=%s", name);
+    while (*line) {
+        const char *end = line_end(line);
+        if (line_has_token(line, end, "webkit_gpu_policy") &&
+            (line_has_token(line, end, name_token) || !best))
+            best = line;
+        line = *end ? end + 1 : end;
+    }
+    return best;
 }
 
 static int d3d12_present_evidence_fresh(void)
@@ -305,25 +457,6 @@ static int d3d12_present_evidence_fresh(void)
     if (st.st_mtime > now)
         return 1;
     return now - st.st_mtime <= XV6_D3D12_PRESENT_EVIDENCE_MAX_AGE_SEC;
-}
-
-static const char *last_policy_line_for(const char *text, const char *name)
-{
-    const char *line = text;
-    const char *best = NULL;
-    char needle[64];
-
-    snprintf(needle, sizeof(needle), "name=%s ", name);
-    while (line && *line) {
-        const char *next = strchr(line, '\n');
-        if (strstr(line, "webkit_gpu_policy") &&
-            (strstr(line, needle) || !best))
-            best = line;
-        if (!next)
-            break;
-        line = next + 1;
-    }
-    return best;
 }
 
 static int validate_gpu_contract(void)
@@ -656,6 +789,9 @@ static int validate_gpu_contract(void)
                                    &evidence_content_frame);
         evidence_key_u64_alias_max(evidence, "d3d12_visible_frame_hash",
                                    &evidence_content_frame_hash);
+        evidence_key_u64_alias_max(evidence,
+                                   "d3d12_visible_content_frame_hash",
+                                   &evidence_content_frame_hash);
         (void)evidence_key_string(evidence, "d3d12_content_progress_state",
                                   evidence_content_progress_state,
                                   sizeof(evidence_content_progress_state));
@@ -827,10 +963,7 @@ static int validate_gpu_contract(void)
         evidence_releases_blocked != 0 ||
         evidence_commit_expected_eopnotsupp != 0;
     evidence_soft_claim_rejected =
-        evidence &&
-        (strstr(evidence, "native_present_claim=0") ||
-         strstr(evidence, "present_claim=requires-compositor-completion") ||
-         strstr(evidence, "require_present=0"));
+        evidence && evidence_soft_claim_rejected_value(evidence);
     evidence_no_readback =
         evidence_cpu_readback == 0 && evidence_cpu_mapping == 0 &&
         evidence_cpu_copy == 0 &&
