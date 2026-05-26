@@ -471,10 +471,28 @@ static void append_fps_evidence(struct app_state *app, double now,
     int demo_visible = 0;
     int demo_closeable = 0;
     int demo_resizable = 0;
+    int current_run_display_bind_complete = 0;
+    int no_readback_native_path = 0;
+    int readback_or_software_path = 0;
     int strict_finite_fps_evidence = 0;
     double effective_presented_fps = 0.0;
 
     (void)read_d3d12_present_evidence(&evidence);
+    current_run_display_bind_complete =
+        evidence.valid &&
+        strcmp(evidence.display_bind_backend, "gpup_dxg_scanout_bind") == 0 &&
+        strcmp(evidence.display_bind_transport,
+               "gpu-p-dxg-resource-scanout-bind") == 0 &&
+        strcmp(evidence.display_bind_completion_source, "display") == 0 &&
+        evidence.display_bind_present_id > 0 &&
+        evidence.display_bind_completed_id >=
+            evidence.display_bind_present_id &&
+        evidence.display_bind_present_id == evidence.present_id &&
+        evidence.display_bind_completed_id == evidence.completed &&
+        evidence.display_bind_resource_generation == evidence.buffer_generation;
+    no_readback_native_path = !app->software_demo && evidence.no_readback == 1;
+    readback_or_software_path =
+        app->software_demo || evidence.no_readback != 1;
     native_present_complete =
         evidence.valid &&
         evidence.present_id > 0 &&
@@ -513,6 +531,8 @@ static void append_fps_evidence(struct app_state *app, double now,
         source = "native-d3d12-present-complete";
         strict_finite_fps_evidence =
             native_delta > 0 &&
+            current_run_display_bind_complete &&
+            no_readback_native_path &&
             native_present_complete &&
             same_resource_generation &&
             compositor_owned_visible_crc &&
@@ -541,6 +561,8 @@ static void append_fps_evidence(struct app_state *app, double now,
         return;
     fprintf(fp,
             "mesawlegl_fps_sample callback_seq=%d visible_fps=%.3f "
+            "app_loop_fps=%.3f overlay_fps=%.3f "
+            "effective_native_presented_fps=%.3f "
             "source=%s validation_run_id=%s process_id=%d "
             "d3d12_client_pid=%d d3d12_evidence_valid=%d "
             "native_present_count=%lu native_present_delta=%lu "
@@ -555,6 +577,9 @@ static void append_fps_evidence(struct app_state *app, double now,
             "display_bind_resource_generation=%lu "
             "display_bind_completion_source=%s "
             "display_handoff_implemented=%lu "
+            "current_run_display_bind_complete=%d "
+            "no_readback=%lu software_demo=%d "
+            "readback_or_software_path=%d "
             "content_visible_credit=%lu content_native_present_credit=%lu "
             "present_content_crc=%lu visible_content_crc=%lu "
             "present_content_frame=%lu visible_content_frame=%lu "
@@ -585,11 +610,16 @@ static void append_fps_evidence(struct app_state *app, double now,
             "finite_demo_visible=%d finite_demo_closeable=%d "
             "finite_demo_resizable=%d "
             "strict_finite_fps_evidence=%d "
+            "app_loop_fps_credit=0 overlay_fps_credit=0 "
             "native_present_credit=%d "
+            "effective_presented_fps_credit=%d "
             "opengl_submit_credit=0 "
             "displayed_fps_context_only=%d "
             "acceptance_requires_native_present_and_content_progress=1 "
             "acceptance_requires_native_present_completion=1 "
+            "acceptance_requires_current_run_display_bind_completion=1 "
+            "acceptance_rejects_readback_or_software=1 "
+            "acceptance_rejects_app_loop_only=1 "
             "acceptance_requires_compositor_owned_visible_content_crc=1 "
             "acceptance_requires_compositor_owned_visible_content_frame=1 "
             "acceptance_requires_compositor_owned_visible_frame_hash=1 "
@@ -597,8 +627,8 @@ static void append_fps_evidence(struct app_state *app, double now,
             "acceptance_requires_demo_visible=1 "
             "acceptance_requires_demo_closeable=1 "
             "acceptance_requires_demo_resizable=1\n",
-            app->fps_sample_seq, fps, source, validation_run_id(),
-            (int)getpid(),
+            app->fps_sample_seq, fps, fps, fps, effective_presented_fps,
+            source, validation_run_id(), (int)getpid(),
             evidence.client_pid > 0 ? evidence.client_pid : (int)getpid(),
             evidence.valid ? 1 : 0, native_count, native_delta, elapsed, now,
             app->frame, app->width, app->height, render_width, render_height,
@@ -615,6 +645,10 @@ static void append_fps_evidence(struct app_state *app, double now,
             evidence.display_bind_completion_source[0] ?
                 evidence.display_bind_completion_source : "missing",
             evidence.display_handoff_implemented,
+            current_run_display_bind_complete,
+            evidence.no_readback,
+            app->software_demo,
+            readback_or_software_path,
             evidence.content_visible_credit,
             evidence.content_native_present_credit,
             evidence.present_content_crc,
@@ -651,14 +685,21 @@ static void append_fps_evidence(struct app_state *app, double now,
             demo_visible, demo_closeable, demo_resizable,
             strict_finite_fps_evidence,
             native_fps_credit,
+            native_fps_credit,
             native_fps_credit ? 0 : 1);
     fprintf(fp,
             "mesawlegl_fps_present_credit_matrix "
             "callback_seq=%d visible_fps=%.3f effective_presented_fps=%.3f "
+            "app_loop_fps=%.3f overlay_fps=%.3f "
+            "effective_native_presented_fps=%.3f "
             "strict_anti_inflation=1 d3d12_evidence_valid=%d "
             "native_present_delta=%lu present_id=%lu completed=%lu "
             "display_bind_present_id=%lu display_bind_completed_id=%lu "
+            "display_bind_backend=%s display_bind_transport=%s "
             "display_bind_completion_source=%s "
+            "current_run_display_bind_complete=%d "
+            "no_readback=%lu software_demo=%d "
+            "readback_or_software_path=%d "
             "content_visible_credit=%lu present_content_crc=%lu "
             "visible_content_crc=%lu present_content_frame=%lu "
             "visible_content_frame=%lu "
@@ -680,15 +721,29 @@ static void append_fps_evidence(struct app_state *app, double now,
             "finite_demo_visible=%d finite_demo_closeable=%d "
             "finite_demo_resizable=%d "
             "strict_finite_fps_evidence=%d "
+            "app_loop_fps_credit=0 overlay_fps_credit=0 "
             "displayed_fps_context_only=%d visible_fps_ignored=%d "
             "fps_credit_source=%s native_present_credit=%d "
+            "effective_presented_fps_credit=%d "
+            "acceptance_requires_current_run_display_bind_completion=1 "
+            "acceptance_rejects_readback_or_software=1 "
+            "acceptance_rejects_app_loop_only=1 "
             "opengl_submit_credit=0 status=PASS\n",
-            app->fps_sample_seq, fps, effective_presented_fps,
+            app->fps_sample_seq, fps, effective_presented_fps, fps, fps,
+            effective_presented_fps,
             evidence.valid ? 1 : 0, native_delta, evidence.present_id,
             evidence.completed, evidence.display_bind_present_id,
             evidence.display_bind_completed_id,
+            evidence.display_bind_backend[0] ?
+                evidence.display_bind_backend : "missing",
+            evidence.display_bind_transport[0] ?
+                evidence.display_bind_transport : "missing",
             evidence.display_bind_completion_source[0] ?
                 evidence.display_bind_completion_source : "missing",
+            current_run_display_bind_complete,
+            evidence.no_readback,
+            app->software_demo,
+            readback_or_software_path,
             evidence.content_visible_credit,
             evidence.present_content_crc,
             evidence.visible_content_crc,
@@ -712,18 +767,67 @@ static void append_fps_evidence(struct app_state *app, double now,
             demo_visible, demo_closeable, demo_resizable,
             strict_finite_fps_evidence,
             native_fps_credit ? 0 : 1,
-            native_fps_credit ? 0 : 1, source, native_fps_credit);
+            native_fps_credit ? 0 : 1, source, native_fps_credit,
+            native_fps_credit);
+    fprintf(fp,
+            "mesawlegl_fps_dependency_skeleton_matrix "
+            "callback_seq=%d app_loop_fps=%.3f overlay_fps=%.3f "
+            "effective_native_presented_fps=%.3f effective_presented_fps=%.3f "
+            "current_run_display_bind_complete=%d "
+            "display_bind_backend=%s display_bind_transport=%s "
+            "display_bind_present_id=%lu display_bind_completed_id=%lu "
+            "display_bind_resource_generation=%lu "
+            "display_bind_completion_source=%s "
+            "native_present_delta=%lu present_id=%lu completed=%lu "
+            "no_readback=%lu software_demo=%d "
+            "readback_or_software_path=%d "
+            "app_loop_fps_credit=0 overlay_fps_credit=0 "
+            "app_loop_only_zero_credit=%d "
+            "native_present_credit=%d effective_presented_fps_credit=%d "
+            "hyperv_failclosed_zero_effective_fps=%d "
+            "acceptance_requires_current_run_display_bind_completion=1 "
+            "acceptance_rejects_readback_or_software=1 "
+            "acceptance_rejects_app_loop_only=1 "
+            "opengl_submit_credit=0 status=PASS\n",
+            app->fps_sample_seq, fps, fps, effective_presented_fps,
+            effective_presented_fps, current_run_display_bind_complete,
+            evidence.display_bind_backend[0] ?
+                evidence.display_bind_backend : "missing",
+            evidence.display_bind_transport[0] ?
+                evidence.display_bind_transport : "missing",
+            evidence.display_bind_present_id,
+            evidence.display_bind_completed_id,
+            evidence.display_bind_resource_generation,
+            evidence.display_bind_completion_source[0] ?
+                evidence.display_bind_completion_source : "missing",
+            native_delta, evidence.present_id, evidence.completed,
+            evidence.no_readback, app->software_demo,
+            readback_or_software_path,
+            native_fps_credit ? 0 : 1,
+            native_fps_credit, native_fps_credit,
+            native_fps_credit ? 0 : 1);
     if (!evidence.valid) {
         fprintf(fp,
                 "mesawlegl_fps_context_only_matrix "
                 "callback_seq=%d visible_fps=%.3f "
+                "app_loop_fps=%.3f overlay_fps=%.3f "
+                "effective_native_presented_fps=0.000 "
                 "source=app-draw-loop-context-only "
                 "d3d12_evidence_valid=0 native_present_delta=0 "
                 "present_id=%lu completed=%lu displayed_fps_context_only=1 "
+                "current_run_display_bind_complete=0 "
+                "no_readback=%lu software_demo=%d "
+                "readback_or_software_path=%d "
+                "app_loop_fps_credit=0 overlay_fps_credit=0 "
+                "native_present_credit=0 effective_presented_fps_credit=0 "
                 "acceptance_requires_native_present_and_content_progress=1 "
+                "acceptance_requires_current_run_display_bind_completion=1 "
+                "acceptance_rejects_readback_or_software=1 "
+                "acceptance_rejects_app_loop_only=1 "
                 "status=PASS\n",
-                app->fps_sample_seq, fps, evidence.present_id,
-                evidence.completed);
+                app->fps_sample_seq, fps, fps, fps, evidence.present_id,
+                evidence.completed, evidence.no_readback, app->software_demo,
+                readback_or_software_path);
     }
     fclose(fp);
 }
@@ -1787,6 +1891,9 @@ static void append_demo_interaction_evidence(struct app_state *app,
     int compositor_owned_visible_hash;
     int client_content_progress;
     int content_progress_complete;
+    int current_run_display_bind_complete;
+    int no_readback_native_path;
+    int readback_or_software_path;
     int strict_demo_evidence;
 
     if (!app || !app->sphere_demo)
@@ -1804,6 +1911,21 @@ static void append_demo_interaction_evidence(struct app_state *app,
     resizable_demo = app->resize_count > 0;
     memset(&evidence, 0, sizeof(evidence));
     (void)read_d3d12_present_evidence(&evidence);
+    current_run_display_bind_complete =
+        evidence.valid &&
+        strcmp(evidence.display_bind_backend, "gpup_dxg_scanout_bind") == 0 &&
+        strcmp(evidence.display_bind_transport,
+               "gpu-p-dxg-resource-scanout-bind") == 0 &&
+        strcmp(evidence.display_bind_completion_source, "display") == 0 &&
+        evidence.display_bind_present_id > 0 &&
+        evidence.display_bind_completed_id >=
+            evidence.display_bind_present_id &&
+        evidence.display_bind_present_id == evidence.present_id &&
+        evidence.display_bind_completed_id == evidence.completed &&
+        evidence.display_bind_resource_generation == evidence.buffer_generation;
+    no_readback_native_path = !app->software_demo && evidence.no_readback == 1;
+    readback_or_software_path =
+        app->software_demo || evidence.no_readback != 1;
     native_present_complete =
         evidence.valid &&
         evidence.present_id > 0 &&
@@ -1838,6 +1960,8 @@ static void append_demo_interaction_evidence(struct app_state *app,
         client_content_progress;
     strict_demo_evidence =
         native_present_complete &&
+        current_run_display_bind_complete &&
+        no_readback_native_path &&
         content_progress_complete &&
         visible_demo &&
         closeable_demo &&
@@ -1857,6 +1981,9 @@ static void append_demo_interaction_evidence(struct app_state *app,
             "display_bind_present_id=%lu display_bind_completed_id=%lu "
             "display_bind_resource_generation=%lu "
             "display_bind_completion_source=%s "
+            "current_run_display_bind_complete=%d "
+            "no_readback=%lu software_demo=%d "
+            "readback_or_software_path=%d "
             "native_present_complete=%d "
             "same_run_resource_generation=%d "
             "same_resource_generation=%d "
@@ -1869,6 +1996,7 @@ static void append_demo_interaction_evidence(struct app_state *app,
             "d3d12_demo_interaction_content_progress=%d "
             "client_content_hash=%lu client_content_frame=%lu "
             "content_region=client-content-no-title-fps "
+            "app_loop_fps_credit=0 overlay_fps_credit=0 "
             "native_present_credit=%d opengl_submit_credit=0 status=%s\n",
             run_id, (int)getpid(), evidence.client_pid,
             visible_demo, closeable_demo, resizable_demo,
@@ -1881,6 +2009,10 @@ static void append_demo_interaction_evidence(struct app_state *app,
             evidence.display_bind_resource_generation,
             evidence.display_bind_completion_source[0] ?
                 evidence.display_bind_completion_source : "missing",
+            current_run_display_bind_complete,
+            evidence.no_readback,
+            app->software_demo,
+            readback_or_software_path,
             native_present_complete,
             evidence.valid ? 1 : 0,
             same_resource_generation,

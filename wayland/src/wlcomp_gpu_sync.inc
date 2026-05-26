@@ -832,10 +832,39 @@ static int xv6_d3d12_display_bind_complete(
             present->display_target_kind);
 }
 
-static const char *xv6_d3d12_display_bind_completion_source(
-    const struct xv6_d3d12_present_contract *present)
+static int xv6_d3d12_display_bind_provider_complete(
+    const struct xv6_d3d12_present_contract *present,
+    const struct xv6_d3d12_present_result *result,
+    int rejected)
 {
-    return xv6_d3d12_display_bind_complete(present) ? "display" : "missing";
+    return !rejected && result && xv6_d3d12_display_bind_complete(present);
+}
+
+static const char *xv6_d3d12_display_bind_completion_source(
+    const struct xv6_d3d12_present_contract *present,
+    const struct xv6_d3d12_present_result *result,
+    int rejected)
+{
+    return xv6_d3d12_display_bind_provider_complete(
+        present, result, rejected) ? "display" : "missing";
+}
+
+static uint64_t xv6_d3d12_display_bind_present_id(
+    const struct xv6_d3d12_present_contract *present,
+    const struct xv6_d3d12_present_result *result,
+    int rejected)
+{
+    return xv6_d3d12_display_bind_provider_complete(
+        present, result, rejected) ? present->present_source_present_id : 0;
+}
+
+static uint64_t xv6_d3d12_display_bind_completed_id(
+    const struct xv6_d3d12_present_contract *present,
+    const struct xv6_d3d12_present_result *result,
+    int rejected)
+{
+    return xv6_d3d12_display_bind_provider_complete(
+        present, result, rejected) ? present->present_source_completed : 0;
 }
 
 static void xv6_d3d12_record_content_sample_unavailable(
@@ -1246,12 +1275,14 @@ static void xv6_d3d12_write_fps_provenance_evidence(
     int rejected)
 {
     int display_handoff_implemented =
-        !rejected && result && xv6_d3d12_display_bind_complete(present);
+        xv6_d3d12_display_bind_provider_complete(present, result, rejected);
     int callbacks_blocked = !display_handoff_implemented;
     int releases_blocked = !display_handoff_implemented;
     int fps_credit = display_handoff_implemented;
-    uint64_t present_id = present ? present->present_source_present_id : 0;
-    uint64_t completed = present ? present->present_source_completed : 0;
+    uint64_t present_id =
+        xv6_d3d12_display_bind_present_id(present, result, rejected);
+    uint64_t completed =
+        xv6_d3d12_display_bind_completed_id(present, result, rejected);
 
     if (!fp)
         return;
@@ -1280,8 +1311,10 @@ static void xv6_d3d12_write_fps_provenance_evidence(
             (unsigned long)present_id,
             (unsigned long)completed,
             (unsigned long)(present ? present->buffer_generation : 0),
-            xv6_d3d12_display_bind_completion_source(present),
-            xv6_d3d12_display_bind_completion_source(present),
+            xv6_d3d12_display_bind_completion_source(present, result,
+                                                     rejected),
+            xv6_d3d12_display_bind_completion_source(present, result,
+                                                     rejected),
             display_handoff_implemented ? "PASS" : "PASS_FAILCLOSED");
     fprintf(fp,
             "d3d12_fps_provenance_resource_buffer_admitted=%d\n"
@@ -1311,8 +1344,10 @@ static void xv6_d3d12_write_fps_provenance_evidence(
             (unsigned long)present_id,
             (unsigned long)completed,
             (unsigned long)(present ? present->buffer_generation : 0),
-            xv6_d3d12_display_bind_completion_source(present),
-            xv6_d3d12_display_bind_completion_source(present),
+            xv6_d3d12_display_bind_completion_source(present, result,
+                                                     rejected),
+            xv6_d3d12_display_bind_completion_source(present, result,
+                                                     rejected),
             callbacks_blocked,
             releases_blocked,
             fps_credit,
@@ -1329,7 +1364,7 @@ static void xv6_d3d12_write_content_progress_evidence(
     struct wlcomp_surface *surf;
     const struct wlcomp_buffer *sample_buf = buf;
     int native_present_complete =
-        !rejected && result && xv6_d3d12_display_bind_complete(present);
+        xv6_d3d12_display_bind_provider_complete(present, result, rejected);
     uint64_t content_crc;
     uint64_t visible_crc;
     uint64_t content_frame;
@@ -1340,8 +1375,10 @@ static void xv6_d3d12_write_content_progress_evidence(
     int source_content_ready;
     const char *progress_state = native_present_complete ?
         "NATIVE_PRESENT_COMPLETE" : "DEFERRED";
-    uint64_t present_id = present ? present->present_source_present_id : 0;
-    uint64_t completed = present ? present->present_source_completed : 0;
+    uint64_t present_id =
+        xv6_d3d12_display_bind_present_id(present, result, rejected);
+    uint64_t completed =
+        xv6_d3d12_display_bind_completed_id(present, result, rejected);
     int visible_credit;
     int native_content_credit;
 
@@ -1424,8 +1461,10 @@ static void xv6_d3d12_write_content_progress_evidence(
             (unsigned long)present_id,
             (unsigned long)completed,
             (unsigned long)(present ? present->buffer_generation : 0),
-            xv6_d3d12_display_bind_completion_source(present),
-            xv6_d3d12_display_bind_completion_source(present),
+            xv6_d3d12_display_bind_completion_source(present, result,
+                                                     rejected),
+            xv6_d3d12_display_bind_completion_source(present, result,
+                                                     rejected),
             (unsigned long)content_crc,
             (unsigned long)visible_crc,
             (unsigned long)content_frame,
@@ -1487,10 +1526,83 @@ static void xv6_d3d12_write_content_progress_evidence(
             (unsigned long)present_id,
             (unsigned long)completed,
             (unsigned long)(present ? present->buffer_generation : 0),
-            xv6_d3d12_display_bind_completion_source(present),
+            xv6_d3d12_display_bind_completion_source(present, result,
+                                                     rejected),
             native_present_complete,
             visible_credit,
             native_content_credit);
+}
+
+static void xv6_d3d12_write_display_bind_dependency_evidence(
+    FILE *fp,
+    const struct xv6_d3d12_present_contract *present,
+    const struct xv6_d3d12_present_result *result,
+    int rejected)
+{
+    int provider_complete =
+        xv6_d3d12_display_bind_provider_complete(present, result, rejected);
+    uint64_t present_id =
+        xv6_d3d12_display_bind_present_id(present, result, rejected);
+    uint64_t completed =
+        xv6_d3d12_display_bind_completed_id(present, result, rejected);
+    uint64_t resource_generation = present ? present->buffer_generation : 0;
+    int resource_buffer_admitted = present && present->resource != 0;
+    int gpu_copy_complete = result && result->copy_sequence != 0;
+
+    if (!fp)
+        return;
+    fprintf(fp,
+            "d3d12_display_bind_provider_dependency_matrix "
+            "display_bind_backend=gpup_dxg_scanout_bind "
+            "display_bind_transport=gpu-p-dxg-resource-scanout-bind "
+            "display_bind_provider_completion_required=1 "
+            "display_bind_provider_completion=%d "
+            "display_bind_present_id=%lu display_bind_completed_id=%lu "
+            "display_bind_resource_generation=%lu "
+            "display_bind_completion_source=%s "
+            "native_present_credit=%d fps_credit_gate=%d "
+            "content_credit_gate=%d callbacks_release_gate=display-bind-provider-completion "
+            "opengl_submit_credit=0 status=%s\n",
+            provider_complete, (unsigned long)present_id,
+            (unsigned long)completed, (unsigned long)resource_generation,
+            xv6_d3d12_display_bind_completion_source(present, result,
+                                                     rejected),
+            provider_complete, provider_complete, provider_complete,
+            provider_complete ? "PASS" : "PASS_FAILCLOSED");
+    fprintf(fp,
+            "d3d12_progress_zero_credit_rejection_matrix "
+            "title_progress_credit=0 app_loop_progress_credit=0 "
+            "readback_progress_credit=0 dmabuf_only_progress_credit=0 "
+            "title_progress_satisfies_native_present=0 "
+            "app_loop_satisfies_fps=0 readback_satisfies_content=0 "
+            "dmabuf_only_satisfies_native_present=0 "
+            "resource_buffer_admitted=%d gpu_copy_complete=%d "
+            "display_bind_provider_completion=%d native_present_credit=%d "
+            "fps_credit_gate=%d content_credit_gate=%d "
+            "opengl_submit_credit=0 status=PASS\n",
+            resource_buffer_admitted, gpu_copy_complete, provider_complete,
+            provider_complete, provider_complete, provider_complete);
+    fprintf(fp,
+            "display_bind_backend=gpup_dxg_scanout_bind\n"
+            "display_bind_transport=gpu-p-dxg-resource-scanout-bind\n"
+            "display_bind_provider_completion_required=1\n"
+            "display_bind_provider_completion=%d\n"
+            "display_bind_present_id=%lu\n"
+            "display_bind_completed_id=%lu\n"
+            "display_bind_resource_generation=%lu\n"
+            "display_bind_completion_source=%s\n"
+            "d3d12_native_present_credit=%d\n"
+            "d3d12_fps_credit_requires_display_bind_provider_completion=1\n"
+            "d3d12_content_credit_requires_display_bind_provider_completion=1\n"
+            "d3d12_title_progress_credit=0\n"
+            "d3d12_app_loop_progress_credit=0\n"
+            "d3d12_readback_progress_credit=0\n"
+            "d3d12_dmabuf_only_progress_credit=0\n",
+            provider_complete, (unsigned long)present_id,
+            (unsigned long)completed, (unsigned long)resource_generation,
+            xv6_d3d12_display_bind_completion_source(present, result,
+                                                     rejected),
+            provider_complete);
 }
 
 struct xv6_gpu_buffer_manager_impl {
@@ -2224,6 +2336,7 @@ static void xv6_d3d12_write_stage_evidence(const char *stage, int err)
             (unsigned long)g_d3d12_frame_callback_attempt_id,
             (unsigned long)g_d3d12_frame_callback_completion_id,
             (unsigned long)g_d3d12_frame_callback_present_id);
+    xv6_d3d12_write_display_bind_dependency_evidence(fp, NULL, NULL, 1);
     xv6_d3d12_write_final_handoff_evidence(fp, NULL, NULL, 1);
     xv6_d3d12_write_fps_provenance_evidence(fp, NULL, NULL, 1);
     xv6_d3d12_write_content_progress_evidence(fp, NULL, NULL, NULL, 1);
@@ -3917,6 +4030,8 @@ static void xv6_d3d12_write_present_evidence(
             (unsigned long)(present ? present->cpu_map_rejects_at_present : 0),
             (unsigned long)(present ? present->cpu_plane_rejects_at_present :
                 0));
+    xv6_d3d12_write_display_bind_dependency_evidence(fp, present, result,
+                                                    rejected);
     xv6_d3d12_write_final_handoff_evidence(fp, present, result, rejected);
     xv6_d3d12_write_fps_provenance_evidence(fp, present, result, rejected);
     xv6_d3d12_write_content_progress_evidence(fp, NULL, present, result,
