@@ -22,7 +22,7 @@ endif()
 
 get_filename_component(_default_repo_root "${CMAKE_CURRENT_SOURCE_DIR}/../.." ABSOLUTE)
 set(XV6_REPO_ROOT "${_default_repo_root}"
-    CACHE PATH "xv6-os repo root (for scripts/patch_vim_exit.sh)")
+    CACHE PATH "xv6-os repo root (for scripts/build/patch_vim_exit.sh)")
 
 set(_src "${CMAKE_CURRENT_SOURCE_DIR}/src")
 if(NOT EXISTS "${_src}/src/configure")
@@ -31,7 +31,7 @@ if(NOT EXISTS "${_src}/src/configure")
         "  git submodule update --init --recursive ports/vim/src")
 endif()
 
-set(_patch_script "${XV6_REPO_ROOT}/scripts/patch_vim_exit.sh")
+set(_patch_script "${XV6_REPO_ROOT}/scripts/build/patch_vim_exit.sh")
 if(NOT EXISTS "${_patch_script}")
     message(FATAL_ERROR "ports/vim: missing ${_patch_script}")
 endif()
