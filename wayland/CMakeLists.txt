@@ -47,7 +47,7 @@ if(NOT EXISTS "${XV6_FAULT_TRACE_SRC}")
     message(FATAL_ERROR "ports/wayland: missing ${XV6_FAULT_TRACE_SRC}")
 endif()
 if(NOT EXISTS "${DIRECTX_HEADERS_DIR}/directx/d3d12.h")
-    message(FATAL_ERROR "ports/wayland: missing DirectX-Headers")
+    message(STATUS "ports/wayland: DirectX-Headers not yet present (expected after mesa meson setup)")
 endif()
 
 set(_wl_build     ${CMAKE_CURRENT_BINARY_DIR}/wlcomp-build)
