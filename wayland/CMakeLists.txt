@@ -50,6 +50,13 @@ if(NOT EXISTS "${DIRECTX_HEADERS_DIR}/directx/d3d12.h")
     message(STATUS "ports/wayland: DirectX-Headers not yet present (expected after mesa meson setup)")
 endif()
 
+set(_d3d12shared_ok OFF)
+if(EXISTS "/usr/lib/wsl/lib/libd3d12.so" AND EXISTS "/usr/lib/wsl/lib/libdxcore.so")
+    set(_d3d12shared_ok ON)
+else()
+    message(STATUS "ports/wayland: libd3d12/libdxcore not found in /usr/lib/wsl/lib; d3d12sharedsmoke will be a placeholder")
+endif()
+
 set(_wl_build     ${CMAKE_CURRENT_BINARY_DIR}/wlcomp-build)
 set(_host_wl_build ${CMAKE_CURRENT_BINARY_DIR}/wayland-host-glibc-build)
 set(_wl_proto_dir ${_wl_build}/wayland)
@@ -667,25 +674,43 @@ add_custom_command(
     COMMENT "Compiling linux-dmabuf smoke client"
     VERBATIM)
 
-add_custom_command(
-    OUTPUT  ${_d3d12sharedsmoke_bin}
-    COMMAND ${CMAKE_C_COMPILER} ${_wayland_opt_cflags} -Wall
-                -isystem ${XV6_SYSROOT}/include
-                -I ${XV6_SYSROOT}/include/wsl/stubs
-                -I ${_wl_proto_dir}
-                -I ${XV6_SYSROOT}/include/wayland
-                -idirafter ${XV6_REPO_ROOT}/kernel/kernel/inc
-                -L ${XV6_SYSROOT}/lib
-                -Wl,-rpath-link,${XV6_SYSROOT}/lib
-                -o ${_d3d12sharedsmoke_bin}
-                ${WAYLAND_SRC_DIR}/d3d12sharedsmoke.c ${_xdg_client_code}
-                -ld3d12 -ldxcore -lwayland-client
-                -lffi -lpthread -ldl -lrt -lm
-    DEPENDS ${WAYLAND_SRC_DIR}/d3d12sharedsmoke.c ${_xdg_client_header}
-            ${_xdg_client_code}
-            ${XV6_REPO_ROOT}/kernel/kernel/inc/uabi/d3dkmthk.h
-    COMMENT "Compiling D3D12 shared-resource Wayland smoke client"
-    VERBATIM)
+if(_d3d12shared_ok)
+    add_custom_command(
+        OUTPUT  ${_d3d12sharedsmoke_bin}
+        COMMAND ${CMAKE_C_COMPILER} ${_wayland_opt_cflags} -Wall
+                    -isystem ${XV6_SYSROOT}/include
+                    -I ${XV6_SYSROOT}/include/wsl/stubs
+                    -I ${_wl_proto_dir}
+                    -I ${XV6_SYSROOT}/include/wayland
+                    -idirafter ${XV6_REPO_ROOT}/kernel/kernel/inc
+                    -L ${XV6_SYSROOT}/lib
+                    -Wl,-rpath-link,${XV6_SYSROOT}/lib
+                    -L /usr/lib/wsl/lib
+                    -o ${_d3d12sharedsmoke_bin}
+                    ${WAYLAND_SRC_DIR}/d3d12sharedsmoke.c ${_xdg_client_code}
+                    -ld3d12 -ldxcore -lwayland-client
+                    -lffi -lpthread -ldl -lrt -lm
+        DEPENDS ${WAYLAND_SRC_DIR}/d3d12sharedsmoke.c ${_xdg_client_header}
+                ${_xdg_client_code}
+                ${XV6_REPO_ROOT}/kernel/kernel/inc/uabi/d3dkmthk.h
+        COMMENT "Compiling D3D12 shared-resource Wayland smoke client"
+        VERBATIM)
+else()
+    set(_d3d12sharedsmoke_placeholder
+        ${CMAKE_CURRENT_BINARY_DIR}/d3d12sharedsmoke-placeholder.sh)
+    file(WRITE ${_d3d12sharedsmoke_placeholder}
+        "#!/bin/sh\n"
+        "echo d3d12sharedsmoke: libd3d12/libdxcore WSL runtime not staged >&2\n"
+        "exit 77\n")
+    add_custom_command(
+        OUTPUT  ${_d3d12sharedsmoke_bin}
+        COMMAND ${CMAKE_COMMAND} -E copy
+                ${_d3d12sharedsmoke_placeholder} ${_d3d12sharedsmoke_bin}
+        COMMAND chmod 0755 ${_d3d12sharedsmoke_bin}
+        DEPENDS ${_d3d12sharedsmoke_placeholder}
+        COMMENT "Writing D3D12 shared-resource smoke placeholder"
+        VERBATIM)
+endif()
 
 set(_webkit_smoke_ok OFF)
 option(XV6_BUILD_WEBKIT_GPU_SMOKE
