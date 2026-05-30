@@ -618,6 +618,7 @@ add_custom_command(
                 ${WAYLAND_SRC_DIR}/gl_program.c
                 ${WAYLAND_SRC_DIR}/gl_fps_overlay.c
                 ${WAYLAND_SRC_DIR}/mesawlegl_sphere.c
+                ${WAYLAND_SRC_DIR}/xv6_present_buffer.c
                 ${_xdg_client_code}
                 -lEGL -lGLESv2 -lwayland-egl -lwayland-client
                 -lgbm
@@ -629,6 +630,8 @@ add_custom_command(
             ${WAYLAND_SRC_DIR}/gl_fps_overlay.h
             ${WAYLAND_SRC_DIR}/mesawlegl_sphere.c
             ${WAYLAND_SRC_DIR}/mesawlegl_sphere.h
+            ${WAYLAND_SRC_DIR}/xv6_present_buffer.c
+            ${WAYLAND_SRC_DIR}/xv6_present_buffer.h
             ${_xdg_client_header}
             ${_xdg_client_code}
     COMMENT "Compiling Mesa native Wayland EGL smoke client"

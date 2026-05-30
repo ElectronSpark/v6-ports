@@ -441,9 +441,34 @@ int main(void)
     GLuint tex = 0;
     int status = 1;
 
-    setenv("LIBGL_ALWAYS_SOFTWARE", "1", 0);
-    setenv("MESA_LOADER_DRIVER_OVERRIDE", "softpipe", 0);
-    setenv("LIBGL_DRIVERS_PATH", "/usr/lib/x86_64-linux-gnu/dri", 0);
+    /*
+     * Decide between the hardware GPU path (Mesa d3d12 Gallium driver on the
+     * real adapter) and the software smoke fallback (softpipe) BEFORE touching
+     * the renderer-selection env.  The GUI shell exports GALLIUM_DRIVER=d3d12
+     * (+ LIBGL_ALWAYS_SOFTWARE=0) on a /dev/dxg host but does NOT export
+     * MESA_LOADER_DRIVER_OVERRIDE.  Forcing softpipe here unconditionally would
+     * therefore override GALLIUM_DRIVER=d3d12 and silently demote the probe to
+     * software, which then fail-closes in require_d3d12_renderer().  Only force
+     * software when the GPU path was not requested.
+     */
+    {
+        int want_d3d12 = env_truthy("XV6_MESAGLFEATURE_REQUIRE_D3D12") ||
+                         env_is("GALLIUM_DRIVER", "d3d12") ||
+                         env_is("MESA_LOADER_DRIVER_OVERRIDE", "d3d12");
+
+        if (want_d3d12) {
+            /* Hardware GPU path: never force the software rasterizer. */
+            setenv("LIBGL_ALWAYS_SOFTWARE", "0", 0);
+            setenv("GALLIUM_DRIVER", "d3d12", 0);
+            setenv("LIBGL_DRIVERS_PATH", "/lib/dri", 0);
+            fprintf(stderr, "mesaglfeature: mode=gpu-d3d12 (hardware render)\n");
+        } else {
+            setenv("LIBGL_ALWAYS_SOFTWARE", "1", 0);
+            setenv("MESA_LOADER_DRIVER_OVERRIDE", "softpipe", 0);
+            setenv("LIBGL_DRIVERS_PATH", "/usr/lib/x86_64-linux-gnu/dri", 0);
+            fprintf(stderr, "mesaglfeature: mode=software (softpipe smoke)\n");
+        }
+    }
     report_runtime_env();
 
     display = get_surfaceless_display();

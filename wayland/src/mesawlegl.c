@@ -20,9 +20,14 @@
 #include <wayland-egl.h>
 
 #include "xdg-shell-client-protocol.h"
+#include "xv6_present_buffer.h"
 
 #ifndef EGL_PLATFORM_WAYLAND_KHR
 #define EGL_PLATFORM_WAYLAND_KHR 0x31D8
+#endif
+
+#ifndef GL_BGRA_EXT
+#define GL_BGRA_EXT 0x80E1
 #endif
 
 #ifndef M_PI
@@ -125,6 +130,20 @@ struct app_state {
     unsigned long source_content_frame;
     unsigned long source_content_hash;
     char fps_text[FPS_TEXT_MAX];
+
+    /*
+     * Honest blit-present path: glReadPixels the genuinely GPU-rendered
+     * default framebuffer into a wl_shm buffer the CPU compositor can read,
+     * then attach/commit that. The GPU still renders every frame; only the
+     * final scanout copy is a CPU blit (native scanout-present credit stays 0).
+     */
+    struct wl_shm *shm;
+    struct xv6_present_buffer present_buf;
+    int present_buf_ready;
+    int shm_present;
+    uint8_t *readback;
+    size_t readback_size;
+    GLenum read_format;
 };
 
 struct d3d12_present_evidence {
@@ -1743,10 +1762,21 @@ static void update_demo_fps(struct app_state *app)
     append_fps_evidence(app, now, elapsed, fps, &displayed_fps,
                         &native_fps_credit);
     app->fps_value = displayed_fps;
-    snprintf(app->fps_text, sizeof(app->fps_text), "FPS %.1f",
-             displayed_fps);
-    snprintf(title, sizeof(title), "Mesa 3D Demo - %.1f FPS",
-             displayed_fps);
+    /*
+     * In shm-present mode the frames are genuinely GPU-rendered and then
+     * blit-presented to the display every loop iteration, so the honest
+     * on-screen rate is the app-loop fps. native_fps_credit (native scanout
+     * present) legitimately stays 0 and is still reported on stderr below.
+     */
+    if (app->shm_present) {
+        snprintf(app->fps_text, sizeof(app->fps_text), "FPS %.1f", fps);
+        snprintf(title, sizeof(title), "Mesa 3D Demo - %.1f FPS", fps);
+    } else {
+        snprintf(app->fps_text, sizeof(app->fps_text), "FPS %.1f",
+                 displayed_fps);
+        snprintf(title, sizeof(title), "Mesa 3D Demo - %.1f FPS",
+                 displayed_fps);
+    }
     xdg_toplevel_set_title(app->toplevel, title);
     fprintf(stderr,
             "mesawlegl[%d]: app_loop_fps=%.1f displayed_fps=%.1f "
@@ -1781,6 +1811,87 @@ static void update_source_content_hash(struct app_state *app)
     app->source_content_frame = (unsigned long)app->frame + 1;
 }
 
+static void detect_read_format(struct app_state *app)
+{
+    GLint impl_format = 0;
+    GLint impl_type = 0;
+
+    app->read_format = GL_RGBA;
+    glGetIntegerv(GL_IMPLEMENTATION_COLOR_READ_FORMAT, &impl_format);
+    glGetIntegerv(GL_IMPLEMENTATION_COLOR_READ_TYPE, &impl_type);
+    if (impl_format == GL_BGRA_EXT && impl_type == GL_UNSIGNED_BYTE)
+        app->read_format = GL_BGRA_EXT;
+}
+
+static int ensure_present_buffer(struct app_state *app)
+{
+    if (!app->shm)
+        return -1;
+    if (app->present_buf_ready &&
+        app->present_buf.width == app->width &&
+        app->present_buf.height == app->height)
+        return 0;
+    if (app->present_buf_ready) {
+        xv6_present_buffer_destroy(&app->present_buf);
+        app->present_buf_ready = 0;
+    }
+    if (xv6_present_buffer_init(&app->present_buf, app->width, app->height,
+                               app->shm, NULL) != 0) {
+        fprintf(stderr, "mesawlegl[%d]: present buffer init failed\n",
+                app->loop);
+        return -1;
+    }
+    app->present_buf_ready = 1;
+    return 0;
+}
+
+/*
+ * Read back the genuinely GPU-rendered default framebuffer and copy it,
+ * vertically flipped and (if needed) R/B swizzled, into the wl_shm present
+ * buffer the CPU compositor can read. This is an explicitly accepted
+ * blit-present: the GPU does the rendering; only this final copy is on the CPU.
+ */
+static int present_via_shm(struct app_state *app)
+{
+    size_t bytes = (size_t)app->width * (size_t)app->height * 4;
+
+    if (ensure_present_buffer(app) != 0)
+        return -1;
+    if (app->readback_size < bytes) {
+        uint8_t *grown = realloc(app->readback, bytes);
+
+        if (!grown)
+            return -1;
+        app->readback = grown;
+        app->readback_size = bytes;
+    }
+    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    glReadPixels(0, 0, app->width, app->height, app->read_format,
+                 GL_UNSIGNED_BYTE, app->readback);
+    for (int y = 0; y < app->height; y++) {
+        uint32_t *dst = (uint32_t *)((uint8_t *)app->present_buf.pixels +
+                                     (size_t)y * (size_t)app->present_buf.stride);
+        uint32_t *src = (uint32_t *)(app->readback +
+                                     (size_t)(app->height - 1 - y) *
+                                     (size_t)app->width * 4);
+        if (app->read_format == GL_BGRA_EXT) {
+            memcpy(dst, src, (size_t)app->width * 4);
+            continue;
+        }
+        for (int x = 0; x < app->width; x++) {
+            uint32_t rgba = src[x];
+
+            dst[x] = 0xff000000u | ((rgba & 0x000000ffu) << 16) |
+                     (rgba & 0x0000ff00u) |
+                     ((rgba & 0x00ff0000u) >> 16);
+        }
+    }
+    wl_surface_attach(app->surface, app->present_buf.wl_buffer, 0, 0);
+    wl_surface_damage(app->surface, 0, 0, app->width, app->height);
+    wl_surface_commit(app->surface);
+    return 0;
+}
+
 static int draw_and_swap(struct app_state *app)
 {
     if (app->sphere_demo)
@@ -1795,7 +1906,10 @@ static int draw_and_swap(struct app_state *app)
         fprintf(stderr, "mesawlegl[%d]: GL error during frame\n", app->loop);
         return -1;
     }
-    if (!eglSwapBuffers(app->egl_display, app->egl_surface)) {
+    if (app->shm_present) {
+        if (present_via_shm(app) != 0)
+            return -1;
+    } else if (!eglSwapBuffers(app->egl_display, app->egl_surface)) {
         fprintf(stderr, "mesawlegl[%d]: eglSwapBuffers failed (0x%x)\n",
                 app->loop, eglGetError());
         return -1;
@@ -1876,6 +1990,9 @@ static void registry_global(void *data, struct wl_registry *registry,
                                         &xdg_wm_base_interface,
                                         version > 2 ? 2 : version);
         xdg_wm_base_add_listener(app->wm_base, &wm_base_listener, app);
+    } else if (strcmp(interface, wl_shm_interface.name) == 0) {
+        app->shm = wl_registry_bind(registry, name, &wl_shm_interface,
+                                    version > 1 ? 1 : version);
     }
 }
 
@@ -1962,6 +2079,13 @@ static void cleanup(struct app_state *app)
     }
     if (app->egl_window)
         wl_egl_window_destroy(app->egl_window);
+    if (app->present_buf_ready) {
+        xv6_present_buffer_destroy(&app->present_buf);
+        app->present_buf_ready = 0;
+    }
+    free(app->readback);
+    app->readback = NULL;
+    app->readback_size = 0;
     if (app->toplevel)
         xdg_toplevel_destroy(app->toplevel);
     if (app->xdg_surface)
@@ -1972,6 +2096,8 @@ static void cleanup(struct app_state *app)
         xdg_wm_base_destroy(app->wm_base);
     if (app->compositor)
         wl_compositor_destroy(app->compositor);
+    if (app->shm)
+        wl_shm_destroy(app->shm);
     if (app->registry)
         wl_registry_destroy(app->registry);
     if (app->display)
@@ -2250,6 +2376,25 @@ static int run_client(int loop, int frames, int resize_every, int api_smoke,
         rc = 1;
     if (app.present_interval >= 0)
         eglSwapInterval(app.egl_display, app.present_interval);
+    if (rc == 0 && app.configured) {
+        const char *shm_override = getenv("XV6_MESAWLEGL_SHM_PRESENT");
+
+        detect_read_format(&app);
+        if (shm_override && shm_override[0])
+            app.shm_present = env_enabled("XV6_MESAWLEGL_SHM_PRESENT");
+        else
+            app.shm_present = app.sphere_demo && !app.software_demo;
+        if (app.shm_present && !app.shm) {
+            fprintf(stderr,
+                    "mesawlegl[%d]: wl_shm unavailable, falling back to eglSwapBuffers present\n",
+                    loop);
+            app.shm_present = 0;
+        }
+        fprintf(stderr,
+                "mesawlegl[%d]: present_path=%s read_format=%s\n",
+                loop, app.shm_present ? "shm-blit" : "egl-swap",
+                app.read_format == GL_BGRA_EXT ? "bgra" : "rgba");
+    }
     render_width = app.width / app.render_div;
     render_height = app.height / app.render_div;
     if (render_width <= 0)

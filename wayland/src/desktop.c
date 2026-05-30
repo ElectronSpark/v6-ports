@@ -2311,6 +2311,70 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             "EPOXY_XV6_ALLOW_MISSING=1",
             NULL
         };
+        /*
+         * Hyper-V GPU-P (DXG / D3DKMT) GPU-render path.
+         *
+         * Unlike the virgl accel env above, this does NOT claim a native
+         * present / shared-surface contract: there is no GPU scanout ABI on
+         * this host, so wlcomp still composites with a CPU framebuffer blit.
+         * What this env changes is *rendering*: WebKit's accelerated
+         * compositing GL context runs on the host NVIDIA GPU through Mesa's
+         * d3d12 Gallium driver (libdxcore + libd3d12 over /dev/dxg, no
+         * /dev/dri render node), then the rendered buffer is read back and
+         * presented by the compositor on the CPU.  The contract label is
+         * deliberately honest ("d3d12-gpu-render") and we do NOT set
+         * WEBKIT_XV6_REQUIRE_GPU_CONTRACT, so WebKit never asserts a
+         * native-present capability it does not have.
+         */
+        char *envp_minibrowser_d3d12[] = {
+            "HOME=/",
+            "PATH=/bin:/usr/bin",
+            "LD_LIBRARY_PATH=/usr/lib/wsl/lib:/lib:/usr/lib:/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu",
+            "LD_PRELOAD=/lib/libpng16.so.16:/lib/libxv6memshim.so",
+            "XDG_RUNTIME_DIR=/tmp",
+            "XDG_CACHE_HOME=/tmp/.cache",
+            "XDG_DATA_HOME=/tmp/.local/share",
+            "XDG_DATA_DIRS=/share:/usr/share",
+            "WAYLAND_DISPLAY=wayland-0",
+            "GDK_BACKEND=wayland",
+            webkit_gdk_gl_env,
+            "GDK_DPI_SCALE=1.0",
+            "XCURSOR_PATH=/share/icons",
+            "XCURSOR_THEME=Adwaita",
+            "SSL_CERT_FILE=/share/netsurf/ca-bundle",
+            "GIO_MODULE_DIR=/lib/gio/modules",
+            "GIO_USE_TLS=gnutls",
+            "GST_PLUGIN_SYSTEM_PATH_1_0=/lib/gstreamer-1.0:/usr/lib/gstreamer-1.0",
+            "GST_PLUGIN_PATH_1_0=/lib/gstreamer-1.0:/usr/lib/gstreamer-1.0",
+            "GST_PLUGIN_SCANNER=/libexec/gstreamer-1.0/gst-plugin-scanner",
+            "GST_PLUGIN_SCANNER_1_0=/libexec/gstreamer-1.0/gst-plugin-scanner",
+            "GST_GL_PLATFORM=egl",
+            "GST_GL_WINDOW=wayland",
+            "GST_REGISTRY=/tmp/gstreamer-registry.bin",
+            "GST_REGISTRY_REUSE_PLUGIN_SCANNER=1",
+            gst_registry_update_env,
+            "XV6_GUI_SESSION=1",
+            webkit_gpu_run_id_env,
+            webkit_gpu_validate_run_id_env,
+            webkit_wlcomp_d3d12_run_id_env,
+            webkit_uri_log_env,
+            "WEBKIT_EXEC_PATH=/libexec/webkit2gtk-4.1",
+            "WEBKIT_INJECTED_BUNDLE_PATH=/lib/webkit2gtk-4.1/injected-bundle",
+            "WEBKIT_DISABLE_NETWORK_CACHE=1",
+            "WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS=1",
+            "WEBKIT_DMABUF_RENDERER_DISABLE_GBM=1",
+            "WEBKIT_XV6_GPU_CONTRACT=d3d12-gpu-render",
+            "WEBKIT_XV6_FORCE_COMPOSITING_MODE=1",
+            "LIBGL_ALWAYS_SOFTWARE=0",
+            "LIBGL_DRIVERS_PATH=/lib/dri",
+            "GALLIUM_DRIVER=d3d12",
+            "MESA_D3D12_DEFAULT_ADAPTER_NAME=NVIDIA",
+            "EGL_PLATFORM=wayland",
+            "ANGLE_DEFAULT_PLATFORM=gl",
+            "SOUP_FORCE_HTTP1=1",
+            "EPOXY_XV6_ALLOW_MISSING=1",
+            NULL
+        };
         char *envp_minibrowser_accel_sw[] = {
             "HOME=/",
             "PATH=/bin:/usr/bin",
@@ -2438,6 +2502,25 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             "LIBGL_DRIVERS_PATH=/lib/dri",
             NULL
         };
+        /* Hyper-V GPU-P: render Mesa GL demos on the host GPU via d3d12. */
+        char *envp_mesa_d3d12[] = {
+            "HOME=/",
+            "PATH=/bin:/usr/bin",
+            "LD_LIBRARY_PATH=/usr/lib/wsl/lib:/lib:/usr/lib:/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu",
+            "XDG_RUNTIME_DIR=/tmp",
+            "XDG_CACHE_HOME=/tmp/.cache",
+            "XDG_DATA_DIRS=/share:/usr/share",
+            "WAYLAND_DISPLAY=wayland-0",
+            "GDK_BACKEND=wayland",
+            "XCURSOR_PATH=/share/icons",
+            "XCURSOR_THEME=Adwaita",
+            "LIBGL_ALWAYS_SOFTWARE=0",
+            "GALLIUM_DRIVER=d3d12",
+            "MESA_D3D12_DEFAULT_ADAPTER_NAME=NVIDIA",
+            "LIBGL_DRIVERS_PATH=/lib/dri",
+            "EGL_PLATFORM=wayland",
+            NULL
+        };
         int minibrowser_accel =
             is_minibrowser && webkit_accel_enabled_by_cmdline();
         int minibrowser_dmabuf =
@@ -2449,6 +2532,14 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
         int webkit_accel =
             (is_minibrowser && minibrowser_accel) ||
             (is_webkitgpusmoke && webkit_accel_enabled_by_cmdline());
+        /*
+         * Honest GPU-render-with-CPU-present tier for Hyper-V GPU-P: when
+         * acceleration is requested and the DXG transport is open but the
+         * (native-present) shared-surface contract is unavailable, WebKit
+         * still renders its compositing GL context on the host GPU via Mesa
+         * d3d12.  This does NOT claim native present (see envp_minibrowser_d3d12).
+         */
+        int minibrowser_d3d12_render = 0;
         int opengl_submit_available = xv6_opengl_submit_available();
         int dxg_transport_available = xv6_dxg_transport_available();
         int render_node_available = xv6_render_node_available();
@@ -2476,17 +2567,20 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             !minibrowser_dmabuf) {
             if (dxg_transport_available) {
                 fprintf(stderr,
-                        "[desktop] Hyper-V DXG GPU-PV transport is open, "
-                        "but the validated shared-surface contract is not "
-                        "available; using the stable WebKit compositor path\n");
+                        "[desktop] Hyper-V DXG GPU-PV transport is open and "
+                        "the native-present shared-surface contract is not "
+                        "available; rendering WebKit's compositing GL context "
+                        "on the host GPU via Mesa d3d12 with CPU present\n");
+                minibrowser_d3d12_render = 1;
+                /* keep webkit_accel/minibrowser_accel set: GL compositing on */
             } else {
                 fprintf(stderr,
                         "[desktop] WebKit acceleration requested, but virgl "
                         "is unavailable; using the stable WebKit compositor "
                         "path\n");
+                minibrowser_accel = 0;
+                webkit_accel = 0;
             }
-            minibrowser_accel = 0;
-            webkit_accel = 0;
         }
         if (minibrowser_dmabuf)
             webkit_accel = 1;
@@ -2539,11 +2633,13 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
                     (webkit_accel ?
                          (minibrowser_dmabuf ? envp_minibrowser_dmabuf_sw :
                      (opengl_submit_available ? envp_minibrowser_accel :
-                                           envp_minibrowser_accel_sw)) :
+                      (minibrowser_d3d12_render ? envp_minibrowser_d3d12 :
+                                           envp_minibrowser_accel_sw))) :
                          envp_minibrowser) :
                     (is_mesa_gl ?
                     (opengl_submit_available ? envp_mesa_accel :
-                                          envp_mesa_accel_sw) :
+                     (dxg_transport_available ? envp_mesa_d3d12 :
+                                          envp_mesa_accel_sw)) :
                          envp_default));
         fprintf(stderr, "%s: execve failed errno=%d (%s)\n", path, errno,
                 errno ? strerror(errno) : "no errno from kernel");
