@@ -164,9 +164,10 @@ static int read_cmdline(char *buf, size_t buf_size);
 static int write_all_fd(int fd, const void *buf, size_t len);
 static const char *http_content_type_for_path(const char *path);
 static int http_try_serve_webkit_file(int cfd, const char *path,
-                                      const char *extra);
+                                      const char *extra, const char *range);
 static void http_smoke_self_probe(const char *path);
 static void webkit_print_runtime_probe(void);
+static void webkit_dump_gst_debug_evidence(void);
 static void webkit_print_log_evidence(const char *reason);
 static void write_webkit_gpu_policy_file(const char *name, int requested_accel,
                                          int effective_accel,
@@ -1091,6 +1092,38 @@ static void run_http_smoke_server(void)
         "safe('attach-src',function(){video.muted=true;video.playsInline=true;video.src='test-mse.mp4';return video.readyState+'/'+video.networkState;});"
         "setTimeout(function(){mark('timeout:'+video.readyState+'/'+video.networkState+':err='+(video.error?video.error.code:0));},500);"
         "})();</script>";
+    /*
+     * Real end-to-end decode proof: load a locally-served video file, call
+     * play(), and report decode progress (currentTime + decoded frame count)
+     * at the FRONT of the document title so the host probe sees genuine
+     * frame-decode evidence even when truncated. This is NOT a YouTube fake;
+     * it exercises the same GStreamer software decode + compositor present
+     * path that real playback uses.
+     */
+    static const char media_play_body[] =
+        "<!doctype html><meta charset=utf-8>"
+        "<title>xv6-media-play:boot</title>"
+        "<body style='margin:0;background:#000'>"
+        "<video id=v width=640 height=360 muted playsinline autoplay"
+        " style='width:640px;height:360px'></video>"
+        "<script>(function(){"
+        "var v=document.getElementById('v');var st='init';var maxt=0;var frames=0;"
+        "function q(){try{var p=v.getVideoPlaybackQuality?v.getVideoPlaybackQuality():null;"
+        "if(p)return p.totalVideoFrames;}catch(e){}"
+        "return (typeof v.webkitDecodedFrameCount=='number')?v.webkitDecodedFrameCount:0;}"
+        "function report(){frames=q();if(v.currentTime>maxt)maxt=v.currentTime;"
+        "document.title='xv6-media-play:t='+maxt.toFixed(2)+',frames='+frames+"
+        "',rs='+v.readyState+',ns='+v.networkState+',st='+st+',err='+(v.error?v.error.code:0);"
+        "console.log('XV6-MEDIA-PLAY '+document.title);}"
+        "v.addEventListener('loadedmetadata',function(){st='meta';report();});"
+        "v.addEventListener('canplay',function(){st='canplay';v.play&&v.play().then(function(){st='playing';report();}).catch(function(e){st='playerr:'+e.name;report();});report();});"
+        "v.addEventListener('playing',function(){st='playing';report();});"
+        "v.addEventListener('timeupdate',function(){st='timeupdate';report();});"
+        "v.addEventListener('ended',function(){st='ended';report();});"
+        "v.addEventListener('error',function(){st='error';report();});"
+        "v.src='long-test.mp4';v.load();"
+        "setInterval(report,500);report();"
+        "})();</script></body>";
     static const char ytboot_body[] =
         "<!doctype html><meta charset=utf-8>"
         "<title>xv6-ytboot:boot</title><h1 id=out>boot</h1>"
@@ -1350,6 +1383,27 @@ static void run_http_smoke_server(void)
                 break;
             body_seen += (size_t)n;
         }
+        char range_buf[128];
+        range_buf[0] = '\0';
+        {
+            /* Extract Range header before path parsing null-terminates req. */
+            const char *r = strstr(req, "Range:");
+
+            if (!r)
+                r = strstr(req, "range:");
+            if (r) {
+                r += 6;
+                while (*r == ' ' || *r == '\t')
+                    r++;
+                size_t i = 0;
+                while (r[i] && r[i] != '\r' && r[i] != '\n' &&
+                       i + 1 < sizeof(range_buf)) {
+                    range_buf[i] = r[i];
+                    i++;
+                }
+                range_buf[i] = '\0';
+            }
+        }
         if (strncmp(req, "GET ", 4) == 0 || strncmp(req, "POST ", 5) == 0) {
             path = req + (req[0] == 'G' ? 4 : 5);
             char *end = strchr(path, ' ');
@@ -1360,7 +1414,8 @@ static void run_http_smoke_server(void)
                 *query = '\0';
         }
         fprintf(stderr, "[desktop] HTTP smoke request %s\n", path);
-        if (http_try_serve_webkit_file(cfd, path, extra)) {
+        if (http_try_serve_webkit_file(cfd, path, extra,
+                                       range_buf[0] ? range_buf : NULL)) {
             close(cfd);
             continue;
         }
@@ -1369,6 +1424,9 @@ static void run_http_smoke_server(void)
             ctype = "text/html";
         } else if (strcmp(path, "/media-init-inline.html") == 0) {
             body = media_init_body;
+            ctype = "text/html";
+        } else if (strcmp(path, "/media-play-inline.html") == 0) {
+            body = media_play_body;
             ctype = "text/html";
         }
         if (ytboot_smoke && strcmp(path, "/large.js") == 0) {
@@ -1547,13 +1605,18 @@ static const char *http_content_type_for_path(const char *path)
 }
 
 static int http_try_serve_webkit_file(int cfd, const char *path,
-                                      const char *extra)
+                                      const char *extra, const char *range)
 {
     char fs_path[256];
-    char header[384];
+    char header[512];
     char buf[8192];
     struct stat st;
     int fd;
+    long long file_size;
+    long long start = 0;
+    long long end;        /* inclusive */
+    long long remaining;
+    int partial = 0;
 
     if (!path || path[0] != '/' || strcmp(path, "/") == 0 ||
         strstr(path, "..") != NULL)
@@ -1569,22 +1632,90 @@ static int http_try_serve_webkit_file(int cfd, const char *path,
         return 0;
     }
 
-    snprintf(header, sizeof(header),
-             "HTTP/1.1 200 OK\r\n"
-             "Content-Type: %s\r\n"
-             "Content-Length: %u\r\n"
-             "%s"
-             "Connection: close\r\n\r\n",
-             http_content_type_for_path(fs_path), (unsigned)st.st_size, extra);
+    file_size = (long long)st.st_size;
+    end = file_size - 1;
+
+    /*
+     * Honour a single "bytes=start-end" range request. Media engines
+     * (WebKit/GStreamer) issue byte-range requests to read the moov atom
+     * and seek; without 206 support, non-faststart MP4s fail to load
+     * (HTMLMediaElement error code 4, SRC_NOT_SUPPORTED).
+     */
+    if (range) {
+        const char *p = strstr(range, "bytes=");
+
+        if (p) {
+            p += 6;
+            char *q = NULL;
+            long long rs = strtoll(p, &q, 10);
+            long long re = -1;
+
+            if (q && *q == '-') {
+                const char *after = q + 1;
+
+                if (*after >= '0' && *after <= '9')
+                    re = strtoll(after, NULL, 10);
+            }
+            if (q && q != p) {
+                /* "bytes=start-" or "bytes=start-end" */
+                start = rs;
+            } else if (q && *q == '-') {
+                /* "bytes=-suffix": last N bytes */
+                start = (re >= 0 && re < file_size) ? file_size - re : 0;
+                re = file_size - 1;
+            }
+            if (start < 0)
+                start = 0;
+            if (start >= file_size)
+                start = file_size > 0 ? file_size - 1 : 0;
+            if (re >= start && re < file_size)
+                end = re;
+            else
+                end = file_size - 1;
+            partial = 1;
+        }
+    }
+
+    if (partial && start > 0)
+        lseek(fd, (off_t)start, SEEK_SET);
+    remaining = end - start + 1;
+    if (remaining < 0)
+        remaining = 0;
+
+    if (partial) {
+        snprintf(header, sizeof(header),
+                 "HTTP/1.1 206 Partial Content\r\n"
+                 "Content-Type: %s\r\n"
+                 "Accept-Ranges: bytes\r\n"
+                 "Content-Range: bytes %lld-%lld/%lld\r\n"
+                 "Content-Length: %lld\r\n"
+                 "%s"
+                 "Connection: close\r\n\r\n",
+                 http_content_type_for_path(fs_path), start, end, file_size,
+                 remaining, extra);
+    } else {
+        snprintf(header, sizeof(header),
+                 "HTTP/1.1 200 OK\r\n"
+                 "Content-Type: %s\r\n"
+                 "Accept-Ranges: bytes\r\n"
+                 "Content-Length: %lld\r\n"
+                 "%s"
+                 "Connection: close\r\n\r\n",
+                 http_content_type_for_path(fs_path), file_size, extra);
+    }
     if (write_all_fd(cfd, header, strlen(header)) < 0) {
         fprintf(stderr, "[desktop] HTTP file header write failed %s errno=%d (%s)\n",
                 path, errno, strerror(errno));
         close(fd);
         return 1;
     }
-    for (;;) {
-        ssize_t n = read(fd, buf, sizeof(buf));
+    while (remaining > 0) {
+        size_t want = sizeof(buf);
+        ssize_t n;
 
+        if ((long long)want > remaining)
+            want = (size_t)remaining;
+        n = read(fd, buf, want);
         if (n < 0) {
             if (errno == EINTR)
                 continue;
@@ -1599,10 +1730,11 @@ static int http_try_serve_webkit_file(int cfd, const char *path,
                     path, errno, strerror(errno));
             break;
         }
+        remaining -= n;
     }
     close(fd);
-    fprintf(stderr, "[desktop] HTTP file served %s bytes=%u\n",
-            path, (unsigned)st.st_size);
+    fprintf(stderr, "[desktop] HTTP file served %s bytes=%lld range=%s [%lld-%lld/%lld]\n",
+            path, end - start + 1, partial ? "y" : "n", start, end, file_size);
     return 1;
 }
 
@@ -1686,9 +1818,54 @@ static void webkit_read_line(const char *path, char *buf, size_t buf_size)
     }
 }
 
+static void webkit_dump_gst_debug_evidence(void)
+{
+    static int probe_calls;
+    static int dumped;
+    struct stat st;
+    int fd;
+    static char line[4096];
+    size_t len = 0;
+    char ch;
+    int printed = 0;
+
+    /* Wait a few probes so the media error has been logged, then dump once. */
+    if (dumped || ++probe_calls < 5)
+        return;
+    if (stat("/tmp/gst-debug.log", &st) != 0 || st.st_size <= 0)
+        return;
+    fd = open("/tmp/gst-debug.log", O_RDONLY);
+    if (fd < 0)
+        return;
+    while (read(fd, &ch, 1) == 1) {
+        if (ch == '\n' || len + 1 >= sizeof(line)) {
+            line[len] = '\0';
+            if (strstr(line, "ERROR") || strstr(line, "WARN") ||
+                strstr(line, "missing") || strstr(line, "not-linked") ||
+                strstr(line, "no suitable") || strstr(line, "No decoder") ||
+                strstr(line, "no decoder") || strstr(line, "Stopping resource") ||
+                strstr(line, "could not") || strstr(line, "failed") ||
+                strstr(line, "reason")) {
+                fprintf(stderr, "[desktop] GST: %s\n", line);
+                printed = 1;
+            }
+            len = 0;
+            continue;
+        }
+        if (ch != '\r')
+            line[len++] = ch;
+    }
+    close(fd);
+    if (!printed)
+        fprintf(stderr,
+                "[desktop] GST debug log present (%ld bytes) but no error/warn lines\n",
+                (long)st.st_size);
+    dumped = 1;
+}
+
 static void webkit_print_runtime_probe(void)
 {
-    char title[128];
+    char title[1024];
     char count[32];
     struct stat log_st;
     long log_size = -1;
@@ -1705,6 +1882,7 @@ static void webkit_print_runtime_probe(void)
             title[0] ? title : "(none)",
             count[0] ? count : "(none)",
             log_size);
+    webkit_dump_gst_debug_evidence();
     if (log_size >= 0 && log_size == last_log_size)
         stable_log_samples++;
     else {
@@ -1731,6 +1909,7 @@ static void webkit_print_runtime_probe(void)
                 excerpt_printed = 1;
             }
         }
+        webkit_dump_gst_debug_evidence();
     }
 }
 
@@ -1913,6 +2092,15 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
         mkdir("/tmp/.local", 0755);
         mkdir("/tmp/.local/share", 0755);
         mkdir("/tmp/webkitgtk-4.1", 0755);
+        /*
+         * GStreamer's downloadbuffer element (used by WebKit for progressive
+         * media) writes scratch files to /var/tmp/WebKit-Media-XXXXXX. Ensure
+         * the directory exists and is writable, otherwise media loads fail
+         * with HTMLMediaElement error code 4 (temp-file creation failure).
+         */
+        mkdir("/var", 0755);
+        mkdir("/var/tmp", 01777);
+        chmod("/var/tmp", 01777);
     }
     if (is_netsurf)
         mkdir("/.netsurf", 0755);
@@ -2260,6 +2448,12 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             "WEBKIT_XV6_SKIP_RULE_FEATURES=1",
             "WEBKIT_XV6_SKIP_INITIAL_EMPTY_RENDER=1",
             "SOUP_FORCE_HTTP1=1",
+            /* Keep GStreamer logging at ERROR level only: enough to capture a
+             * genuine pipeline failure (scanned by webkit_dump_gst_debug_evidence)
+             * without the per-frame WARN/INFO flood that slows software decode. */
+            "GST_DEBUG=1",
+            "GST_DEBUG_FILE=/tmp/gst-debug.log",
+            "GST_DEBUG_NO_COLOR=1",
             NULL
         };
         char *envp_minibrowser_accel[] = {
