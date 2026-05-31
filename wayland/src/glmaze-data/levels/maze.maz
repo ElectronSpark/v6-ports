@@ -1,0 +1,107 @@
+;
+; Tills test maze
+;
+
+; first texture will be used for outer borders
+texture[.]=none
+texture[#]="levels/floor1.bmp"
+texture[X]="levels/crate.bmp"
+texture[D]="levels/brick_d.bmp"
+texture[R]="levels/brick_r.bmp"
+texture[Y]="levels/brick_y.bmp"
+texture[G]="levels/brick_g.bmp"
+texture[C]="levels/brick_c.bmp"
+texture[B]="levels/brick_b.bmp"
+texture[M]="levels/brick_m.bmp"
+
+; every box consists of six textures
+; bottom front left rear right top
+box[.]=none
+box[A]="#XXXXD"
+box[B]="DXXXXR"
+box[C]="RXXXXY"
+box[D]="YXXXXG"
+box[E]="GXXXXC"
+box[F]="CXXXXB"
+box[G]="BXXXXM"
+box[H]="MXXXX#"
+
+; Level 1
+........
+.AA..AA.
+.A....A.
+...AA...
+...AA...
+.A....A.
+.AA..AA.
+........
+
+; Level 2
+.BBBBBB.
+BBBBBBBB
+BB.BB.BB
+BB.BB.BB
+BB.BB.BB
+BB.BB.BB
+BBBBBBBB
+.BBBBBB.
+
+; Level 3
+...CC...
+.CCCCCC.
+.C....C.
+CCCCCCCC
+CCCCCCCC
+.C....C.
+.CCCCCC.
+...CC...
+
+; Level 4
+.D....D.
+DDDDDDDD
+.D....D.
+.D....D.
+.D....D.
+.D....D.
+DDDDDDDD
+.D....D.
+
+; Level 5
+.E....E.
+EE.EE.EE
+........
+.E....E.
+.E....E.
+........
+EE.EE.EE
+.E....E.
+
+; Level 6
+.FFFFFF.
+FFF..FFF
+FF....FF
+F..FF..F
+F..FF..F
+FF....FF
+FFF..FFF
+.FFFFFF.
+
+; Level 7
+........
+.GG..GG.
+.GGGGGG.
+..G..G..
+..G..G..
+.GGGGGG.
+.GG..GG.
+........
+
+; Level 8
+........
+.HH..HH.
+.HH..HH.
+........
+........
+.HH..HH.
+.HH..HH.
+........

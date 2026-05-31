@@ -156,6 +156,8 @@ static int webkit_dmabuf_enabled_by_cmdline(void);
 static int webkit_reopen_count_from_cmdline(void);
 static int webkit_timeout_ms_from_cmdline(int fallback);
 static int gpu_validate_enabled_by_cmdline(void);
+static int glmaze_enabled_by_cmdline(void);
+static void glmaze_args_from_cmdline(char *frames_arg, size_t frames_size);
 static int desktop_disabled_by_cmdline(void);
 static int desktop_exit_after_smoke_by_cmdline(void);
 static int cmdline_int_value(const char *cmdline, const char *key,
@@ -2874,6 +2876,26 @@ static void write_child_status_file(const char *path, const char *label,
     }
 }
 
+static void print_glmaze_status_file(void)
+{
+    char buf[192];
+    ssize_t n;
+    int fd = open("/tmp/glmaze-status", O_RDONLY);
+
+    if (fd < 0)
+        return;
+    n = read(fd, buf, sizeof(buf) - 1);
+    close(fd);
+    if (n <= 0)
+        return;
+    buf[n] = '\0';
+    for (ssize_t i = 0; i < n; i++) {
+        if (buf[i] == '\n' || buf[i] == '\r')
+            buf[i] = ' ';
+    }
+    fprintf(stderr, "[desktop] glmaze status %s\n", buf);
+}
+
 static void write_webkit_gpu_policy_file(const char *name, int requested_accel,
                                          int effective_accel,
                                          int opengl_submit_available,
@@ -3556,6 +3578,30 @@ static int gpu_validate_enabled_by_cmdline(void)
     return token_is_enabled(buf, "gpu_validate");
 }
 
+static int glmaze_enabled_by_cmdline(void)
+{
+    char buf[512];
+
+    if (read_cmdline(buf, sizeof(buf)) < 0)
+        return 0;
+
+    return token_is_enabled(buf, "glmaze");
+}
+
+static void glmaze_args_from_cmdline(char *frames_arg, size_t frames_size)
+{
+    char buf[512];
+    int frames = 240;
+
+    if (read_cmdline(buf, sizeof(buf)) == 0)
+        frames = cmdline_int_value(buf, "glmaze_frames", frames);
+    if (frames < 1)
+        frames = 1;
+    if (frames > 20000)
+        frames = 20000;
+    snprintf(frames_arg, frames_size, "--frames=%d", frames);
+}
+
 static void glsmoke_args_from_cmdline(char *frames_arg, size_t frames_size,
                                       char *loops_arg, size_t loops_size,
                                       char *resize_arg, size_t resize_size)
@@ -3662,6 +3708,48 @@ int main(void)
     }
 
     /* 3. Launch the requested Wayland client. */
+    if (glmaze_enabled_by_cmdline()) {
+        char frames_arg[32];
+
+        glmaze_args_from_cmdline(frames_arg, sizeof(frames_arg));
+        client_pid = launch_client("/bin/glmaze", "glmaze", frames_arg, NULL,
+                                   NULL);
+        if (client_pid < 0) {
+            perror("[desktop] fork glmaze");
+            cleanup();
+            return 1;
+        }
+        fprintf(stderr, "[desktop] glmaze pid=%d %s\n", client_pid,
+                frames_arg);
+        if (desktop_exit_after_smoke_by_cmdline()) {
+            while (g_running && client_pid > 0) {
+                int status;
+                pid_t exited = waitpid(-1, &status, WNOHANG);
+
+                if (exited == wlcomp_pid) {
+                    fprintf(stderr, "[desktop] wlcomp exited (status %d)\n",
+                            WIFEXITED(status) ? WEXITSTATUS(status) : status);
+                    wlcomp_pid = 0;
+                    cleanup();
+                    return 1;
+                }
+                if (exited == client_pid) {
+                    int ok = WIFEXITED(status) && WEXITSTATUS(status) == 0;
+
+                    print_glmaze_status_file();
+                    fprintf(stderr, "[desktop] glmaze exited (status %d)\n",
+                            WIFEXITED(status) ? WEXITSTATUS(status) : status);
+                    client_pid = 0;
+                    cleanup();
+                    return ok ? 0 : 1;
+                }
+                usleep(100000);
+            }
+            cleanup();
+            return 0;
+        }
+    }
+
     if (glsmoke_enabled_by_cmdline()) {
         char frames_arg[32];
         char loops_arg[32];
