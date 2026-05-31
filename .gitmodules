@@ -155,3 +155,6 @@
 [submodule "libdrm/src"]
 	path = libdrm/src
 	url = https://github.com/ElectronSpark/v6-drm.git
+[submodule "peanut-gb/src"]
+	path = peanut-gb/src
+	url = https://github.com/ElectronSpark/v6-Peanut-GB.git

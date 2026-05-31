@@ -11,6 +11,7 @@ endif()
 set(WAYLAND_SRC_DIR "${CMAKE_CURRENT_SOURCE_DIR}/src")
 set(XV6_REPO_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../..")
 set(XV6_FAULT_TRACE_SRC "${XV6_REPO_ROOT}/tools/xv6_glibc_fault_trace.c")
+set(PEANUT_GB_SRC_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../peanut-gb/src")
 set(DIRECTX_HEADERS_DIR
     "${CMAKE_CURRENT_SOURCE_DIR}/../mesa/src/subprojects/DirectX-Headers-1.0/include")
 set(WLCOMP_INCLUDE_SRCS
@@ -28,11 +29,15 @@ set(WLCOMP_INCLUDE_SRCS
 set(DESKTOP_INCLUDE_SRCS
     ${WAYLAND_SRC_DIR}/desktop_clients.inc)
 
-foreach(_src wlcomp.c wlcomp_desktop.c wlcomp_desktop.h wlcomp_draw.c wlcomp_draw.h wlcomp_iwin.h wlcomp_iwin_calc.c wlcomp_iwin_calc.h wlcomp_iwin_demo.c wlcomp_iwin_demo.h wlcomp_iwin_filemgr.c wlcomp_iwin_filemgr.h wlcomp_iwin_terminal.c wlcomp_iwin_terminal.h wlcomp_iwin_text.c wlcomp_iwin_text.h wlcomp_keymap.c wlcomp_keymap.h wlcomp_launcher.c wlcomp_launcher.h wlcomp_swgl.c wlcomp_swgl.h desktop.c filemgr.c glsmoke.c glmaze.c peanutgb.c peanut_gb.h mesaglsmoke.c mesawlegl.c mesademo.c gl_program.c gl_program.h gl_fps_overlay.c gl_fps_overlay.h mesawlegl_sphere.c mesawlegl_sphere.h pixel_fps_overlay.c pixel_fps_overlay.h xv6_present_buffer.c xv6_present_buffer.h mesaeglinfo.c mesaglfeature.c mesad3d12probe.c gpu_substrate_validate.c dmabufsmoke.c d3d12sharedsmoke.c drmgpuprobe.c webkitgpusmoke.c xv6_egl_gles.c xv6memshim.c font8x16.h)
+foreach(_src wlcomp.c wlcomp_desktop.c wlcomp_desktop.h wlcomp_draw.c wlcomp_draw.h wlcomp_iwin.h wlcomp_iwin_calc.c wlcomp_iwin_calc.h wlcomp_iwin_demo.c wlcomp_iwin_demo.h wlcomp_iwin_filemgr.c wlcomp_iwin_filemgr.h wlcomp_iwin_terminal.c wlcomp_iwin_terminal.h wlcomp_iwin_text.c wlcomp_iwin_text.h wlcomp_keymap.c wlcomp_keymap.h wlcomp_launcher.c wlcomp_launcher.h wlcomp_swgl.c wlcomp_swgl.h desktop.c filemgr.c glsmoke.c glmaze.c peanutgb.c mesaglsmoke.c mesawlegl.c mesademo.c gl_program.c gl_program.h gl_fps_overlay.c gl_fps_overlay.h mesawlegl_sphere.c mesawlegl_sphere.h pixel_fps_overlay.c pixel_fps_overlay.h xv6_present_buffer.c xv6_present_buffer.h mesaeglinfo.c mesaglfeature.c mesad3d12probe.c gpu_substrate_validate.c dmabufsmoke.c d3d12sharedsmoke.c drmgpuprobe.c webkitgpusmoke.c xv6_egl_gles.c xv6memshim.c font8x16.h)
     if(NOT EXISTS "${WAYLAND_SRC_DIR}/${_src}")
         message(FATAL_ERROR "ports/wayland: missing ${WAYLAND_SRC_DIR}/${_src}")
     endif()
 endforeach()
+if(NOT EXISTS "${PEANUT_GB_SRC_DIR}/peanut_gb.h")
+    message(FATAL_ERROR
+        "ports/wayland: missing Peanut-GB source submodule at ${PEANUT_GB_SRC_DIR}; run git submodule update --init --recursive ports/peanut-gb/src")
+endif()
 foreach(_src ${WLCOMP_INCLUDE_SRCS})
     if(NOT EXISTS "${_src}")
         message(FATAL_ERROR "ports/wayland: missing ${_src}")
@@ -643,6 +648,7 @@ add_custom_command(
     COMMAND ${CMAKE_C_COMPILER} ${_wayland_opt_cflags} -Wall
                 -isystem ${XV6_SYSROOT}/include
                 -I ${_wl_proto_dir}
+                -I ${PEANUT_GB_SRC_DIR}
                 -I ${XV6_SYSROOT}/include/wayland
                 -L ${XV6_SYSROOT}/lib
                 -Wl,-rpath-link,${XV6_SYSROOT}/lib
@@ -654,7 +660,7 @@ add_custom_command(
                 -lwayland-client
                 -lffi -lpthread -ldl -lrt -lm
     DEPENDS ${WAYLAND_SRC_DIR}/peanutgb.c
-            ${WAYLAND_SRC_DIR}/peanut_gb.h
+            ${PEANUT_GB_SRC_DIR}/peanut_gb.h
             ${WAYLAND_SRC_DIR}/xv6_present_buffer.c
             ${WAYLAND_SRC_DIR}/xv6_present_buffer.h
             ${_xdg_client_header}
