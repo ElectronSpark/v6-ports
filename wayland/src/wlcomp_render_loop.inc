@@ -31,6 +31,26 @@ static int paint_scaled_window_geometry_buffer(struct wlcomp_surface *surf,
     if (bw <= 0 || bh <= 0 || (bw == gw && bh == gh))
         return 0;
 
+    /*
+     * Window geometry carries no scale factor: it names a 1:1 sub-rectangle of
+     * the buffer.  Client-side-decoration toplevels (GTK/WebKit) commit a
+     * buffer that is LARGER than the window geometry -- the extra pixels are
+     * the CSD shadow/resize margins around the geometry box.  In that case the
+     * geometry is a CROP, not a scale request, so decline here and let the
+     * normal 1:1 crop/blit path copy the geometry sub-rect to the screen.
+     * Genuine upscaling (e.g. the GPU demo, whose small buffer fills a larger
+     * window) has gw > bw / gh > bh, which makes the sub-rect spill outside the
+     * buffer and keeps taking the scaling path below.
+     */
+    {
+        int32_t gx = surf->window_x;
+        int32_t gy = surf->window_y;
+
+        if (gx >= 0 && gy >= 0 &&
+            (int64_t)gx + gw <= bw && (int64_t)gy + gh <= bh)
+            return 0;
+    }
+
     src_bytes = buffer_data(buf);
     if (!src_bytes) {
         static int missing_source_logs;
@@ -311,6 +331,7 @@ static void paint_scene(int fb_w, int fb_h, int *acquire_blocked)
             row1 = (int32_t)g_fb_h - draw_y;
         if (col1 > (int32_t)g_fb_w - draw_x)
             col1 = (int32_t)g_fb_w - draw_x;
+
         if (row0 >= row1 || col0 >= col1)
             continue;
 
@@ -410,6 +431,18 @@ static void release_cpu_copied_buffers_after_paint(void)
             continue;
         if (buf->is_d3d12_shared)
             continue;
+        /*
+         * Plain CPU/shm buffers are re-read by FULL_DAMAGE_REPAIR (and any
+         * clipped repaint) on later frames.  Releasing them right after the
+         * first paint lets the client recycle the buffer and, with damage
+         * tracking, repaint only the changed region -- corrupting the
+         * undamaged areas we still re-read (e.g. a CSD toolbar turns
+         * transparent and the desktop bleeds through).  Hold these buffers
+         * until the client commits a replacement; the commit handler already
+         * releases the previous buffer (standard double buffering).
+         */
+        if (!buf->is_gpu_bo)
+            continue;
         if (buf->is_gpu_bo) {
             surface_window_geometry(surf, &gx, &gy, &gw, &gh);
             if (!surf->has_window_geometry ||
@@ -494,6 +527,30 @@ static void composite_and_flip(void)
         damage_all_frame_callbacks(now);
         return;
     }
+
+    /*
+     * A wallpaper-exposing full repaint may have wiped the static chrome of a
+     * mapped surface that was transiently absent (or had not yet committed its
+     * chrome) at the time.  Such regions are never re-damaged by the client.
+     * Force a full-geometry re-damage of every mapped surface until at least
+     * one is actually available to repaint, so the wallpaper cannot persist
+     * over a window's static content.
+     */
+    if (g_full_repaint_pending) {
+        struct wlcomp_surface *rs;
+        int repainted = 0;
+
+        wl_list_for_each(rs, &g_surfaces, link) {
+            if (rs->is_cursor || !surface_tree_visible(rs) ||
+                !rs->committed_buf)
+                continue;
+            damage_surface(rs);
+            repainted = 1;
+        }
+        if (repainted)
+            g_full_repaint_pending = 0;
+    }
+
     damage_cursor_at(g_cursor_x, g_cursor_y);
     tune_damage_for_present();
 
@@ -561,4 +618,5 @@ static void composite_and_flip(void)
     flush_buffer_releases_after_present();
     if (!present_ready)
         damage_full_reason(FULL_DAMAGE_ACQUIRE);
+
 }

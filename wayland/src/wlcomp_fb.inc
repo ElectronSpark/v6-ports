@@ -54,6 +54,19 @@ struct wlcomp_damage_stats {
 };
 
 static struct wlcomp_damage_stats g_damage_stats;
+/*
+ * Set whenever a full-screen wallpaper repaint is issued.  A full repaint
+ * paints the desktop wallpaper everywhere first and then composites surfaces
+ * on top.  If a mapped client surface is transiently absent from g_surfaces
+ * (or has not yet committed its static chrome) during that frame, the
+ * wallpaper is left exposed where the surface should be.  Clients only damage
+ * the regions they actively redraw (e.g. animated web content), so static
+ * chrome such as a GTK header/toolbar is never re-damaged and the exposed
+ * wallpaper band persists forever.  This flag forces the compositor to fully
+ * re-damage every mapped surface after a wallpaper repaint, until at least one
+ * such surface has actually been repainted.
+ */
+static int g_full_repaint_pending;
 static uint64_t g_damage_interval_max_ms;
 static uint64_t g_fb_blit_present_attempt_count;
 static uint64_t g_fb_blit_present_success_count;
@@ -159,6 +172,7 @@ static void damage_full_reason(enum full_damage_reason reason)
     if (reason < 0 || reason >= FULL_DAMAGE_COUNT)
         reason = FULL_DAMAGE_OTHER;
     g_damage_stats.full_damage[reason]++;
+    g_full_repaint_pending = 1;
     g_damage[0].x1 = 0;
     g_damage[0].y1 = 0;
     g_damage[0].x2 = (int32_t)g_fb_w;
