@@ -3,6 +3,8 @@
 
 #include <stdint.h>
 
+#include "xv6_icon.h"
+
 enum shortcut_action {
     SHORTCUT_EXEC = 0,
     SHORTCUT_FILE,
@@ -25,6 +27,8 @@ typedef struct {
     int         action;
     uint32_t    icon_color;
     char        symbol;
+    int         has_bitmap_icon;
+    struct xv6_icon bitmap_icon;
     int         x, y, w, h;
 } desktop_icon_t;
 

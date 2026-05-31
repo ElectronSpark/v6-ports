@@ -256,9 +256,11 @@ static uint32_t g_grab_edges;  /* resize edges bitmask */
 static int32_t g_grab_start_mx, g_grab_start_my;  /* cursor pos at grab start */
 static int32_t g_grab_start_x, g_grab_start_y;    /* surface pos at grab start */
 
-#define WAYLAND_CLOSE_SZ 18
 static int32_t g_grab_start_w, g_grab_start_h;    /* surface size at grab start */
 
+#define WAYLAND_CLOSE_SZ 18
+#define WAYLAND_MINIMIZE_SZ WAYLAND_CLOSE_SZ
+#define WAYLAND_MAXIMIZE_SZ WAYLAND_CLOSE_SZ
 #define WAYLAND_DEMO_TITLE_H 24
 #define WAYLAND_DEMO_BORDER  2
 #define WAYLAND_DEMO_SHADOW  3
@@ -350,6 +352,80 @@ static int surface_is_webkit_window(const struct wlcomp_surface *surf)
 {
     return surf && (strcmp(surf->app_id, "MiniBrowser") == 0 ||
                     strcmp(surf->app_id, "webkitgpusmoke") == 0);
+}
+
+static int surface_has_window_frame(const struct wlcomp_surface *surf)
+{
+    return surf && surf->xdg_toplevel && !surface_is_webkit_window(surf);
+}
+
+static int32_t work_area_w(void)
+{
+    return g_fb_w > 0 ? (int32_t)g_fb_w : 1;
+}
+
+static int32_t work_area_h(void)
+{
+    int32_t h = (int32_t)g_fb_h - TASKBAR_H;
+
+    return h > 0 ? h : 1;
+}
+
+static int32_t maximized_client_w(const struct wlcomp_surface *surf)
+{
+    int32_t w = work_area_w();
+
+    if (surface_has_window_frame(surf))
+        w -= WAYLAND_DEMO_BORDER * 2;
+    return w > 1 ? w : 1;
+}
+
+static int32_t maximized_client_h(const struct wlcomp_surface *surf)
+{
+    int32_t h = work_area_h();
+
+    if (surface_has_window_frame(surf))
+        h -= WAYLAND_DEMO_TITLE_H + WAYLAND_DEMO_BORDER * 2;
+    return h > 1 ? h : 1;
+}
+
+static int32_t maximized_configure_w(const struct wlcomp_surface *surf)
+{
+    int32_t w = maximized_client_w(surf);
+
+    /*
+     * GTK/WebKit client-side decorations currently commit a maximized buffer
+     * 52 px narrower than the xdg_toplevel configure width.  Ask for the
+     * decorated size that yields a framebuffer-width committed buffer.
+     */
+    if (surf && surf->xdg_toplevel && !surface_has_window_frame(surf))
+        w += 52;
+    return w;
+}
+
+static int32_t maximized_configure_h(const struct wlcomp_surface *surf)
+{
+    int32_t h = maximized_client_h(surf);
+
+    /*
+     * The same GTK/WebKit maximized CSD path commits 16 px shorter than the
+     * requested height.  Keep the visible buffer aligned with the work area.
+     */
+    if (surf && surf->xdg_toplevel && !surface_has_window_frame(surf))
+        h += 16;
+    return h;
+}
+
+static void maximized_surface_origin(const struct wlcomp_surface *surf,
+                                     int32_t *x, int32_t *y)
+{
+    if (surface_has_window_frame(surf)) {
+        *x = WAYLAND_DEMO_BORDER;
+        *y = WAYLAND_DEMO_TITLE_H + WAYLAND_DEMO_BORDER;
+    } else {
+        *x = 0;
+        *y = 0;
+    }
 }
 
 static int frame_callback_interval_ms(void)
@@ -566,6 +642,14 @@ static void surface_window_geometry(const struct wlcomp_surface *s,
         *gw = bw;
         *gh = bh;
     }
+
+    if (s && s->maximized && s->xdg_toplevel &&
+        !surface_has_window_frame(s)) {
+        *gx = 0;
+        *gy = 0;
+        *gw = maximized_client_w(s);
+        *gh = maximized_client_h(s);
+    }
 }
 
 static void damage_surface_self(const struct wlcomp_surface *s)
@@ -582,16 +666,16 @@ static void damage_surface_self(const struct wlcomp_surface *s)
     buf = s->committed_buf;
     surface_window_geometry(s, &gx, &gy, &gw, &gh);
     surface_absolute_position(s, &ax, &ay);
-    if (surface_is_demo_window(s)) {
+    if (surface_has_window_frame(s)) {
         frame_top = WAYLAND_DEMO_TITLE_H;
         frame_border = WAYLAND_DEMO_BORDER;
     }
     (void)buf;
     damage_rect(ax - frame_border, ay - frame_top - frame_border,
                 gw + frame_border * 2 +
-                    (surface_is_demo_window(s) ? WAYLAND_DEMO_SHADOW : 0),
+                    (surface_has_window_frame(s) ? WAYLAND_DEMO_SHADOW : 0),
                 gh + frame_top + frame_border * 2 +
-                    (surface_is_demo_window(s) ? WAYLAND_DEMO_SHADOW : 0));
+                    (surface_has_window_frame(s) ? WAYLAND_DEMO_SHADOW : 0));
 }
 
 static void damage_surface(const struct wlcomp_surface *s)
@@ -764,7 +848,7 @@ static struct wlcomp_surface *surface_at(int32_t px, int32_t py,
         surface_absolute_position(s, &ax, &ay);
         draw_x = ax - gx;
         draw_y = ay - gy;
-        if (surface_is_demo_window(s)) {
+        if (surface_has_window_frame(s)) {
             int frame_x = ax - WAYLAND_DEMO_BORDER;
             int frame_y = ay - WAYLAND_DEMO_TITLE_H - WAYLAND_DEMO_BORDER;
             int frame_w = gw + WAYLAND_DEMO_BORDER * 2;
@@ -777,8 +861,30 @@ static struct wlcomp_surface *surface_at(int32_t px, int32_t py,
                 py < ay || py >= ay + gh)
                 continue;
         }
-        if (sx) *sx = px - draw_x;
-        if (sy) *sy = py - draw_y;
+        if (sx || sy) {
+            int32_t local_x = px - draw_x;
+            int32_t local_y = py - draw_y;
+
+            if (s->maximized && s->xdg_toplevel &&
+                !surface_has_window_frame(s) && gw > 0 && gh > 0 &&
+                (s->committed_buf->width != gw ||
+                 s->committed_buf->height != gh)) {
+                local_x = (int32_t)(((int64_t)local_x *
+                                      s->committed_buf->width) / gw);
+                local_y = (int32_t)(((int64_t)local_y *
+                                      s->committed_buf->height) / gh);
+                if (local_x < 0)
+                    local_x = 0;
+                if (local_y < 0)
+                    local_y = 0;
+                if (local_x >= s->committed_buf->width)
+                    local_x = s->committed_buf->width - 1;
+                if (local_y >= s->committed_buf->height)
+                    local_y = s->committed_buf->height - 1;
+            }
+            if (sx) *sx = local_x;
+            if (sy) *sy = local_y;
+        }
         return s;
     }
     return NULL;

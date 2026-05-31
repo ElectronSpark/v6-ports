@@ -104,6 +104,97 @@ static void destroy_dead_client_surfaces(void)
     }
 }
 
+static void surface_window_button_rects(const struct wlcomp_surface *surf,
+                                        int *min_x, int *max_x, int *close_x,
+                                        int *btn_y)
+{
+    int32_t gx, gy, gw, gh;
+    int frame_x, frame_y, frame_w;
+    int gap = 5;
+
+    surface_window_geometry(surf, &gx, &gy, &gw, &gh);
+    (void)gx;
+    (void)gy;
+    frame_x = surf->x - WAYLAND_DEMO_BORDER;
+    frame_y = surf->y - WAYLAND_DEMO_TITLE_H - WAYLAND_DEMO_BORDER;
+    frame_w = gw + WAYLAND_DEMO_BORDER * 2;
+    *close_x = frame_x + frame_w - WAYLAND_CLOSE_SZ - gap;
+    *max_x = *close_x - WAYLAND_MAXIMIZE_SZ - gap;
+    *min_x = *max_x - WAYLAND_MINIMIZE_SZ - gap;
+    *btn_y = frame_y + WAYLAND_DEMO_BORDER + 3;
+}
+
+static int point_in_rect(int mx, int my, int x, int y, int w, int h)
+{
+    return mx >= x && mx < x + w && my >= y && my < y + h;
+}
+
+static void surface_button_minimize(struct wlcomp_surface *surf)
+{
+    if (!surf)
+        return;
+    damage_surface(surf);
+    surf->minimized = 1;
+    if (g_focused == surf)
+        g_focused = NULL;
+    if (g_kbd_focused == surf)
+        surface_set_keyboard_focus(NULL);
+    cancel_surface_grab(surf);
+    damage_full_reason(FULL_DAMAGE_CLIENT);
+}
+
+static void surface_button_toggle_maximize(struct wlcomp_surface *surf)
+{
+    struct wl_array states;
+    uint32_t *s;
+
+    if (!surf || !surf->xdg_surface || !surf->xdg_toplevel)
+        return;
+    cancel_surface_grab(surf);
+    damage_surface(surf);
+    wl_array_init(&states);
+    if (surf->maximized) {
+        int32_t rw = surf->saved_w > 0 ? surf->saved_w : work_area_w() * 4 / 5;
+        int32_t rh = surf->saved_h > 0 ? surf->saved_h : work_area_h() * 4 / 5;
+
+        surf->maximized = 0;
+        surf->x = surf->saved_x;
+        surf->y = surf->saved_y;
+        s = wl_array_add(&states, sizeof(uint32_t));
+        if (s)
+            *s = XDG_TOPLEVEL_STATE_ACTIVATED;
+        xdg_toplevel_send_configure(surf->xdg_toplevel, rw, rh, &states);
+    } else {
+        int32_t gx, gy, gw, gh;
+        int32_t mx, my;
+
+        surface_window_geometry(surf, &gx, &gy, &gw, &gh);
+        (void)gx;
+        (void)gy;
+        surf->saved_x = surf->x;
+        surf->saved_y = surf->y;
+        surf->saved_w = gw > 0 ? gw : 400;
+        surf->saved_h = gh > 0 ? gh : 300;
+        surf->maximized = 1;
+        maximized_surface_origin(surf, &mx, &my);
+        surf->x = mx;
+        surf->y = my;
+        s = wl_array_add(&states, sizeof(uint32_t));
+        if (s)
+            *s = XDG_TOPLEVEL_STATE_MAXIMIZED;
+        s = wl_array_add(&states, sizeof(uint32_t));
+        if (s)
+            *s = XDG_TOPLEVEL_STATE_ACTIVATED;
+        xdg_toplevel_send_configure(surf->xdg_toplevel,
+                                    maximized_configure_w(surf),
+                                    maximized_configure_h(surf), &states);
+    }
+    wl_array_release(&states);
+    xdg_surface_send_configure(surf->xdg_surface, ++g_serial);
+    damage_surface(surf);
+    damage_taskbar();
+}
+
 
 static void destroy_surface_client(struct wlcomp_surface *surf)
 {
@@ -152,6 +243,8 @@ static void update_clock(void)
 static iwin_t g_iwin[MAX_IWIN];
 static int g_iwin_cascade;      /* cascade counter for positioning */
 
+static void damage_iwin(const iwin_t *w);
+
 static int surface_is_foreground(const struct wlcomp_surface *surf)
 {
     return surf && g_iwin_focus < 0 && g_kbd_focused == surf &&
@@ -197,26 +290,36 @@ static uint32_t surface_taskbar_color(const struct wlcomp_surface *surf,
 
 static int surface_close_hit(const struct wlcomp_surface *surf, int mx, int my)
 {
-    int32_t gx, gy, gw, gh;
+    if (surface_has_window_frame(surf)) {
+        int min_x, max_x, close_x, btn_y;
 
-    if (surface_is_demo_window(surf)) {
-        int frame_x, frame_y, close_x, close_y;
-
-        surface_window_geometry(surf, &gx, &gy, &gw, &gh);
-        frame_x = surf->x - WAYLAND_DEMO_BORDER;
-        frame_y = surf->y - WAYLAND_DEMO_TITLE_H - WAYLAND_DEMO_BORDER;
-        close_x = frame_x + gw + WAYLAND_DEMO_BORDER * 2 - WAYLAND_CLOSE_SZ - 5;
-        close_y = frame_y + WAYLAND_DEMO_BORDER + 3;
-        return mx >= close_x && mx < close_x + WAYLAND_CLOSE_SZ &&
-               my >= close_y && my < close_y + WAYLAND_CLOSE_SZ;
+        surface_window_button_rects(surf, &min_x, &max_x, &close_x, &btn_y);
+        return point_in_rect(mx, my, close_x, btn_y,
+                             WAYLAND_CLOSE_SZ, WAYLAND_CLOSE_SZ);
     }
-    if (surface_is_webkit_window(surf)) {
-        /*
-         * WebKit/GTK uses client-side decorations.  Let GTK receive clicks on
-         * its headerbar buttons; a compositor-side approximate close rectangle
-         * can misclassify maximize/drag gestures and SIGKILL the browser.
-         */
-        return 0;
+    return 0;
+}
+
+static int surface_minimize_hit(const struct wlcomp_surface *surf, int mx, int my)
+{
+    if (surface_has_window_frame(surf)) {
+        int min_x, max_x, close_x, btn_y;
+
+        surface_window_button_rects(surf, &min_x, &max_x, &close_x, &btn_y);
+        return point_in_rect(mx, my, min_x, btn_y,
+                             WAYLAND_MINIMIZE_SZ, WAYLAND_MINIMIZE_SZ);
+    }
+    return 0;
+}
+
+static int surface_maximize_hit(const struct wlcomp_surface *surf, int mx, int my)
+{
+    if (surface_has_window_frame(surf)) {
+        int min_x, max_x, close_x, btn_y;
+
+        surface_window_button_rects(surf, &min_x, &max_x, &close_x, &btn_y);
+        return point_in_rect(mx, my, max_x, btn_y,
+                             WAYLAND_MAXIMIZE_SZ, WAYLAND_MAXIMIZE_SZ);
     }
     return 0;
 }
@@ -229,7 +332,7 @@ static uint32_t surface_demo_resize_edges(const struct wlcomp_surface *surf,
     uint32_t edges = 0;
     const int grip = 10;
 
-    if (!surface_is_demo_window(surf))
+    if (!surface_has_window_frame(surf))
         return 0;
 
     surface_window_geometry(surf, &gx, &gy, &gw, &gh);
@@ -251,7 +354,7 @@ static int surface_demo_title_hit(const struct wlcomp_surface *surf,
     int32_t gx, gy, gw, gh;
     int frame_x, frame_y, frame_w;
 
-    if (!surface_is_demo_window(surf))
+    if (!surface_has_window_frame(surf))
         return 0;
 
     surface_window_geometry(surf, &gx, &gy, &gw, &gh);
@@ -353,10 +456,22 @@ static int taskbar_task_hit(int mx, int my, int fb_w, int fb_h)
     for (int i = 0; i < MAX_IWIN && tx + TB_TASK_W <= right_limit; i++) {
         if (!g_iwin[i].active) continue;
         if (mx >= tx && mx < tx + TB_TASK_W) {
+            int was_focused = g_iwin_focus == i && !g_iwin[i].minimized;
+
             if (g_iwin_focus != i)
                 damage_full_reason(FULL_DAMAGE_IWIN);
-            g_iwin_focus = i;
+            if (g_iwin[i].minimized) {
+                g_iwin[i].minimized = 0;
+                g_iwin_focus = i;
+            } else if (was_focused) {
+                damage_iwin(&g_iwin[i]);
+                g_iwin[i].minimized = 1;
+                g_iwin_focus = -1;
+            } else {
+                g_iwin_focus = i;
+            }
             damage_taskbar();
+            damage_full_reason(FULL_DAMAGE_IWIN);
             return 1;
         }
         tx += TB_TASK_W + TB_TASK_GAP;
@@ -711,11 +826,56 @@ static void iwin_close(int idx)
     damage_full_reason(FULL_DAMAGE_IWIN);
 }
 
+static void iwin_minimize(int idx)
+{
+    iwin_t *w = &g_iwin[idx];
+
+    damage_iwin(w);
+    w->minimized = 1;
+    w->dragging = 0;
+    w->resizing = 0;
+    if (g_iwin_focus == idx)
+        g_iwin_focus = -1;
+    damage_full_reason(FULL_DAMAGE_IWIN);
+}
+
+static void iwin_toggle_maximize(int idx)
+{
+    iwin_t *w = &g_iwin[idx];
+
+    damage_iwin(w);
+    w->dragging = 0;
+    w->resizing = 0;
+    if (w->maximized) {
+        w->maximized = 0;
+        w->x = w->saved_x;
+        w->y = w->saved_y;
+        w->w = w->saved_w;
+        w->h = w->saved_h;
+    } else {
+        w->saved_x = w->x;
+        w->saved_y = w->y;
+        w->saved_w = w->w;
+        w->saved_h = w->h;
+        w->x = 0;
+        w->y = 0;
+        w->w = work_area_w();
+        w->h = work_area_h();
+        w->maximized = 1;
+    }
+    if (w->type == APP_TERMINAL)
+        wlcomp_terminal_apply_window_size(w, 1);
+    damage_iwin(w);
+    damage_full_reason(FULL_DAMAGE_IWIN);
+}
+
 static void iwin_focus(int idx)
 {
     if (g_iwin_focus >= 0 && g_iwin[g_iwin_focus].active)
         damage_iwin(&g_iwin[g_iwin_focus]);
     g_iwin_focus = idx;
+    if (g_iwin_focus >= 0 && g_iwin[g_iwin_focus].active)
+        g_iwin[g_iwin_focus].minimized = 0;
     if (g_iwin_focus >= 0 && g_iwin[g_iwin_focus].active)
         damage_iwin(&g_iwin[g_iwin_focus]);
 }
@@ -751,9 +911,18 @@ static void draw_iwin(uint32_t *fb, int fb_w, int fb_h, iwin_t *w, int focused)
     /* Title text */
     draw_string(fb, fb_w, fb_h, w->x + 8, w->y + 4, w->title, 0xFFD2DAE2, 1);
 
-    /* Close button (top-right) */
+    /* Minimize / maximize / close buttons (top-right) */
     int cx = w->x + w->w - IWIN_CLOSE_SZ - 4;
+    int mx = cx - IWIN_CLOSE_SZ - 5;
+    int nx = mx - IWIN_CLOSE_SZ - 5;
     int cy = w->y + 3;
+    draw_rect(fb, fb_w, fb_h, nx, cy, IWIN_CLOSE_SZ, IWIN_CLOSE_SZ,
+              0xFF607080);
+    draw_char(fb, fb_w, fb_h, nx + 5, cy + 1, '_', 0xFFFFFFFF, 1);
+    draw_rect(fb, fb_w, fb_h, mx, cy, IWIN_CLOSE_SZ, IWIN_CLOSE_SZ,
+              w->maximized ? 0xFF6E8A3D : 0xFF3D6EA6);
+    draw_char(fb, fb_w, fb_h, mx + 5, cy + 1,
+              w->maximized ? 'r' : 'M', 0xFFFFFFFF, 1);
     draw_rect(fb, fb_w, fb_h, cx, cy, IWIN_CLOSE_SZ, IWIN_CLOSE_SZ, 0xFFA63D3D);
     draw_char(fb, fb_w, fb_h, cx + 5, cy + 1, 'x', 0xFFFFFFFF, 1);
 
@@ -1108,12 +1277,13 @@ static void draw_iwin_all(uint32_t *fb, int fb_w, int fb_h)
     /* Draw non-focused windows first */
     for (int i = 0; i < MAX_IWIN; i++) {
         iwin_t *w = &g_iwin[i];
-        if (!w->active || i == g_iwin_focus) continue;
+        if (!w->active || w->minimized || i == g_iwin_focus) continue;
         draw_iwin(fb, fb_w, fb_h, w, 0);
         draw_iwin_content(fb, fb_w, fb_h, w);
     }
     /* Draw focused window on top */
-    if (g_iwin_focus >= 0 && g_iwin[g_iwin_focus].active) {
+    if (g_iwin_focus >= 0 && g_iwin[g_iwin_focus].active &&
+        !g_iwin[g_iwin_focus].minimized) {
         iwin_t *w = &g_iwin[g_iwin_focus];
         draw_iwin(fb, fb_w, fb_h, w, 1);
         draw_iwin_content(fb, fb_w, fb_h, w);
@@ -1154,12 +1324,14 @@ static int iwin_hit(int mx, int my)
     /* Check in reverse order (topmost = highest index or focused) */
     if (g_iwin_focus >= 0 && g_iwin[g_iwin_focus].active) {
         iwin_t *w = &g_iwin[g_iwin_focus];
-        if (mx >= w->x && mx < w->x + w->w &&
+        if (!w->minimized &&
+            mx >= w->x && mx < w->x + w->w &&
             my >= w->y && my < w->y + w->h)
             return g_iwin_focus;
     }
     for (int i = MAX_IWIN - 1; i >= 0; i--) {
         if (!g_iwin[i].active) continue;
+        if (g_iwin[i].minimized) continue;
         if (i == g_iwin_focus) continue;  /* already checked */
         iwin_t *w = &g_iwin[i];
         if (mx >= w->x && mx < w->x + w->w &&
@@ -1180,7 +1352,19 @@ static int handle_iwin_click(int mx, int my)
 
     /* Close button? */
     int cbx = w->x + w->w - IWIN_CLOSE_SZ - 4;
+    int mbx = cbx - IWIN_CLOSE_SZ - 5;
+    int nbx = mbx - IWIN_CLOSE_SZ - 5;
     int cby = w->y + 3;
+    if (mx >= nbx && mx < nbx + IWIN_CLOSE_SZ &&
+        my >= cby && my < cby + IWIN_CLOSE_SZ) {
+        iwin_minimize(idx);
+        return 1;
+    }
+    if (mx >= mbx && mx < mbx + IWIN_CLOSE_SZ &&
+        my >= cby && my < cby + IWIN_CLOSE_SZ) {
+        iwin_toggle_maximize(idx);
+        return 1;
+    }
     if (mx >= cbx && mx < cbx + IWIN_CLOSE_SZ &&
         my >= cby && my < cby + IWIN_CLOSE_SZ) {
         iwin_close(idx);
@@ -1344,8 +1528,8 @@ static void iwin_update_drag(int mx, int my, int buttons)
             if (new_w < min_w) new_w = min_w;
             if (new_h < min_h) new_h = min_h;
             /* Maximum: screen bounds */
-            if (w->x + new_w > (int)g_fb_w) new_w = (int)g_fb_w - w->x;
-            if (w->y + new_h > (int)g_fb_h) new_h = (int)g_fb_h - w->y;
+            if (w->x + new_w > work_area_w()) new_w = work_area_w() - w->x;
+            if (w->y + new_h > work_area_h()) new_h = work_area_h() - w->y;
             w->w = new_w;
             w->h = new_h;
             if (w->type == APP_TERMINAL)
@@ -1367,8 +1551,8 @@ static void iwin_update_drag(int mx, int my, int buttons)
         /* Clamp */
         if (w->x < 0) w->x = 0;
         if (w->y < 0) w->y = 0;
-        if (w->x + w->w > (int)g_fb_w) w->x = (int)g_fb_w - w->w;
-        if (w->y + w->h > (int)g_fb_h) w->y = (int)g_fb_h - w->h;
+        if (w->x + w->w > work_area_w()) w->x = work_area_w() - w->w;
+        if (w->y + w->h > work_area_h()) w->y = work_area_h() - w->h;
         damage_iwin(w);
     }
 }

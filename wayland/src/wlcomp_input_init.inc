@@ -4,6 +4,37 @@
 
 static uint8_t g_prev_buttons;
 
+static void wlcomp_pointer_send_frame_if_supported(struct wl_resource *ptr)
+{
+    if (ptr && wl_resource_get_version(ptr) >= WL_POINTER_FRAME_SINCE_VERSION)
+        wl_pointer_send_frame(ptr);
+}
+
+static void wlcomp_pointer_send_wheel(struct wl_resource *ptr, int dz)
+{
+    int version;
+    uint32_t time;
+    wl_fixed_t value;
+
+    if (!ptr || dz == 0)
+        return;
+
+    version = wl_resource_get_version(ptr);
+    time = get_time_ms();
+    /*
+     * xv6 mouse dz is positive for wheel-up.  Wayland vertical-scroll values
+     * are positive for scrolling down, so invert the sign before dispatch.
+     */
+    value = wl_fixed_from_int(-dz * 15);
+
+    if (version >= WL_POINTER_AXIS_SOURCE_SINCE_VERSION)
+        wl_pointer_send_axis_source(ptr, WL_POINTER_AXIS_SOURCE_WHEEL);
+    wl_pointer_send_axis(ptr, time, WL_POINTER_AXIS_VERTICAL_SCROLL, value);
+    if (version >= WL_POINTER_AXIS_DISCRETE_SINCE_VERSION)
+        wl_pointer_send_axis_discrete(ptr, WL_POINTER_AXIS_VERTICAL_SCROLL,
+                                      -dz);
+}
+
 static void process_mouse(void)
 {
     /* Send deferred keyboard enter (set in surface_commit when a surface maps) */
@@ -197,6 +228,15 @@ static void process_mouse(void)
                                  (int)g_fb_w, (int)g_fb_h,
                                  left_press_count >= 2);
             desktop_handled = 1;
+        } else if (target && surface_minimize_hit(target, g_cursor_x,
+                                                  g_cursor_y)) {
+            surface_button_minimize(target);
+            target = NULL;
+            desktop_handled = 1;
+        } else if (target && surface_maximize_hit(target, g_cursor_x,
+                                                  g_cursor_y)) {
+            surface_button_toggle_maximize(target);
+            desktop_handled = 1;
         } else if (target && surface_close_hit(target, g_cursor_x, g_cursor_y)) {
             if (surface_is_demo_window(target)) {
                 target->demo_close_requested = 1;
@@ -205,7 +245,7 @@ static void process_mouse(void)
             destroy_surface_client(target);
             target = NULL;
             desktop_handled = 1;
-        } else if (target && surface_is_demo_window(target)) {
+        } else if (target && surface_has_window_frame(target)) {
             uint32_t edges = surface_demo_resize_edges(target, g_cursor_x,
                                                        g_cursor_y);
 
@@ -214,7 +254,8 @@ static void process_mouse(void)
             surface_raise_to_top(target);
             surface_set_keyboard_focus(target);
             if (edges != 0) {
-                target->demo_resize_requested = 1;
+                if (surface_is_demo_window(target))
+                    target->demo_resize_requested = 1;
                 g_grab_surface = target;
                 g_grab_mode = 2;
                 g_grab_edges = edges;
@@ -226,7 +267,8 @@ static void process_mouse(void)
                                  target->committed_buf->width : 200;
                 g_grab_start_h = target->committed_buf ?
                                  target->committed_buf->height : 200;
-                wlcomp_emit_demo_interaction_matrix(target, "resize-grab");
+                if (surface_is_demo_window(target))
+                    wlcomp_emit_demo_interaction_matrix(target, "resize-grab");
                 desktop_handled = 1;
             } else if (surface_demo_title_hit(target, g_cursor_x,
                                               g_cursor_y)) {
@@ -280,7 +322,7 @@ static void process_mouse(void)
                 if (old_ptr) {
                     wl_pointer_send_leave(old_ptr, ++g_serial,
                                           g_focused->resource);
-                    wl_pointer_send_frame(old_ptr);
+                    wlcomp_pointer_send_frame_if_supported(old_ptr);
                     sent_pointer_event = 1;
                 }
             }
@@ -346,8 +388,13 @@ static void process_mouse(void)
                     sent_pointer_event = 1;
                 }
 
+                if (target == g_focused && wheel_delta != 0) {
+                    wlcomp_pointer_send_wheel(ptr, wheel_delta);
+                    sent_pointer_event = 1;
+                }
+
                 if (sent_pointer_event)
-                    wl_pointer_send_frame(ptr);
+                    wlcomp_pointer_send_frame_if_supported(ptr);
             }
         }
     }
@@ -503,12 +550,11 @@ static void configure_toplevel_after_mode_change(struct wlcomp_surface *surf)
     if (surf->maximized) {
         struct wl_array states;
         uint32_t *s;
-        int32_t max_h = (int32_t)g_fb_h - TASKBAR_H;
+        int32_t mx, my;
 
-        if (max_h < 1)
-            max_h = 1;
-        surf->x = 0;
-        surf->y = 0;
+        maximized_surface_origin(surf, &mx, &my);
+        surf->x = mx;
+        surf->y = my;
         wl_array_init(&states);
         s = wl_array_add(&states, sizeof(uint32_t));
         if (s)
@@ -517,7 +563,8 @@ static void configure_toplevel_after_mode_change(struct wlcomp_surface *surf)
         if (s)
             *s = XDG_TOPLEVEL_STATE_ACTIVATED;
         xdg_toplevel_send_configure(surf->xdg_toplevel,
-                                    (int32_t)g_fb_w, max_h, &states);
+                                    maximized_configure_w(surf),
+                                    maximized_configure_h(surf), &states);
         wl_array_release(&states);
         xdg_surface_send_configure(surf->xdg_surface, ++g_serial);
         return;
@@ -570,6 +617,29 @@ static void poll_framebuffer_mode(void)
     wlcomp_desktop_invalidate_layout();
     wl_list_for_each(surf, &g_surfaces, link)
         configure_toplevel_after_mode_change(surf);
+    for (int i = 0; i < MAX_IWIN; i++) {
+        iwin_t *w = &g_iwin[i];
+
+        if (!w->active)
+            continue;
+        if (w->maximized) {
+            w->x = 0;
+            w->y = 0;
+            w->w = work_area_w();
+            w->h = work_area_h();
+            if (w->type == APP_TERMINAL)
+                wlcomp_terminal_apply_window_size(w, 1);
+        } else {
+            if (w->x + w->w > work_area_w())
+                w->x = work_area_w() - w->w;
+            if (w->y + w->h > work_area_h())
+                w->y = work_area_h() - w->h;
+            if (w->x < 0)
+                w->x = 0;
+            if (w->y < 0)
+                w->y = 0;
+        }
+    }
     damage_full_reason(FULL_DAMAGE_RESIZE);
 }
 

@@ -15,6 +15,8 @@ xv6_port(
                     wayland-libs wayland-protocols libxkbcommon
                     fribidi harfbuzz fontconfig freetype libepoxy
                     linux-uapi-headers
+    SOURCE_DEPENDS  ${CMAKE_CURRENT_SOURCE_DIR}/src/gdk/wayland/gdkscreen-wayland.c
+                    ${CMAKE_CURRENT_SOURCE_DIR}/src/gtk/gtkheaderbar.c
     OUTPUT_FILES    lib/libgtk-3.a
                     lib/libgtk-3.so
                     lib/libgtk-3.so.0

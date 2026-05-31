@@ -106,7 +106,7 @@ static int paint_scaled_window_geometry_buffer(struct wlcomp_surface *surf,
         buf->format == DRM_FORMAT_XRGB8888 ||
         ((buf->format == WL_SHM_FORMAT_ARGB8888 ||
           buf->format == DRM_FORMAT_ARGB8888) &&
-         (buf->is_gpu_bo || surface_is_demo_window(surf)));
+         (buf->is_gpu_bo || surface_has_window_frame(surf)));
 
     dst_x0 = draw_x;
     dst_y0 = draw_y;
@@ -271,7 +271,7 @@ static void paint_scene(int fb_w, int fb_h, int *acquire_blocked)
             if (col0 > col1) col0 = col1;
         }
 
-        if (surface_is_demo_window(surf)) {
+        if (surface_has_window_frame(surf)) {
             int title_h = WAYLAND_DEMO_TITLE_H;
             int border = WAYLAND_DEMO_BORDER;
             int frame_x = ax - border;
@@ -279,12 +279,13 @@ static void paint_scene(int fb_w, int fb_h, int *acquire_blocked)
             int frame_w = gw + border * 2;
             int frame_h = gh + title_h + border * 2;
             int focused = surface_is_foreground(surf);
-            int close_x = frame_x + frame_w - WAYLAND_CLOSE_SZ - 5;
-            int close_y = frame_y + border + 3;
+            int min_x, max_x, close_x, btn_y;
             uint32_t title_color = focused ? 0xFF2C4F7C : 0xFF2A2E35;
             uint32_t border_color = focused ? 0xFF5F7EA8 : 0xFF3C5078;
-            const char *title = surf->title[0] ? surf->title : "3D Demo";
+            const char *title = surface_taskbar_label(surf);
 
+            surface_window_button_rects(surf, &min_x, &max_x, &close_x,
+                                        &btn_y);
             draw_rect(g_fb_buf, fb_w, fb_h, frame_x + WAYLAND_DEMO_SHADOW,
                       frame_y + WAYLAND_DEMO_SHADOW,
                       frame_w, frame_h, 0xFF101418);
@@ -294,9 +295,18 @@ static void paint_scene(int fb_w, int fb_h, int *acquire_blocked)
                       frame_y + border, gw, title_h, title_color);
             draw_string(g_fb_buf, fb_w, fb_h, frame_x + 10,
                         frame_y + border + 4, title, 0xFFD2DAE2, 1);
-            draw_rect(g_fb_buf, fb_w, fb_h, close_x, close_y,
+            draw_rect(g_fb_buf, fb_w, fb_h, min_x, btn_y,
+                      WAYLAND_MINIMIZE_SZ, WAYLAND_MINIMIZE_SZ, 0xFF607080);
+            draw_char(g_fb_buf, fb_w, fb_h, min_x + 5, btn_y + 1,
+                      '_', 0xFFFFFFFF, 1);
+            draw_rect(g_fb_buf, fb_w, fb_h, max_x, btn_y,
+                      WAYLAND_MAXIMIZE_SZ, WAYLAND_MAXIMIZE_SZ,
+                      surf->maximized ? 0xFF6E8A3D : 0xFF3D6EA6);
+            draw_char(g_fb_buf, fb_w, fb_h, max_x + 5, btn_y + 1,
+                      surf->maximized ? 'r' : 'M', 0xFFFFFFFF, 1);
+            draw_rect(g_fb_buf, fb_w, fb_h, close_x, btn_y,
                       WAYLAND_CLOSE_SZ, WAYLAND_CLOSE_SZ, 0xFFA63D3D);
-            draw_char(g_fb_buf, fb_w, fb_h, close_x + 5, close_y + 1,
+            draw_char(g_fb_buf, fb_w, fb_h, close_x + 5, btn_y + 1,
                       'x', 0xFFFFFFFF, 1);
             draw_rect(g_fb_buf, fb_w, fb_h, frame_x, frame_y,
                       frame_w, border, border_color);
@@ -378,7 +388,7 @@ static void paint_scene(int fb_w, int fb_h, int *acquire_blocked)
             buf->format == DRM_FORMAT_XRGB8888 ||
             ((buf->format == WL_SHM_FORMAT_ARGB8888 ||
               buf->format == DRM_FORMAT_ARGB8888) &&
-             (buf->is_gpu_bo || surface_is_demo_window(surf)))) {
+             (buf->is_gpu_bo || surface_has_window_frame(surf)))) {
             size_t copy_bytes = (size_t)(col1 - col0) * sizeof(uint32_t);
 
             for (int32_t row = row0; row < row1; row++) {

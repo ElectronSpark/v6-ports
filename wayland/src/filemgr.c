@@ -23,6 +23,7 @@
 #include <wayland-client.h>
 
 #include "wlcomp_draw.h"
+#include "xv6_icon.h"
 #include "xdg-shell-client-protocol.h"
 #include "xv6_present_buffer.h"
 
@@ -89,6 +90,8 @@ struct entry {
     mode_t mode;
     off_t size;
     time_t mtime;
+    int has_icon;
+    struct xv6_icon icon;
 };
 
 struct button {
@@ -149,6 +152,9 @@ struct app {
 };
 
 static int load_directory(struct app *app, const char *path);
+static int parse_desktop_exec(const char *path, char *exec_path,
+                              size_t exec_path_sz, char *exec_arg,
+                              size_t exec_arg_sz);
 
 static uint32_t now_ms(void)
 {
@@ -385,6 +391,17 @@ static int load_directory(struct app *app, const char *path)
         e->size = st.st_size;
         e->mtime = st.st_mtime;
         e->type = classify_entry(e->name, &st);
+        if (e->type == FT_EXEC) {
+            e->has_icon = xv6_icon_load_from_elf(e->path, &e->icon) == 0;
+        } else if (e->type == FT_DESKTOP) {
+            char exec_path[PATH_MAX];
+            char exec_arg[PATH_MAX];
+
+            if (parse_desktop_exec(e->path, exec_path, sizeof(exec_path),
+                                   exec_arg, sizeof(exec_arg)) == 0)
+                e->has_icon =
+                    xv6_icon_load_from_elf(exec_path, &e->icon) == 0;
+        }
         app->entry_count++;
     }
     closedir(dir);
@@ -967,8 +984,11 @@ static void draw_entries(uint32_t *fb, int w, int h, struct app *app)
 
         draw_rounded_rect(fb, w, h, x0 + 8, y + 3, 16, 16, 3,
                           type_color(e->type));
-        draw_char(fb, w, h, x0 + 12, y + 3, type_glyph(e->type),
-                  0xFFFFFFFF, 1);
+        if (e->has_icon)
+            xv6_icon_draw(fb, w, h, x0 + 10, y + 5, 12, 12, &e->icon);
+        else
+            draw_char(fb, w, h, x0 + 12, y + 3, type_glyph(e->type),
+                      0xFFFFFFFF, 1);
         draw_text_fit(fb, w, h, x0 + 34, y + 3, list_w - 270, e->name,
                       0xFFE5ECF4);
         draw_text_fit(fb, w, h, x0 + list_w - 220, y + 3, 110,

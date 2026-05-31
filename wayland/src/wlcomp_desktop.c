@@ -70,6 +70,9 @@ static void shortcut_set(desktop_icon_t *sc, const char *label, int action,
     sc->action = action;
     sc->icon_color = color;
     sc->symbol = symbol ? symbol : '?';
+    if (exec_path && exec_path[0])
+        sc->has_bitmap_icon =
+            xv6_icon_load_from_elf(exec_path, &sc->bitmap_icon) == 0;
 }
 
 static int shortcut_action_from_name(const char *name)
@@ -479,9 +482,16 @@ static void draw_icon(uint32_t *fb, int fb_w, int fb_h, desktop_icon_t *ico,
     draw_rounded_rect(fb, fb_w, fb_h, bx, by,
                       ICON_BOX_SIZE, ICON_BOX_SIZE, 6, ico->icon_color);
 
-    int sx = bx + (ICON_BOX_SIZE - 8 * 2) / 2;
-    int sy = by + (ICON_BOX_SIZE - 16 * 2) / 2;
-    draw_char(fb, fb_w, fb_h, sx, sy, ico->symbol, 0xFFFFFFFF, 2);
+    if (ico->has_bitmap_icon) {
+        xv6_icon_draw(fb, fb_w, fb_h, bx + 5, by + 5,
+                      ICON_BOX_SIZE - 10, ICON_BOX_SIZE - 10,
+                      &ico->bitmap_icon);
+    } else {
+        int sx = bx + (ICON_BOX_SIZE - 8 * 2) / 2;
+        int sy = by + (ICON_BOX_SIZE - 16 * 2) / 2;
+
+        draw_char(fb, fb_w, fb_h, sx, sy, ico->symbol, 0xFFFFFFFF, 2);
+    }
 
     int lw = string_pixel_width(ico->label, 1);
     int lx = ico->x + (ICON_CELL_W - lw) / 2;

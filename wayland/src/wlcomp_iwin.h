@@ -45,6 +45,9 @@ typedef struct {
     int   resize_edge;
     int   resize_start_x, resize_start_y;
     int   resize_start_w, resize_start_h;
+    int   minimized;
+    int   maximized;
+    int   saved_x, saved_y, saved_w, saved_h;
 
     int   master_fd;
     pid_t shell_pid;

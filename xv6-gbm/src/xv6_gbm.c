@@ -34,6 +34,12 @@ struct fb_gpu_bo_import_fd {
     int32_t fd;
     uint32_t flags, width, height, pitch, handle;
     uint64_t size, addr;
+    uint32_t format, plane_count;
+    uint64_t modifier;
+    uint32_t offsets[4];
+    uint32_t strides[4];
+    uint64_t implicit_fence;
+    uint64_t explicit_fence;
 };
 
 struct gbm_device {
@@ -379,6 +385,13 @@ struct gbm_bo *gbm_bo_import(struct gbm_device *gbm, uint32_t type,
 
     memset(&import, 0, sizeof(import));
     import.fd = fd;
+    import.width = width;
+    import.height = height;
+    import.format = format;
+    import.plane_count = plane_count;
+    import.modifier = modifier;
+    memcpy(import.offsets, offsets, sizeof(import.offsets));
+    memcpy(import.strides, strides, sizeof(import.strides));
     if (ioctl(gbm->fd, FB_GPU_BO_IMPORT_FD, &import) < 0 ||
         import.addr == 0 || import.size == 0 || import.handle == 0) {
         free(bo);

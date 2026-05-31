@@ -29,7 +29,7 @@ set(WLCOMP_INCLUDE_SRCS
 set(DESKTOP_INCLUDE_SRCS
     ${WAYLAND_SRC_DIR}/desktop_clients.inc)
 
-foreach(_src wlcomp.c wlcomp_desktop.c wlcomp_desktop.h wlcomp_draw.c wlcomp_draw.h wlcomp_iwin.h wlcomp_iwin_calc.c wlcomp_iwin_calc.h wlcomp_iwin_demo.c wlcomp_iwin_demo.h wlcomp_iwin_filemgr.c wlcomp_iwin_filemgr.h wlcomp_iwin_terminal.c wlcomp_iwin_terminal.h wlcomp_iwin_text.c wlcomp_iwin_text.h wlcomp_keymap.c wlcomp_keymap.h wlcomp_launcher.c wlcomp_launcher.h wlcomp_swgl.c wlcomp_swgl.h desktop.c filemgr.c glsmoke.c glmaze.c peanutgb.c mesaglsmoke.c mesawlegl.c mesademo.c gl_program.c gl_program.h gl_fps_overlay.c gl_fps_overlay.h mesawlegl_sphere.c mesawlegl_sphere.h pixel_fps_overlay.c pixel_fps_overlay.h xv6_present_buffer.c xv6_present_buffer.h mesaeglinfo.c mesaglfeature.c mesad3d12probe.c gpu_substrate_validate.c dmabufsmoke.c d3d12sharedsmoke.c drmgpuprobe.c webkitgpusmoke.c xv6_egl_gles.c xv6memshim.c font8x16.h)
+foreach(_src wlcomp.c wlcomp_desktop.c wlcomp_desktop.h wlcomp_draw.c wlcomp_draw.h wlcomp_iwin.h wlcomp_iwin_calc.c wlcomp_iwin_calc.h wlcomp_iwin_demo.c wlcomp_iwin_demo.h wlcomp_iwin_filemgr.c wlcomp_iwin_filemgr.h wlcomp_iwin_terminal.c wlcomp_iwin_terminal.h wlcomp_iwin_text.c wlcomp_iwin_text.h wlcomp_keymap.c wlcomp_keymap.h wlcomp_launcher.c wlcomp_launcher.h wlcomp_swgl.c wlcomp_swgl.h desktop.c filemgr.c glsmoke.c glmaze.c peanutgb.c mesaglsmoke.c mesawlegl.c mesademo.c gl_program.c gl_program.h gl_fps_overlay.c gl_fps_overlay.h mesawlegl_sphere.c mesawlegl_sphere.h pixel_fps_overlay.c pixel_fps_overlay.h xv6_icon.c xv6_icon.h xv6_icon_filemgr.c xv6_icon_glmaze.c xv6_icon_peanutgb.c xv6_present_buffer.c xv6_present_buffer.h mesaeglinfo.c mesaglfeature.c mesad3d12probe.c gpu_substrate_validate.c dmabufsmoke.c d3d12sharedsmoke.c drmgpuprobe.c webkitgpusmoke.c xv6_egl_gles.c xv6memshim.c font8x16.h)
     if(NOT EXISTS "${WAYLAND_SRC_DIR}/${_src}")
         message(FATAL_ERROR "ports/wayland: missing ${WAYLAND_SRC_DIR}/${_src}")
     endif()
@@ -280,6 +280,7 @@ if(XV6_WAYLAND_HOST_GLIBC)
                     -o ${_wl_bin} ${_wl_src}
                     ${WAYLAND_SRC_DIR}/wlcomp_desktop.c
                     ${WAYLAND_SRC_DIR}/wlcomp_draw.c
+                    ${WAYLAND_SRC_DIR}/xv6_icon.c
                     ${WAYLAND_SRC_DIR}/wlcomp_iwin_calc.c
                     ${WAYLAND_SRC_DIR}/wlcomp_iwin_demo.c
                     ${WAYLAND_SRC_DIR}/wlcomp_iwin_filemgr.c
@@ -302,6 +303,8 @@ if(XV6_WAYLAND_HOST_GLIBC)
                 ${WAYLAND_SRC_DIR}/wlcomp_desktop.h
                 ${WAYLAND_SRC_DIR}/wlcomp_draw.c
                 ${WAYLAND_SRC_DIR}/wlcomp_draw.h
+                ${WAYLAND_SRC_DIR}/xv6_icon.c
+                ${WAYLAND_SRC_DIR}/xv6_icon.h
                 ${WAYLAND_SRC_DIR}/wlcomp_iwin.h
                 ${WAYLAND_SRC_DIR}/wlcomp_iwin_calc.c
                 ${WAYLAND_SRC_DIR}/wlcomp_iwin_calc.h
@@ -346,6 +349,7 @@ else()
                     -o ${_wl_bin} ${_wl_src}
                     ${WAYLAND_SRC_DIR}/wlcomp_desktop.c
                     ${WAYLAND_SRC_DIR}/wlcomp_draw.c
+                    ${WAYLAND_SRC_DIR}/xv6_icon.c
                     ${WAYLAND_SRC_DIR}/wlcomp_iwin_calc.c
                     ${WAYLAND_SRC_DIR}/wlcomp_iwin_demo.c
                     ${WAYLAND_SRC_DIR}/wlcomp_iwin_filemgr.c
@@ -365,6 +369,8 @@ else()
                 ${WAYLAND_SRC_DIR}/wlcomp_desktop.h
                 ${WAYLAND_SRC_DIR}/wlcomp_draw.c
                 ${WAYLAND_SRC_DIR}/wlcomp_draw.h
+                ${WAYLAND_SRC_DIR}/xv6_icon.c
+                ${WAYLAND_SRC_DIR}/xv6_icon.h
                 ${WAYLAND_SRC_DIR}/wlcomp_iwin.h
                 ${WAYLAND_SRC_DIR}/wlcomp_iwin_calc.c
                 ${WAYLAND_SRC_DIR}/wlcomp_iwin_calc.h
@@ -574,12 +580,17 @@ add_custom_command(
                 -o ${_filemgr_bin}
                 ${WAYLAND_SRC_DIR}/filemgr.c
                 ${WAYLAND_SRC_DIR}/wlcomp_draw.c
+                ${WAYLAND_SRC_DIR}/xv6_icon.c
+                ${WAYLAND_SRC_DIR}/xv6_icon_filemgr.c
                 ${WAYLAND_SRC_DIR}/xv6_present_buffer.c
                 ${_xdg_client_code}
                 -lwayland-client -lffi -lpthread -ldl -lrt -lm
     DEPENDS ${WAYLAND_SRC_DIR}/filemgr.c
             ${WAYLAND_SRC_DIR}/wlcomp_draw.c
             ${WAYLAND_SRC_DIR}/wlcomp_draw.h
+            ${WAYLAND_SRC_DIR}/xv6_icon.c
+            ${WAYLAND_SRC_DIR}/xv6_icon.h
+            ${WAYLAND_SRC_DIR}/xv6_icon_filemgr.c
             ${WAYLAND_SRC_DIR}/font8x16.h
             ${WAYLAND_SRC_DIR}/xv6_present_buffer.c
             ${WAYLAND_SRC_DIR}/xv6_present_buffer.h
@@ -631,11 +642,14 @@ add_custom_command(
                 -Wl,-rpath,/lib
                 -o ${_glmaze_bin}
                 ${WAYLAND_SRC_DIR}/glmaze.c
+                ${WAYLAND_SRC_DIR}/xv6_icon_glmaze.c
                 ${WAYLAND_SRC_DIR}/xv6_present_buffer.c
                 ${_xdg_client_code}
                 -lEGL -lGLESv2 -lwayland-egl -lwayland-client
                 -lffi -lpthread -ldl -lrt -lm
     DEPENDS ${WAYLAND_SRC_DIR}/glmaze.c
+            ${WAYLAND_SRC_DIR}/xv6_icon.h
+            ${WAYLAND_SRC_DIR}/xv6_icon_glmaze.c
             ${WAYLAND_SRC_DIR}/xv6_present_buffer.c
             ${WAYLAND_SRC_DIR}/xv6_present_buffer.h
             ${_xdg_client_header}
@@ -655,11 +669,14 @@ add_custom_command(
                 -Wl,-rpath,/lib
                 -o ${_peanutgb_bin}
                 ${WAYLAND_SRC_DIR}/peanutgb.c
+                ${WAYLAND_SRC_DIR}/xv6_icon_peanutgb.c
                 ${WAYLAND_SRC_DIR}/xv6_present_buffer.c
                 ${_xdg_client_code}
                 -lwayland-client
                 -lffi -lpthread -ldl -lrt -lm
     DEPENDS ${WAYLAND_SRC_DIR}/peanutgb.c
+            ${WAYLAND_SRC_DIR}/xv6_icon.h
+            ${WAYLAND_SRC_DIR}/xv6_icon_peanutgb.c
             ${PEANUT_GB_SRC_DIR}/peanut_gb.h
             ${WAYLAND_SRC_DIR}/xv6_present_buffer.c
             ${WAYLAND_SRC_DIR}/xv6_present_buffer.h

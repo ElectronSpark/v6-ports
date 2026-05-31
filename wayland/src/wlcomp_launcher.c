@@ -915,7 +915,9 @@ void wlcomp_launcher_launch(const char *path, const char *name,
         int is_minibrowser = strcmp(app_name, "MiniBrowser") == 0;
         int is_webkitgpusmoke = strcmp(app_name, "webkitgpusmoke") == 0;
         int is_webkit = is_minibrowser || is_webkitgpusmoke;
-        int is_mesa_gl = strcmp(app_name, "mesawlegl") == 0 ||
+        int is_mesa_gl = strcmp(app_name, "glmaze") == 0 ||
+                         strcmp(app_name, "glsmoke") == 0 ||
+                         strcmp(app_name, "mesawlegl") == 0 ||
                          strcmp(app_name, "mesaglsmoke") == 0 ||
                          strcmp(app_name, "mesaeglinfo") == 0;
 

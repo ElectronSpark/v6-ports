@@ -93,11 +93,11 @@ static void toplevel_move(struct wl_client *c, struct wl_resource *r,
 
     if (surf->maximized && surf->xdg_surface && surf->xdg_toplevel) {
         int32_t rw = surf->saved_w > 0 ? surf->saved_w :
-                     (int32_t)g_fb_w * 4 / 5;
+                     work_area_w() * 4 / 5;
         int32_t rh = surf->saved_h > 0 ? surf->saved_h :
-                     ((int32_t)g_fb_h - TASKBAR_H) * 4 / 5;
-        int32_t max_x = (int32_t)g_fb_w - 60;
-        int32_t max_y = (int32_t)g_fb_h - TASKBAR_H - 1;
+                     work_area_h() * 4 / 5;
+        int32_t max_x = work_area_w() - 60;
+        int32_t max_y = work_area_h() - 1;
         struct wl_array states;
         uint32_t *st;
 
@@ -176,6 +176,7 @@ static void toplevel_set_maximized(struct wl_client *c, struct wl_resource *r)
     (void)c;
     struct wlcomp_surface *surf = wl_resource_get_user_data(r);
     int32_t gx, gy, gw, gh;
+    int32_t mx, my, mw, mh;
     if (!surf || !surf->xdg_surface || !surf->xdg_toplevel) return;
     if (surf->maximized) return;  /* already maximized */
 
@@ -199,18 +200,20 @@ static void toplevel_set_maximized(struct wl_client *c, struct wl_resource *r)
     *s = XDG_TOPLEVEL_STATE_MAXIMIZED;
     s = wl_array_add(&states, sizeof(uint32_t));
     *s = XDG_TOPLEVEL_STATE_ACTIVATED;
-    int32_t max_h = (int32_t)g_fb_h - TASKBAR_H;
+    mw = maximized_configure_w(surf);
+    mh = maximized_configure_h(surf);
+    maximized_surface_origin(surf, &mx, &my);
     fprintf(stderr,
             "wlcomp: xdg set_maximized pid=%d serial=%u size=%dx%d restore=%dx%d\n",
-            surf->client_pid, g_serial + 1, (int32_t)g_fb_w, max_h,
+            surf->client_pid, g_serial + 1, mw, mh,
             surf->saved_w, surf->saved_h);
-    xdg_toplevel_send_configure(surf->xdg_toplevel, (int32_t)g_fb_w, max_h, &states);
+    xdg_toplevel_send_configure(surf->xdg_toplevel, mw, mh, &states);
     wl_array_release(&states);
     xdg_surface_send_configure(surf->xdg_surface, ++g_serial);
 
-    /* Snap to top-left */
-    surf->x = 0;
-    surf->y = 0;
+    /* Snap the whole decorated window to the real framebuffer work area. */
+    surf->x = mx;
+    surf->y = my;
     damage_surface(surf);
 }
 
@@ -226,8 +229,8 @@ static void toplevel_unset_maximized(struct wl_client *c, struct wl_resource *r)
     surf->maximized = 0;
 
     /* Restore saved geometry */
-    int32_t rw = surf->saved_w > 0 ? surf->saved_w : (int32_t)g_fb_w * 4 / 5;
-    int32_t rh = surf->saved_h > 0 ? surf->saved_h : ((int32_t)g_fb_h - 36) * 4 / 5;
+    int32_t rw = surf->saved_w > 0 ? surf->saved_w : work_area_w() * 4 / 5;
+    int32_t rh = surf->saved_h > 0 ? surf->saved_h : work_area_h() * 4 / 5;
     surf->x = surf->saved_x;
     surf->y = surf->saved_y;
 

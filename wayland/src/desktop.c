@@ -3,7 +3,7 @@
  *
  * Launches the wlcomp Wayland compositor, then starts Wayland clients
  * (e.g. NetSurf browser).  Monitors child processes and performs clean
- * shutdown on SIGTERM / SIGINT.
+ * shutdown on session-control signals.
  *
  * Started automatically by init via /etc/daemons.
  */
@@ -126,7 +126,13 @@ struct netconf_req_compat {
     char hostname[NETCONF_HOSTNAME_MAX];
 };
 
+#ifndef NSIG
+#define NSIG 64
+#endif
+
 static volatile sig_atomic_t g_running = 1;
+static volatile sig_atomic_t g_shutdown_requested;
+static volatile sig_atomic_t g_pending_signals[NSIG];
 static pid_t wlcomp_pid;
 static pid_t client_pid;
 static pid_t glsmoke_pid;
@@ -811,10 +817,144 @@ static long long monotonic_ms(void)
     return (long long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
 }
 
-static void sighandler(int sig)
+static const char *desktop_signal_name(int sig)
 {
-    (void)sig;
-    g_running = 0;
+    switch (sig) {
+    case SIGHUP:
+        return "SIGHUP";
+    case SIGINT:
+        return "SIGINT";
+    case SIGQUIT:
+        return "SIGQUIT";
+    case SIGTERM:
+        return "SIGTERM";
+    case SIGCHLD:
+        return "SIGCHLD";
+    case SIGPIPE:
+        return "SIGPIPE";
+    case SIGUSR1:
+        return "SIGUSR1";
+    case SIGUSR2:
+        return "SIGUSR2";
+    case SIGALRM:
+        return "SIGALRM";
+    case SIGCONT:
+        return "SIGCONT";
+    case SIGTSTP:
+        return "SIGTSTP";
+    case SIGTTIN:
+        return "SIGTTIN";
+    case SIGTTOU:
+        return "SIGTTOU";
+    default:
+        return "signal";
+    }
+}
+
+static int desktop_signal_requests_shutdown(int sig)
+{
+    return sig == SIGHUP || sig == SIGINT || sig == SIGQUIT ||
+           sig == SIGTERM;
+}
+
+static int desktop_signal_is_internal(int sig)
+{
+    return sig == SIGCHLD || sig == SIGPIPE;
+}
+
+static void desktop_signal_child(pid_t pid, int sig)
+{
+    if (pid <= 0)
+        return;
+    if (kill(-pid, sig) != 0)
+        (void)kill(pid, sig);
+}
+
+static void desktop_dispatch_signal_to_children(int sig)
+{
+    pid_t pids[] = {
+        client_pid,
+        glsmoke_pid,
+        gst_warmup_pid,
+        httpd_pid,
+        wlcomp_pid,
+    };
+    size_t i;
+
+    for (i = 0; i < sizeof(pids) / sizeof(pids[0]); i++) {
+        size_t j;
+
+        if (pids[i] <= 0)
+            continue;
+        for (j = 0; j < i; j++) {
+            if (pids[j] == pids[i])
+                break;
+        }
+        if (j == i)
+            desktop_signal_child(pids[i], sig);
+    }
+}
+
+static void desktop_process_pending_signals(void)
+{
+    int sig;
+
+    for (sig = 1; sig < NSIG; sig++) {
+        if (!g_pending_signals[sig])
+            continue;
+        g_pending_signals[sig] = 0;
+
+        if (desktop_signal_is_internal(sig))
+            continue;
+
+        fprintf(stderr, "[desktop] caught %s (%d), dispatching\n",
+                desktop_signal_name(sig), sig);
+        desktop_dispatch_signal_to_children(sig);
+
+        if (desktop_signal_requests_shutdown(sig)) {
+            g_shutdown_requested = 1;
+            g_running = 0;
+        }
+    }
+}
+
+static void desktop_signal_handler(int sig)
+{
+    if (sig > 0 && sig < NSIG)
+        g_pending_signals[sig] = 1;
+}
+
+static int desktop_should_manage_signal(int sig)
+{
+    if (sig <= 0 || sig >= NSIG)
+        return 0;
+    if (sig == SIGKILL || sig == SIGSTOP)
+        return 0;
+    if (sig == SIGABRT || sig == SIGBUS || sig == SIGFPE ||
+        sig == SIGILL || sig == SIGSEGV || sig == SIGTRAP)
+        return 0;
+    return 1;
+}
+
+static void install_signal_handlers(void)
+{
+    int sig;
+
+    for (sig = 1; sig < NSIG; sig++) {
+        struct sigaction sa;
+
+        if (!desktop_should_manage_signal(sig))
+            continue;
+        memset(&sa, 0, sizeof(sa));
+        sa.sa_handler = desktop_signal_handler;
+        sigemptyset(&sa.sa_mask);
+        if (sig == SIGCHLD)
+            sa.sa_flags = SA_NOCLDSTOP;
+        if (sigaction(sig, &sa, NULL) != 0 && errno != EINVAL) {
+            fprintf(stderr, "[desktop] sigaction(%d) failed errno=%d (%s)\n",
+                    sig, errno, strerror(errno));
+        }
+    }
 }
 
 /* Wait for wlcomp to create the Wayland socket.  Returns 0 on success. */
@@ -822,6 +962,9 @@ static int wait_for_socket(void)
 {
     struct stat st;
     for (int i = 0; i < SOCKET_WAIT_TRIES; i++) {
+        desktop_process_pending_signals();
+        if (!g_running)
+            return -1;
         if (stat(WAYLAND_SOCKET_PATH, &st) == 0)
             return 0;
         usleep(SOCKET_WAIT_US);
@@ -899,6 +1042,10 @@ static int sync_resolv_conf_from_netconf(int wait_us)
     while (waited <= wait_us) {
         struct netconf_req_compat req;
         int fd = open("/dev/netconf", O_RDONLY | O_CLOEXEC);
+
+        desktop_process_pending_signals();
+        if (!g_running)
+            return -1;
 
         if (fd >= 0) {
             int n = read(fd, &req, sizeof(req));
@@ -1010,8 +1157,7 @@ static pid_t launch_gpu_substrate_validate(void)
 
     if (pid == 0) {
         char *argv[] = {
-            "sh",
-            "/bin/gpu-substrate-validate",
+            "gpu-substrate-validate",
             NULL,
         };
         char *envp[] = {
@@ -1030,7 +1176,7 @@ static pid_t launch_gpu_substrate_validate(void)
             NULL,
         };
 
-        execve("/bin/sh", argv, envp);
+        execve("/bin/gpu-substrate-validate", argv, envp);
         fprintf(stderr, "gpu-substrate-validate: execve failed errno=%d (%s)\n",
                 errno, errno ? strerror(errno) : "no errno from kernel");
         _exit(127);
@@ -2047,6 +2193,10 @@ static void wait_for_gst_registry_warmup(int wait_us)
         int status;
         pid_t exited = waitpid(gst_warmup_pid, &status, WNOHANG);
 
+        desktop_process_pending_signals();
+        if (!g_running)
+            return;
+
         if (exited == gst_warmup_pid) {
             if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
                 gst_registry_ready = 1;
@@ -2848,12 +2998,40 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
 
 static void kill_and_reap(pid_t *pidp)
 {
-    if (*pidp > 0) {
-        kill(-*pidp, SIGTERM);
-        kill(*pidp, SIGTERM);
-        waitpid(*pidp, NULL, 0);
-        *pidp = 0;
+    pid_t pid;
+    long long deadline_ms;
+    int status;
+
+    if (!pidp || *pidp <= 0)
+        return;
+
+    pid = *pidp;
+    desktop_signal_child(pid, SIGTERM);
+    deadline_ms = monotonic_ms() + 1000;
+    for (;;) {
+        pid_t exited = waitpid(pid, &status, WNOHANG);
+
+        if (exited == pid || (exited < 0 && errno == ECHILD)) {
+            *pidp = 0;
+            return;
+        }
+        if (exited < 0 && errno != EINTR)
+            break;
+        if (monotonic_ms() >= deadline_ms)
+            break;
+        usleep(20000);
     }
+
+    desktop_signal_child(pid, SIGKILL);
+    for (;;) {
+        pid_t exited = waitpid(pid, &status, 0);
+
+        if (exited == pid || (exited < 0 && errno == ECHILD))
+            break;
+        if (exited < 0 && errno != EINTR)
+            break;
+    }
+    *pidp = 0;
 }
 
 static void write_child_status_file(const char *path, const char *label,
@@ -3627,8 +3805,7 @@ static void glsmoke_args_from_cmdline(char *frames_arg, size_t frames_size,
 
 int main(void)
 {
-    signal(SIGINT,  sighandler);
-    signal(SIGTERM, sighandler);
+    install_signal_handlers();
 
     if (desktop_disabled_by_cmdline()) {
         fprintf(stderr, "[desktop] disabled by cmdline\n");
@@ -3683,6 +3860,10 @@ int main(void)
             int status;
             pid_t exited = waitpid(-1, &status, WNOHANG);
 
+            desktop_process_pending_signals();
+            if (!g_running)
+                break;
+
             if (exited == wlcomp_pid) {
                 fprintf(stderr, "[desktop] wlcomp exited (status %d)\n",
                         WIFEXITED(status) ? WEXITSTATUS(status) : status);
@@ -3725,6 +3906,10 @@ int main(void)
             while (g_running && client_pid > 0) {
                 int status;
                 pid_t exited = waitpid(-1, &status, WNOHANG);
+
+                desktop_process_pending_signals();
+                if (!g_running)
+                    break;
 
                 if (exited == wlcomp_pid) {
                     fprintf(stderr, "[desktop] wlcomp exited (status %d)\n",
@@ -3786,6 +3971,11 @@ int main(void)
             while (g_running && client_pid > 0) {
                 int status;
                 pid_t exited = waitpid(-1, &status, WNOHANG);
+
+                desktop_process_pending_signals();
+                if (!g_running)
+                    break;
+
                 if (exited == wlcomp_pid) {
                     fprintf(stderr, "[desktop] wlcomp exited (status %d)\n",
                             WEXITSTATUS(status));
@@ -3886,6 +4076,11 @@ int main(void)
             int status;
             long long now_ms;
             pid_t exited = waitpid(-1, &status, WNOHANG);
+
+            desktop_process_pending_signals();
+            if (!g_running)
+                break;
+
             if (exited > 0) {
                 if (exited == wlcomp_pid) {
                     fprintf(stderr, "[desktop] wlcomp exited (status %d)\n",
@@ -3979,7 +4174,9 @@ int main(void)
                     "[desktop] WebKit API smoke complete; keeping Wayland "
                     "session alive\n");
         } else {
-            fprintf(stderr, "[desktop] shutting down\n");
+            fprintf(stderr, g_shutdown_requested ?
+                    "[desktop] shutting down after signal\n" :
+                    "[desktop] shutting down\n");
             cleanup();
             return 0;
         }
@@ -4000,6 +4197,11 @@ int main(void)
     while (g_running) {
         int status;
         pid_t exited = waitpid(-1, &status, WNOHANG);
+
+        desktop_process_pending_signals();
+        if (!g_running)
+            break;
+
         if (exited > 0) {
             if (exited == wlcomp_pid) {
                 fprintf(stderr, "[desktop] wlcomp exited (status %d)\n",
@@ -4025,7 +4227,9 @@ int main(void)
         usleep(100000);  /* 100 ms poll */
     }
 
-    fprintf(stderr, "[desktop] shutting down\n");
+    fprintf(stderr, g_shutdown_requested ?
+            "[desktop] shutting down after signal\n" :
+            "[desktop] shutting down\n");
     cleanup();
     return 0;
 }
