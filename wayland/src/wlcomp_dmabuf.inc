@@ -250,10 +250,18 @@ static void dmabuf_buffer_import_common(struct wl_client *client,
     wl_resource_set_implementation(buf_res, &buffer_impl, buf,
                                    buffer_destroy_handler);
     wl_client_get_credentials(client, &client_pid, &client_uid, &client_gid);
-    fprintf(stderr,
-            "wlcomp: dmabuf buffer pid=%d size=%dx%d stride=%u fmt=0x%x planes=%u flags=0x%x\n",
-            client_pid, width, height, params->stride[0], format,
-            plane_count, flags);
+    {
+        static int dmabuf_buffer_logs;
+
+        if (wlcomp_verbose_log_enabled() || dmabuf_buffer_logs < 4) {
+            fprintf(stderr,
+                    "wlcomp: dmabuf buffer pid=%d size=%dx%d stride=%u fmt=0x%x planes=%u flags=0x%x\n",
+                    client_pid, width, height, params->stride[0], format,
+                    plane_count, flags);
+            if (!wlcomp_verbose_log_enabled())
+                dmabuf_buffer_logs++;
+        }
+    }
     if (!immediate)
         zwp_linux_buffer_params_v1_send_created(params_res, buf_res);
 }
@@ -281,9 +289,18 @@ static void dmabuf_params_add(struct wl_client *client,
 
     (void)client;
     wl_client_get_credentials(client, &client_pid, &client_uid, &client_gid);
-    fprintf(stderr,
-            "wlcomp: dmabuf add pid=%d plane=%u stride=%u modifier=%08x:%08x fd=%d\n",
-            client_pid, plane_idx, stride, modifier_hi, modifier_lo, fd);
+    {
+        static int dmabuf_add_logs;
+
+        if (wlcomp_verbose_log_enabled() || dmabuf_add_logs < 4) {
+            fprintf(stderr,
+                    "wlcomp: dmabuf add pid=%d plane=%u stride=%u modifier=%08x:%08x fd=%d\n",
+                    client_pid, plane_idx, stride, modifier_hi, modifier_lo,
+                    fd);
+            if (!wlcomp_verbose_log_enabled())
+                dmabuf_add_logs++;
+        }
+    }
     if (!params || params->used) {
         if (fd >= 0)
             close(fd);
@@ -502,13 +519,19 @@ static void dmabuf_create_params(struct wl_client *client,
     wl_resource_set_implementation(params_res, &dmabuf_params_impl, params,
                                    dmabuf_params_destroy_handler);
     {
+        static int dmabuf_create_params_logs;
         pid_t client_pid = 0;
         uid_t client_uid = 0;
         gid_t client_gid = 0;
+
         wl_client_get_credentials(client, &client_pid, &client_uid,
                                   &client_gid);
-        fprintf(stderr, "wlcomp: dmabuf create_params pid=%d id=%u\n",
-                client_pid, params_id);
+        if (wlcomp_verbose_log_enabled() || dmabuf_create_params_logs < 4) {
+            fprintf(stderr, "wlcomp: dmabuf create_params pid=%d id=%u\n",
+                    client_pid, params_id);
+            if (!wlcomp_verbose_log_enabled())
+                dmabuf_create_params_logs++;
+        }
     }
 }
 

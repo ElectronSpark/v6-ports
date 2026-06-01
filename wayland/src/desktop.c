@@ -1086,12 +1086,10 @@ static pid_t launch_wlcomp(void)
     int have_cmdline = read_cmdline(cmdline_buf, sizeof(cmdline_buf)) == 0;
     int virgl_available = xv6_virgl_available();
     /*
-     * When no virgl render node is present (e.g. Hyper-V firmware FB), but a
-     * kernel /dev/fb0 exists, the kernel BO/direct-scanout fast paths still
-     * apply: fb_virt is PA2VA cached RAM and a single memcpy/either_copyin
-     * per row beats the generic Wayland SHM blit by ~4x. Default both knobs
-     * on whenever we can open the FB cdev, regardless of virgl. The cmdline
-     * still wins.
+     * Prefer BO-backed presentation by default.  The direct scanout mmap path
+     * is useful for bring-up, but virtio scanout RAM can be exposed through a
+     * stale CPU alias on some host/display combinations.  Keep it opt-in via
+     * wlcomp_fb_direct=1 while the BO path remains the stable fast default.
      */
     int fb_cdev_available = 0;
     {
@@ -1104,14 +1102,16 @@ static pid_t launch_wlcomp(void)
     int fast_default = virgl_available || fb_cdev_available;
     int use_fb_direct = have_cmdline ?
         cmdline_int_value(cmdline_buf, "wlcomp_fb_direct",
-                          fast_default) :
-        fast_default;
+                          0) :
+        0;
     int use_fb_bo = have_cmdline ?
         cmdline_int_value(cmdline_buf, "wlcomp_fb_bo",
                           fast_default) :
         fast_default;
+    int gpu_compose_default = virgl_available;
     int use_gpu_compose = have_cmdline ?
-        cmdline_int_value(cmdline_buf, "wlcomp_gpu_compose", 0) : 0;
+        cmdline_int_value(cmdline_buf, "wlcomp_gpu_compose",
+                          gpu_compose_default) : 0;
     pid_t pid = fork();
     if (pid == 0) {
         char *argv[] = { "wlcomp", NULL };
@@ -2233,7 +2233,8 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
     int is_netsurf = strcmp(name, "netsurf") == 0;
     int is_minibrowser = strcmp(name, "MiniBrowser") == 0;
     int is_webkitgpusmoke = strcmp(name, "webkitgpusmoke") == 0;
-    int is_mesa_gl = strcmp(name, "mesawlegl") == 0 ||
+    int is_mesa_gl = strcmp(name, "mesademo") == 0 ||
+                     strcmp(name, "mesawlegl") == 0 ||
                      strcmp(name, "mesaglsmoke") == 0 ||
                      strcmp(name, "mesaeglinfo") == 0;
     int is_webkit = is_minibrowser || is_webkitgpusmoke;
@@ -2830,6 +2831,7 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             "LIBGL_ALWAYS_SOFTWARE=0",
             "GALLIUM_DRIVER=virgl",
             "EGL_PLATFORM=wayland",
+            "XV6_MESAWLEGL_SHM_PRESENT=0",
             NULL
         };
         char *envp_mesa_accel_sw[] = {
@@ -3967,7 +3969,10 @@ int main(void)
         fprintf(stderr, "[desktop] %s pid=%d %s %s %s\n", client_name,
                 client_pid, demo ? "--demo" : frames_arg,
                 frames_arg, demo ? loops_arg : resize_arg);
-        if (webkit_enabled_by_cmdline()) {
+        if (webkit_enabled_by_cmdline() ||
+            desktop_exit_after_smoke_by_cmdline()) {
+            int smoke_ok = 1;
+
             while (g_running && client_pid > 0) {
                 int status;
                 pid_t exited = waitpid(-1, &status, WNOHANG);
@@ -3991,12 +3996,17 @@ int main(void)
                                 "[desktop] GL smoke exited (status %d)\n",
                                 WIFEXITED(status) ? WEXITSTATUS(status) :
                                                     status);
+                        smoke_ok = 0;
                     }
                     client_pid = 0;
                     glsmoke_pid = 0;
                     break;
                 }
                 usleep(100000);
+            }
+            if (desktop_exit_after_smoke_by_cmdline()) {
+                cleanup();
+                return smoke_ok ? 0 : 1;
             }
         }
     }

@@ -542,6 +542,7 @@ static int gpu_compose_present_direct_scanout(struct wlcomp_buffer *buf,
                                               uint64_t src_off,
                                               uint32_t src_pitch)
 {
+    struct fb_gpu_scanout_flush flush;
     uint8_t *src;
     uint8_t *dst;
     uint32_t bytes;
@@ -552,6 +553,7 @@ static int gpu_compose_present_direct_scanout(struct wlcomp_buffer *buf,
     int perf_log = cmdline_flag_enabled("wlcomp_gpu_perf");
     uint64_t t0 = 0;
     uint64_t t_copy = 0;
+    uint64_t t_flush = 0;
     const char *enable = getenv("XV6_WLCOMP_GPU_DIRECT_SCANOUT");
 
     if ((!enable || strcmp(enable, "1") != 0) &&
@@ -582,15 +584,24 @@ static int gpu_compose_present_direct_scanout(struct wlcomp_buffer *buf,
     }
     if (perf_log)
         t_copy = get_time_us();
+    memset(&flush, 0, sizeof(flush));
+    flush.x = x;
+    flush.y = y;
+    flush.w = w;
+    flush.h = h;
+    if (ioctl(g_fb_fd, FB_GPU_SCANOUT_FLUSH, &flush) != 0)
+        return 0;
+    if (perf_log)
+        t_flush = get_time_us();
 
     if (perf_log) {
         direct_frames++;
         direct_copy_us += t_copy - t0;
-        direct_total_us += t_copy - t0;
+        direct_total_us += t_flush - t0;
     }
     if (perf_log && direct_frames >= 20) {
         fprintf(stderr,
-                "wlcomp: gpu-compose-direct-copy avg_us=%lu copy=%lu frames=%lu rect=%u,%u %ux%u\n",
+                "wlcomp: gpu-compose-direct-scanout avg_us=%lu copy=%lu frames=%lu rect=%u,%u %ux%u\n",
                 (unsigned long)(direct_total_us / direct_frames),
                 (unsigned long)(direct_copy_us / direct_frames),
                 (unsigned long)direct_frames, x, y, w, h);
@@ -611,6 +622,54 @@ static int gpu_compose_present_direct_scanout(struct wlcomp_buffer *buf,
     return 1;
 }
 
+static int gpu_compose_present_resource_scanout(struct wlcomp_buffer *buf,
+                                                uint32_t handle,
+                                                uint32_t x, uint32_t y,
+                                                uint32_t w, uint32_t h)
+{
+    struct fb_gpu_bo_present cmd;
+    static int log_count;
+    int enabled = cmdline_flag_enabled("wlcomp_gpu_resource_scanout");
+    const char *env = getenv("XV6_WLCOMP_GPU_RESOURCE_SCANOUT");
+
+    if (env && *env)
+        enabled = atoi(env) != 0;
+    if (!enabled || g_fb_fd < 0 || !buf || !buf->is_gpu_bo ||
+        handle == 0 || buf->y_inverted || buf->plane_stride[0] <= 0 ||
+        buf->width <= 0 || buf->height <= 0)
+        return 0;
+
+    /*
+     * Binding a client resource directly as scanout changes QEMU's visible
+     * mode to that resource rectangle.  Only use it for true fullscreen
+     * buffers; windowed surfaces must copy/compose into the desktop scanout.
+     */
+    if (x != 0 || y != 0 || w != (uint32_t)g_fb_w ||
+        h != (uint32_t)g_fb_h || (uint32_t)buf->width != (uint32_t)g_fb_w ||
+        (uint32_t)buf->height != (uint32_t)g_fb_h)
+        return 0;
+
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.w = (uint32_t)buf->width;
+    cmd.h = (uint32_t)buf->height;
+    cmd.src_pitch = (uint32_t)buf->plane_stride[0];
+    cmd.pixels = 0;
+    cmd.handle = handle;
+    cmd.flags = FB_GPU_BO_PRESENT_F_VIRGL_SCANOUT;
+    if (ioctl(g_fb_fd, FB_GPU_BO_PRESENT, &cmd) != 0)
+        return 0;
+
+    g_damage_stats.gpu_compose_presents++;
+    g_damage_stats.gpu_compose_pixels += (uint64_t)cmd.w * cmd.h;
+    if (log_count < 8) {
+        fprintf(stderr,
+                "wlcomp: gpu-compose presented path=resource-scanout handle=%u size=%ux%u fence=%lu\n",
+                handle, cmd.w, cmd.h, (unsigned long)cmd.fence);
+        log_count++;
+    }
+    return 1;
+}
+
 static int gpu_compose_present_buffer(struct wlcomp_buffer *buf,
                                       int32_t draw_x, int32_t draw_y,
                                       int32_t row0, int32_t row1,
@@ -627,10 +686,21 @@ static int gpu_compose_present_buffer(struct wlcomp_buffer *buf,
     static uint64_t present_total_us;
     static uint64_t present_frames;
     int perf_log = cmdline_flag_enabled("wlcomp_gpu_perf");
+    const char *virgl_copy_env = getenv("XV6_WLCOMP_GPU_VIRGL_COPY");
+    int virgl_copy = cmdline_int_value("wlcomp_gpu_virgl_copy", 0) != 0;
+    int virgl_copy_delay_us =
+        cmdline_int_value("wlcomp_gpu_copy_delay_us", 0);
+
+    if (virgl_copy_env) {
+        virgl_copy = strcmp(virgl_copy_env, "0") != 0 &&
+                     strcmp(virgl_copy_env, "no") != 0 &&
+                     strcmp(virgl_copy_env, "false") != 0 &&
+                     strcmp(virgl_copy_env, "off") != 0;
+    }
     uint64_t present_t0;
     uint64_t present_dt;
 
-    if (!gpu_compose_enabled() || !g_fb_direct_scanout || g_fb_fd < 0) {
+    if (!gpu_compose_enabled() || g_fb_fd < 0) {
         if (skip_log_count < 8) {
             fprintf(stderr,
                     "wlcomp: gpu-compose skip enabled=%d direct=%d fb_fd=%d\n",
@@ -680,6 +750,20 @@ static int gpu_compose_present_buffer(struct wlcomp_buffer *buf,
     cmd.src_pitch = (uint32_t)buf->plane_stride[0];
     cmd.pixels = offset;
     cmd.handle = handle;
+    if (gpu_compose_present_resource_scanout(buf, handle, cmd.x, cmd.y, w, h))
+        return 1;
+    if (!virgl_copy && buf && buf->is_gpu_bo) {
+        struct wlcomp_surface *surf;
+
+        wl_list_for_each(surf, &g_surfaces, link) {
+            if (surf->committed_buf == buf && surface_is_demo_window(surf)) {
+                virgl_copy = 1;
+                break;
+            }
+        }
+    }
+    if (virgl_copy)
+        cmd.flags |= FB_GPU_BO_PRESENT_F_VIRGL_COPY;
     if (gpu_compose_present_direct_scanout(buf, cmd.x, cmd.y, w, h,
                                            offset, cmd.src_pitch)) {
         g_damage_stats.gpu_compose_presents++;
@@ -688,6 +772,8 @@ static int gpu_compose_present_buffer(struct wlcomp_buffer *buf,
     }
 
     present_t0 = perf_log ? get_time_us() : 0;
+    if (virgl_copy_delay_us > 0)
+        usleep((useconds_t)virgl_copy_delay_us);
     if (ioctl(g_fb_fd, FB_GPU_BO_PRESENT, &cmd) != 0) {
         if (fail_log_count < 8) {
             fprintf(stderr,
@@ -717,8 +803,8 @@ static int gpu_compose_present_buffer(struct wlcomp_buffer *buf,
     g_damage_stats.gpu_compose_pixels += (uint64_t)w * h;
     if (log_count < 8) {
         fprintf(stderr,
-                "wlcomp: gpu-compose presented handle=%u rect=%u,%u %ux%u src_off=%lu fence=%lu\n",
-                handle, cmd.x, cmd.y, w, h, (unsigned long)offset,
+                "wlcomp: gpu-compose presented handle=%u flags=0x%x rect=%u,%u %ux%u src_off=%lu fence=%lu\n",
+                handle, cmd.flags, cmd.x, cmd.y, w, h, (unsigned long)offset,
                 (unsigned long)cmd.fence);
         log_count++;
     }

@@ -361,6 +361,8 @@ static void add_path_icon(const char *full, const char *name,
 
 static void load_desktop_shortcuts(void)
 {
+    static int logged_state;
+
     if (!desktop_dir_changed())
         return;
 
@@ -389,6 +391,61 @@ static void load_desktop_shortcuts(void)
     if (g_icon_count > 1)
         qsort(g_icons, (size_t)g_icon_count, sizeof(g_icons[0]),
               icon_compare_label);
+
+    if (g_icon_count == 0) {
+        static const struct {
+            const char *label;
+            int action;
+            const char *exec_path;
+            const char *exec_name;
+            const char *exec_arg;
+            uint32_t color;
+            char symbol;
+        } defaults[] = {
+            { "3D Demo", SHORTCUT_3DDEMO, "", "", "", 0xFF6EAA3D, '3' },
+            { "Browser", SHORTCUT_EXEC, "/bin/netsurf", "netsurf", "",
+              0xFF3D6EA6, 'W' },
+            { "Calc", SHORTCUT_CALC, "", "", "", 0xFF8556B5, 'C' },
+            { "EGL Demo", SHORTCUT_EXEC, "/bin/mesawlegl", "mesawlegl", "",
+              0xFFA67C3D, 'E' },
+            { "Editor", SHORTCUT_EDITOR, "", "", "", 0xFFA65C3D, 'E' },
+            { "Files", SHORTCUT_FILES, "", "", "", 0xFFA67C52, 'F' },
+            { "GL Maze", SHORTCUT_EXEC, "/bin/glmaze", "glmaze", "",
+              0xFF3DA67B, 'G' },
+            { "GL Smoke", SHORTCUT_EXEC, "/bin/glsmoke", "glsmoke", "",
+              0xFF7B3DA6, 'G' },
+            { "GL Sphere", SHORTCUT_EXEC, "/bin/mesawlegl", "mesawlegl", "--demo",
+              0xFF3D6E9E, 'S' },
+            { "Game Boy", SHORTCUT_EXEC, "/bin/peanutgb", "peanutgb", "",
+              0xFFA63D83, 'G' },
+            { "Info", SHORTCUT_SYSINFO, "", "", "", 0xFF3DA66E, 'i' },
+            { "Monitor", SHORTCUT_MONITOR, "", "", "", 0xFFA63D91, 'M' },
+            { "Network", SHORTCUT_NETWORK, "", "", "", 0xFF3DA6A6, 'N' },
+            { "Settings", SHORTCUT_SETTINGS, "", "", "", 0xFF707070, 'S' },
+            { "Terminal", SHORTCUT_TERMINAL, "", "", "", 0xFF5A7090, '>' },
+            { "WebKit", SHORTCUT_EXEC, "/libexec/webkit2gtk-4.1/MiniBrowser",
+              "MiniBrowser", "", 0xFFA65CB5, 'W' },
+        };
+
+        for (size_t i = 0; i < sizeof(defaults) / sizeof(defaults[0]) &&
+             g_icon_count < DESKTOP_ICON_MAX; i++) {
+            if (defaults[i].action == SHORTCUT_EXEC &&
+                !shortcut_exec_allowed(defaults[i].exec_path))
+                continue;
+            shortcut_set(&g_icons[g_icon_count++], defaults[i].label,
+                         defaults[i].action, defaults[i].exec_path,
+                         defaults[i].exec_name, defaults[i].exec_arg,
+                         defaults[i].color, defaults[i].symbol);
+        }
+        fprintf(stderr,
+                "wlcomp: desktop shortcuts directory empty; using %d built-in launchers\n",
+                g_icon_count);
+        logged_state = 1;
+    } else if (!logged_state) {
+        fprintf(stderr, "wlcomp: desktop shortcuts loaded count=%d\n",
+                g_icon_count);
+        logged_state = 1;
+    }
 }
 
 int wlcomp_desktop_icon_count(void)

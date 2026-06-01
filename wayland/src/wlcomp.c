@@ -91,6 +91,8 @@ struct drm_virtgpu_getparam_compat {
 #endif
 #define WLCOMP_INVALID_FORMAT UINT32_MAX
 #define FB_GPU_BO_F_EXPORTABLE 0x1
+#define FB_GPU_BO_PRESENT_F_VIRGL_COPY 0x1
+#define FB_GPU_BO_PRESENT_F_VIRGL_SCANOUT 0x2
 #define MAX_DAMAGE_RECTS     32
 
 struct fb_var_screeninfo {
@@ -201,6 +203,7 @@ static int cmdline_flag_enabled(const char *key);
 static int cmdline_int_value(const char *key, int fallback);
 static uint32_t get_time_ms(void);
 static uint64_t get_time_us(void);
+static int wlcomp_verbose_log_enabled(void);
 static int framebuffer_display_completion_query(uint64_t wait_for,
                                                 int wait,
                                                 uint64_t *presented,
@@ -231,6 +234,20 @@ static void wlcomp_wayland_log(const char *fmt, va_list args)
     if (strstr(buf, "failed to read client connection") != NULL)
         return;
     fputs(buf, stderr);
+}
+
+static int wlcomp_verbose_log_enabled(void)
+{
+    static int initialized;
+    static int enabled;
+
+    if (!initialized) {
+        const char *env = getenv("XV6_WLCOMP_VERBOSE_LOG");
+
+        enabled = env && env[0] && strcmp(env, "0") != 0;
+        initialized = 1;
+    }
+    return enabled;
 }
 
 static uint64_t get_time_us(void)

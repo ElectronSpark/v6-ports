@@ -387,6 +387,30 @@ static int alloc_framebuffer_backing(void)
         cmdline_flag_enabled("wlcomp_fb_bo") ||
         gpu_compose_requested;
 
+    if (direct_requested) {
+        int ret;
+
+        memset(&scanout, 0, sizeof(scanout));
+        errno = 0;
+        ret = ioctl(g_fb_fd, FB_GPU_SCANOUT_MAP, &scanout);
+        if (ret == 0 &&
+            scanout.addr && scanout.size && scanout.pitch) {
+            g_fb_buf = (uint32_t *)(uintptr_t)scanout.addr;
+            g_fb_pitch = scanout.pitch;
+            g_fb_bo_size = scanout.size;
+            g_fb_direct_scanout = 1;
+            memset(g_fb_buf, 0, (size_t)scanout.size);
+            fprintf(stderr,
+                    "wlcomp: using direct scanout addr=0x%lx size=%lu pitch=%u\n",
+                    scanout.addr, scanout.size, scanout.pitch);
+            return 0;
+        }
+        fprintf(stderr,
+                "wlcomp: direct scanout map failed ret=%d errno=%d (%s) addr=0x%lx size=%lu pitch=%u %ux%u\n",
+                ret, errno, strerror(errno), scanout.addr, scanout.size,
+                scanout.pitch, scanout.width, scanout.height);
+    }
+
     if (bo_requested) {
         int ret;
 
@@ -413,30 +437,6 @@ static int alloc_framebuffer_backing(void)
                 "wlcomp: FB_GPU_BO_CREATE backing failed ret=%d errno=%d (%s) addr=0x%lx size=%lu pitch=%u handle=%u requested_by_gpu_compose=%d d3d12_native_present_target=missing\n",
                 ret, errno, strerror(errno), (uint64_t)bo.addr, bo.size,
                 bo.pitch, bo.handle, gpu_compose_requested);
-    }
-
-    if (direct_requested) {
-        int ret;
-
-        memset(&scanout, 0, sizeof(scanout));
-        errno = 0;
-        ret = ioctl(g_fb_fd, FB_GPU_SCANOUT_MAP, &scanout);
-        if (ret == 0 &&
-            scanout.addr && scanout.size && scanout.pitch) {
-            g_fb_buf = (uint32_t *)(uintptr_t)scanout.addr;
-            g_fb_pitch = scanout.pitch;
-            g_fb_bo_size = scanout.size;
-            g_fb_direct_scanout = 1;
-            memset(g_fb_buf, 0, (size_t)scanout.size);
-            fprintf(stderr,
-                    "wlcomp: using direct scanout addr=0x%lx size=%lu pitch=%u\n",
-                    scanout.addr, scanout.size, scanout.pitch);
-            return 0;
-        }
-        fprintf(stderr,
-                "wlcomp: direct scanout map failed ret=%d errno=%d (%s) addr=0x%lx size=%lu pitch=%u %ux%u\n",
-                ret, errno, strerror(errno), scanout.addr, scanout.size,
-                scanout.pitch, scanout.width, scanout.height);
     }
 
     g_fb_buf = (uint32_t *)malloc(bytes);
@@ -543,10 +543,19 @@ static int present_damage_rects(int fb_w, uint32_t now)
     if (full_frame)
         g_damage_stats.present_full_frames++;
     g_damage_count = 0;
-    if (framebuffer_display_completion_query(0, 0,
-                                             &g_fb_display_wait_sequence,
-                                             &g_fb_display_last_complete) == 0)
+    if (g_fb_direct_scanout || g_fb_bo_backed) {
+        /*
+         * xv6 direct scanout flushes and BO presents are synchronous: the
+         * kernel completes the scanout update before returning.  Avoid an
+         * extra display-wait ioctl on every animated frame.
+         */
+        g_fb_display_wait_sequence = 0;
         g_fb_display_stall_start_ms = 0;
+    } else if (framebuffer_display_completion_query(0, 0,
+                                                    &g_fb_display_wait_sequence,
+                                                    &g_fb_display_last_complete) == 0) {
+        g_fb_display_stall_start_ms = 0;
+    }
     return ok;
 }
 

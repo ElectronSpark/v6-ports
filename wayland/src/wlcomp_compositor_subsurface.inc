@@ -243,7 +243,7 @@ static void surface_commit(struct wl_client *client, struct wl_resource *resourc
         (first_map || buffer_size_changed || buffer_changed)) {
         static int maximized_commit_logs;
 
-        if (maximized_commit_logs < 24) {
+        if (wlcomp_verbose_log_enabled() || maximized_commit_logs < 2) {
             int32_t gx, gy, gw, gh;
 
             surface_window_geometry(surf, &gx, &gy, &gw, &gh);
@@ -252,7 +252,8 @@ static void surface_commit(struct wl_client *client, struct wl_resource *resourc
                     surf->client_pid,
                     surf->committed_buf->width, surf->committed_buf->height,
                     gx, gy, gw, gh, work_area_w(), work_area_h());
-            maximized_commit_logs++;
+            if (!wlcomp_verbose_log_enabled())
+                maximized_commit_logs++;
         }
     }
     if (buffer_size_changed && surface_is_demo_window(surf)) {

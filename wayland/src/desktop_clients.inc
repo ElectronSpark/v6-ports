@@ -819,7 +819,8 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
     int is_netsurf = strcmp(app_name, "netsurf") == 0;
     int is_minibrowser = strcmp(app_name, "MiniBrowser") == 0;
     int is_webkitgpusmoke = strcmp(app_name, "webkitgpusmoke") == 0;
-    int is_mesa_gl = strcmp(app_name, "mesawlegl") == 0 ||
+    int is_mesa_gl = strcmp(app_name, "mesademo") == 0 ||
+                     strcmp(app_name, "mesawlegl") == 0 ||
                      strcmp(app_name, "mesaglsmoke") == 0 ||
                      strcmp(app_name, "mesaeglinfo") == 0;
     int is_webkit = is_minibrowser || is_webkitgpusmoke;
@@ -1316,6 +1317,7 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             "LIBGL_ALWAYS_SOFTWARE=0",
             "GALLIUM_DRIVER=virgl",
             "EGL_PLATFORM=wayland",
+            "XV6_MESAWLEGL_SHM_PRESENT=0",
             NULL
         };
         char *envp_mesa_dxg[] = {

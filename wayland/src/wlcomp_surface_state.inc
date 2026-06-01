@@ -431,12 +431,13 @@ static void maximized_surface_origin(const struct wlcomp_surface *surf,
 static int frame_callback_interval_ms(void)
 {
     static int initialized;
-    static int interval_ms = 16;
+    static int interval_ms = 4;
     const char *env;
 
     if (initialized)
         return interval_ms;
     initialized = 1;
+    interval_ms = cmdline_int_value("wlcomp_frame_ms", interval_ms);
     env = getenv("XV6_WLCOMP_FRAME_MS");
     if (env && *env) {
         interval_ms = atoi(env);

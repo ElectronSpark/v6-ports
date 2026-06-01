@@ -219,15 +219,209 @@ static int paint_scaled_window_geometry_buffer(struct wlcomp_surface *surf,
     return 1;
 }
 
+struct gpu_compose_pending {
+    struct wlcomp_buffer *buf;
+    int32_t draw_x;
+    int32_t draw_y;
+    int32_t row0;
+    int32_t row1;
+    int32_t col0;
+    int32_t col1;
+};
+
+#define MAX_GPU_COMPOSE_PENDING 16
+static struct gpu_compose_pending g_gpu_compose_pending[MAX_GPU_COMPOSE_PENDING];
+static int g_gpu_compose_pending_count;
+
+static void gpu_compose_pending_reset(void)
+{
+    g_gpu_compose_pending_count = 0;
+}
+
+static int gpu_compose_pending_add(struct wlcomp_buffer *buf,
+                                   int32_t draw_x, int32_t draw_y,
+                                   int32_t row0, int32_t row1,
+                                   int32_t col0, int32_t col1)
+{
+    struct gpu_compose_pending *item;
+
+    if (!gpu_compose_enabled() ||
+        g_gpu_compose_pending_count >= MAX_GPU_COMPOSE_PENDING)
+        return 0;
+    item = &g_gpu_compose_pending[g_gpu_compose_pending_count++];
+    item->buf = buf;
+    item->draw_x = draw_x;
+    item->draw_y = draw_y;
+    item->row0 = row0;
+    item->row1 = row1;
+    item->col0 = col0;
+    item->col1 = col1;
+    return 1;
+}
+
+static void gpu_compose_pending_flush(void)
+{
+    for (int i = 0; i < g_gpu_compose_pending_count; i++) {
+        struct gpu_compose_pending *item = &g_gpu_compose_pending[i];
+
+        (void)gpu_compose_present_buffer(item->buf, item->draw_x,
+                                         item->draw_y, item->row0,
+                                         item->row1, item->col0,
+                                         item->col1);
+    }
+    gpu_compose_pending_reset();
+}
+
+static void gpu_compose_rect_append(struct damage_rect *rects, int *count,
+                                    const struct damage_rect *r)
+{
+    if (!r || r->x1 >= r->x2 || r->y1 >= r->y2 ||
+        *count >= MAX_DAMAGE_RECTS)
+        return;
+    rects[(*count)++] = *r;
+}
+
+static void gpu_compose_subtract_one(const struct damage_rect *src,
+                                     const struct damage_rect *cut,
+                                     struct damage_rect *out,
+                                     int *out_count)
+{
+    int32_t ix1;
+    int32_t iy1;
+    int32_t ix2;
+    int32_t iy2;
+    struct damage_rect r;
+
+    if (!src || !cut)
+        return;
+    ix1 = src->x1 > cut->x1 ? src->x1 : cut->x1;
+    iy1 = src->y1 > cut->y1 ? src->y1 : cut->y1;
+    ix2 = src->x2 < cut->x2 ? src->x2 : cut->x2;
+    iy2 = src->y2 < cut->y2 ? src->y2 : cut->y2;
+    if (ix1 >= ix2 || iy1 >= iy2) {
+        gpu_compose_rect_append(out, out_count, src);
+        return;
+    }
+
+    r = (struct damage_rect){ src->x1, src->y1, src->x2, iy1 };
+    gpu_compose_rect_append(out, out_count, &r);
+    r = (struct damage_rect){ src->x1, iy2, src->x2, src->y2 };
+    gpu_compose_rect_append(out, out_count, &r);
+    r = (struct damage_rect){ src->x1, iy1, ix1, iy2 };
+    gpu_compose_rect_append(out, out_count, &r);
+    r = (struct damage_rect){ ix2, iy1, src->x2, iy2 };
+    gpu_compose_rect_append(out, out_count, &r);
+}
+
+static void gpu_compose_filter_present_damage(void)
+{
+    struct damage_rect filtered[MAX_DAMAGE_RECTS];
+    int filtered_count = 0;
+
+    if (g_gpu_compose_pending_count == 0)
+        return;
+    for (int i = 0; i < g_damage_count; i++) {
+        struct damage_rect work[MAX_DAMAGE_RECTS];
+        int work_count = 1;
+
+        work[0] = g_damage[i];
+        for (int j = 0; j < g_gpu_compose_pending_count && work_count > 0;
+             j++) {
+            struct gpu_compose_pending *item = &g_gpu_compose_pending[j];
+            struct damage_rect cut = {
+                item->draw_x + item->col0,
+                item->draw_y + item->row0,
+                item->draw_x + item->col1,
+                item->draw_y + item->row1,
+            };
+            struct damage_rect next[MAX_DAMAGE_RECTS];
+            int next_count = 0;
+
+            for (int k = 0; k < work_count; k++)
+                gpu_compose_subtract_one(&work[k], &cut, next,
+                                         &next_count);
+            memcpy(work, next, sizeof(work));
+            work_count = next_count;
+        }
+        for (int j = 0; j < work_count; j++)
+            gpu_compose_rect_append(filtered, &filtered_count, &work[j]);
+    }
+    memcpy(g_damage, filtered, sizeof(filtered));
+    g_damage_count = filtered_count;
+}
+
+static uint32_t paint_probe_pixel(uint32_t *fb, int fb_w, int fb_h,
+                                  int x, int y)
+{
+    if (!fb || x < 0 || y < 0 || x >= fb_w || y >= fb_h)
+        return 0;
+    return fb[y * fb_w + x];
+}
+
+static int paint_probe_clip_contains(int x, int y)
+{
+    if (!g_paint_clip_enabled)
+        return 1;
+    return x >= g_paint_clip.x1 && x < g_paint_clip.x2 &&
+           y >= g_paint_clip.y1 && y < g_paint_clip.y2;
+}
+
 static void paint_scene(int fb_w, int fb_h, int *acquire_blocked)
 {
     struct wlcomp_surface *surf;
+    static int paint_probe_logged;
+    int paint_probe = 0;
+    int paint_probe_icon_x = 40;
+    int paint_probe_icon_y = 20;
+    int paint_probe_task_x = 20;
+    int paint_probe_task_y = fb_h > TASKBAR_H ? fb_h - TASKBAR_H / 2 : fb_h / 2;
+    const desktop_icon_t *paint_probe_icon = NULL;
+
+    if (!paint_probe_logged) {
+        paint_probe_icon = wlcomp_desktop_icon_at(0);
+        if (paint_probe_icon) {
+            paint_probe_icon_x = paint_probe_icon->x + paint_probe_icon->w / 2;
+            paint_probe_icon_y = paint_probe_icon->y + 20;
+        }
+        paint_probe =
+            paint_probe_clip_contains(paint_probe_icon_x, paint_probe_icon_y) &&
+            paint_probe_clip_contains(paint_probe_task_x, paint_probe_task_y);
+        if (paint_probe) {
+            fprintf(stderr,
+                    "wlcomp: paint probe begin clip=%d,%d-%d,%d icon='%s' icon_xy=%d,%d task_xy=%d,%d before=%08x/%08x\n",
+                    g_paint_clip.x1, g_paint_clip.y1, g_paint_clip.x2,
+                    g_paint_clip.y2,
+                    paint_probe_icon ? paint_probe_icon->label : "(none)",
+                    paint_probe_icon_x, paint_probe_icon_y,
+                    paint_probe_task_x, paint_probe_task_y,
+                    paint_probe_pixel(g_fb_buf, fb_w, fb_h,
+                                      paint_probe_icon_x, paint_probe_icon_y),
+                    paint_probe_pixel(g_fb_buf, fb_w, fb_h,
+                                      paint_probe_task_x, paint_probe_task_y));
+        }
+    }
 
     /* Draw desktop wallpaper */
     wlcomp_desktop_draw_wallpaper(g_fb_buf, fb_w, fb_h);
+    if (paint_probe) {
+        fprintf(stderr,
+                "wlcomp: paint probe after_wallpaper icon=%08x task=%08x\n",
+                paint_probe_pixel(g_fb_buf, fb_w, fb_h,
+                                  paint_probe_icon_x, paint_probe_icon_y),
+                paint_probe_pixel(g_fb_buf, fb_w, fb_h,
+                                  paint_probe_task_x, paint_probe_task_y));
+    }
 
     /* Draw desktop icons */
     wlcomp_desktop_draw_icons(g_fb_buf, fb_w, fb_h, g_selected_icon);
+    if (paint_probe) {
+        fprintf(stderr,
+                "wlcomp: paint probe after_icons icon=%08x task=%08x\n",
+                paint_probe_pixel(g_fb_buf, fb_w, fb_h,
+                                  paint_probe_icon_x, paint_probe_icon_y),
+                paint_probe_pixel(g_fb_buf, fb_w, fb_h,
+                                  paint_probe_task_x, paint_probe_task_y));
+    }
 
     /* Draw background layer: internal windows behind Wayland when no iwin focused */
     if (g_iwin_focus < 0)
@@ -365,8 +559,8 @@ static void paint_scene(int fb_w, int fb_h, int *acquire_blocked)
             continue;
 
         if (gpu_compose_can_present_surface(surf, buf) &&
-            gpu_compose_present_buffer(buf, draw_x, draw_y,
-                                       row0, row1, col0, col1))
+            gpu_compose_pending_add(buf, draw_x, draw_y,
+                                    row0, row1, col0, col1))
             continue;
 
         if (buf->format == DRM_FORMAT_NV12) {
@@ -421,6 +615,15 @@ static void paint_scene(int fb_w, int fb_h, int *acquire_blocked)
 
     /* Draw taskbar on top of everything */
     draw_taskbar(g_fb_buf, fb_w, fb_h);
+    if (paint_probe) {
+        fprintf(stderr,
+                "wlcomp: paint probe after_taskbar icon=%08x task=%08x\n",
+                paint_probe_pixel(g_fb_buf, fb_w, fb_h,
+                                  paint_probe_icon_x, paint_probe_icon_y),
+                paint_probe_pixel(g_fb_buf, fb_w, fb_h,
+                                  paint_probe_task_x, paint_probe_task_y));
+        paint_probe_logged = 1;
+    }
 
     /* Draw popup menu if open */
     draw_menu(g_fb_buf, fb_w, fb_h);
@@ -474,20 +677,40 @@ static void damage_fast_gpu_windows(uint32_t now)
     static uint32_t next_gpu_damage_ms;
     struct wlcomp_surface *surf;
     int damaged = 0;
+    int interval_ms = cmdline_int_value("wlcomp_gpu_damage_ms", 0);
+    const char *env = getenv("XV6_WLCOMP_GPU_DAMAGE_MS");
+
+    if (env && *env)
+        interval_ms = atoi(env);
+    if (interval_ms < 0)
+        interval_ms = 0;
+    if (interval_ms > 1000)
+        interval_ms = 1000;
 
     if (now < next_gpu_damage_ms)
         return;
 
     wl_list_for_each(surf, &g_surfaces, link) {
+        int32_t gx, gy, gw, gh;
+        int32_t ax, ay;
+        int32_t draw_x, draw_y;
+
         if (!surface_tree_visible(surf) || !surf->committed_buf ||
             !surf->committed_buf->is_gpu_bo || !surface_is_demo_window(surf))
             continue;
-        damage_surface(surf);
+        surface_window_geometry(surf, &gx, &gy, &gw, &gh);
+        if (gw <= 0 || gh <= 0)
+            continue;
+        surface_absolute_position(surf, &ax, &ay);
+        draw_x = ax - gx;
+        draw_y = ay - gy;
+        damage_rect(draw_x + gx, draw_y + gy, gw, gh);
         damaged = 1;
     }
 
     if (damaged)
-        next_gpu_damage_ms = now + 16;
+        next_gpu_damage_ms = interval_ms > 0 ? now + (uint32_t)interval_ms :
+                                                now;
 }
 
 static void composite_and_flip(void)
@@ -506,6 +729,22 @@ static void composite_and_flip(void)
 
     /* Lay out icons if not done */
     wlcomp_desktop_layout_icons(fb_w, fb_h);
+    {
+        static int logged_desktop_frame;
+
+        if (!logged_desktop_frame) {
+            int gpu_enabled = gpu_compose_enabled();
+
+            fprintf(stderr,
+                    "wlcomp: desktop frame fb=%ux%u pitch=%u mode=%s icons=%d taskbar_h=%d gpu_compose=%d direct_scanout=%d bo_backed=%d\n",
+                    g_fb_w, g_fb_h, g_fb_pitch,
+                    g_fb_direct_scanout ? "direct-scanout" :
+                        (g_fb_bo_backed ? "bo-present" : "user-blit"),
+                    wlcomp_desktop_icon_count(), TASKBAR_H,
+                    gpu_enabled, g_fb_direct_scanout, g_fb_bo_backed);
+            logged_desktop_frame = 1;
+        }
+    }
 
     if (now >= next_clock_damage_ms) {
         damage_taskbar();
@@ -572,6 +811,7 @@ static void composite_and_flip(void)
     for (int i = 0; i < paint_count; i++)
         paint_rects[i] = g_damage[i];
 
+    gpu_compose_pending_reset();
     for (int i = 0; i < paint_count; i++) {
         struct wlcomp_draw_clip draw_clip;
         g_paint_clip = paint_rects[i];
@@ -586,8 +826,10 @@ static void composite_and_flip(void)
     g_paint_clip_enabled = 0;
     wlcomp_draw_clear_clip();
 
-    release_cpu_copied_buffers_after_paint();
+    gpu_compose_filter_present_damage();
     int display_present_ok = present_damage_rects(fb_w, now);
+    gpu_compose_pending_flush();
+    release_cpu_copied_buffers_after_paint();
     if (acquire_blocked) {
         g_damage_stats.acquire_blocked_frames++;
         damage_full_reason(FULL_DAMAGE_ACQUIRE);

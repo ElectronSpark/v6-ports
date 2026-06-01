@@ -1728,6 +1728,34 @@ static int env_is_zero(const char *name)
     return value && strcmp(value, "0") == 0;
 }
 
+static int mesa_driver_name_is_software(const char *driver)
+{
+    return driver &&
+        (strcmp(driver, "swrast") == 0 || strcmp(driver, "softpipe") == 0 ||
+         strcmp(driver, "llvmpipe") == 0);
+}
+
+static int mesa_env_requests_software(void)
+{
+    return env_enabled("LIBGL_ALWAYS_SOFTWARE") ||
+        mesa_driver_name_is_software(getenv("GALLIUM_DRIVER")) ||
+        mesa_driver_name_is_software(getenv("MESA_LOADER_DRIVER_OVERRIDE"));
+}
+
+static int mesa_env_requests_accel(void)
+{
+    const char *gallium = getenv("GALLIUM_DRIVER");
+    const char *loader = getenv("MESA_LOADER_DRIVER_OVERRIDE");
+
+    if (env_is_zero("LIBGL_ALWAYS_SOFTWARE"))
+        return 1;
+    if (gallium && gallium[0] && !mesa_driver_name_is_software(gallium))
+        return 1;
+    if (loader && loader[0] && !mesa_driver_name_is_software(loader))
+        return 1;
+    return 0;
+}
+
 static void clamp_demo_size(struct app_state *app)
 {
     if (!app->sphere_demo || app->max_width <= 0 || app->max_height <= 0)
@@ -1761,14 +1789,14 @@ static void update_demo_fps(struct app_state *app)
     fps = elapsed > 0.0 ? (double)app->fps_frame_count / elapsed : 0.0;
     append_fps_evidence(app, now, elapsed, fps, &displayed_fps,
                         &native_fps_credit);
-    app->fps_value = displayed_fps;
+    app->fps_value = native_fps_credit ? displayed_fps : fps;
     /*
      * In shm-present mode the frames are genuinely GPU-rendered and then
      * blit-presented to the display every loop iteration, so the honest
      * on-screen rate is the app-loop fps. native_fps_credit (native scanout
      * present) legitimately stays 0 and is still reported on stderr below.
      */
-    if (app->shm_present) {
+    if (app->shm_present || !native_fps_credit) {
         snprintf(app->fps_text, sizeof(app->fps_text), "FPS %.1f", fps);
         snprintf(title, sizeof(title), "Mesa 3D Demo - %.1f FPS", fps);
     } else {
@@ -2457,18 +2485,18 @@ int main(int argc, char **argv)
     int render_div = 1;
     int present_interval = 1;
     int pace_us = 16000;
+    int present_interval_set = 0;
+    int pace_us_set = 0;
     int software_demo;
     int accel_requested;
     int rc = 0;
 
-    accel_requested = env_is_zero("LIBGL_ALWAYS_SOFTWARE") ||
-        getenv("GALLIUM_DRIVER") != NULL;
+    accel_requested = mesa_env_requests_accel();
     if (!accel_requested) {
         setenv("LIBGL_ALWAYS_SOFTWARE", "1", 0);
         setenv("MESA_LOADER_DRIVER_OVERRIDE", "softpipe", 0);
     }
-    software_demo = env_enabled("LIBGL_ALWAYS_SOFTWARE") ||
-        getenv("MESA_LOADER_DRIVER_OVERRIDE") != NULL;
+    software_demo = mesa_env_requests_software();
 
     for (int i = 1; i < argc; i++) {
         if (strncmp(argv[i], "--frames=", 9) == 0) {
@@ -2489,8 +2517,10 @@ int main(int argc, char **argv)
         } else if (strncmp(argv[i], "--present-interval=", 19) == 0) {
             present_interval = parse_nonnegative_arg(
                 argv[i], "--present-interval=", present_interval);
+            present_interval_set = 1;
         } else if (strncmp(argv[i], "--pace-us=", 10) == 0) {
             pace_us = parse_nonnegative_arg(argv[i], "--pace-us=", pace_us);
+            pace_us_set = 1;
         } else if (strcmp(argv[i], "--simple") == 0) {
             api_smoke = 0;
             sphere_demo = 0;
@@ -2502,6 +2532,10 @@ int main(int argc, char **argv)
             resize_every = 0;
             api_smoke = 0;
             sphere_demo = 1;
+            if (!present_interval_set)
+                present_interval = 0;
+            if (!pace_us_set)
+                pace_us = 0;
         } else if (strcmp(argv[i], "--help") == 0) {
             fprintf(stderr,
                     "usage: %s [--frames=N] [--loops=N] [--resize-every=N] [--size=WxH] [--render-div=N] [--present-interval=N] [--pace-us=N] [--api-smoke|--simple|--demo]\n",

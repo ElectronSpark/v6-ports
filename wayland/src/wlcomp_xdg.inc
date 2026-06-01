@@ -427,10 +427,15 @@ static void xdg_surface_ack_configure(struct wl_client *c,
                                       uint32_t serial)
 {
     struct wlcomp_surface *surf = wl_resource_get_user_data(r);
+    static int ack_configure_logs;
 
     (void)c;
-    fprintf(stderr, "wlcomp: xdg ack_configure pid=%d serial=%u\n",
-            surf ? surf->client_pid : 0, serial);
+    if (wlcomp_verbose_log_enabled() || ack_configure_logs < 8) {
+        fprintf(stderr, "wlcomp: xdg ack_configure pid=%d serial=%u\n",
+                surf ? surf->client_pid : 0, serial);
+        if (!wlcomp_verbose_log_enabled())
+            ack_configure_logs++;
+    }
     if (surf && surface_is_demo_window(surf) &&
         surf->demo_resize_configures > 0) {
         surf->demo_resize_acked = 1;

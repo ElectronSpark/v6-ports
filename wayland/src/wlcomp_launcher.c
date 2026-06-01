@@ -917,6 +917,7 @@ void wlcomp_launcher_launch(const char *path, const char *name,
         int is_webkit = is_minibrowser || is_webkitgpusmoke;
         int is_mesa_gl = strcmp(app_name, "glmaze") == 0 ||
                          strcmp(app_name, "glsmoke") == 0 ||
+                         strcmp(app_name, "mesademo") == 0 ||
                          strcmp(app_name, "mesawlegl") == 0 ||
                          strcmp(app_name, "mesaglsmoke") == 0 ||
                          strcmp(app_name, "mesaeglinfo") == 0;
@@ -1271,6 +1272,7 @@ void wlcomp_launcher_launch(const char *path, const char *name,
             "LIBGL_ALWAYS_SOFTWARE=0",
             "GALLIUM_DRIVER=virgl",
             "EGL_PLATFORM=wayland",
+            "XV6_MESAWLEGL_SHM_PRESENT=0",
             NULL
         };
         char *envp_mesa_dxg[] = {
