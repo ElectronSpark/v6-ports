@@ -95,6 +95,19 @@ struct wlcomp_buffer {
     uint64_t             plane_gpu_addr[4];
     uint64_t             plane_gpu_size[4];
     uint32_t             plane_gpu_handle[4];
+    int                  plane_dmabuf_fd[4];
+    uint32_t             plane_virtio_resource_id[4];
+    uint64_t             plane_virtio_resource_owner_id[4];
+    int32_t              plane_virtio_resource_owner_tgid[4];
+    void                *gl_egl_image;
+    uint32_t             gl_texture;
+    int                  gl_import_tried;
+    int                  gl_import_ready;
+    int                  gpu_compose_presented;
+    uint64_t             implicit_fence;
+    uint64_t             explicit_fence;
+    uint64_t             virgl_acquire_waited_fence;
+    void                *gl_release_sync;
     int                  acquire_fence_fd;
     uint32_t             acquire_wait_start_ms;
     int                  release_pending;
@@ -129,6 +142,7 @@ struct wlcomp_surface {
     struct wlcomp_buffer *pending_buf;
     int     has_pending_buffer;
     struct wlcomp_buffer *committed_buf;
+    struct wlcomp_buffer *deferred_buf;
     int     buffer_released;  /* 1 = release sent, don't re-release */
     struct wl_resource *sync_resource;
     int     pending_acquire_fence_fd;
@@ -139,6 +153,7 @@ struct wlcomp_surface {
     int     mapped;
     int     minimized;
     int     maximized;        /* 1 = currently maximized */
+    int     fullscreen_direct; /* 1 = unredirected: client owns the scanout */
     int     xdg_initial_configure_sent;
     int32_t pending_configure_w, pending_configure_h;
     int     is_cursor;        /* 1 = cursor surface, skip normal rendering */
@@ -187,7 +202,8 @@ static int xv6_wlcomp_trace_enabled(void)
 
     if (enabled < 0) {
         const char *env = getenv("WLCOMP_XV6_TRACE");
-        enabled = env && env[0] && strcmp(env, "0") != 0;
+        enabled = cmdline_flag_enabled("wlcomp_trace") ||
+                  (env && env[0] && strcmp(env, "0") != 0);
     }
 
     return enabled;
@@ -280,6 +296,73 @@ static int surface_is_demo_window(const struct wlcomp_surface *surf)
                     strcmp(surf->app_id, "mesawlegl") == 0);
 }
 
+/*
+ * Fullscreen-single-client "unredirection" (the standard Weston/Mutter/KWin
+ * direct-scanout optimization).  When a single toplevel commits a buffer that
+ * exactly covers the screen, the compositor can hand that client's virgl
+ * resource straight to QEMU as the scanout instead of sampling it into the
+ * desktop target and presenting that.  This collapses the per-frame host work
+ * from app_render + compositor_compose + scanout_flush (all serialized on the
+ * single virtio-gpu control queue) down to the Alpine-style app_render +
+ * 1 flush, freeing the queue for the client to hit its native cadence.  The
+ * composited desktop chrome is not visible while a client is unredirected;
+ * that is the accepted trade-off for this mode.  Default off; enable with
+ * wlcomp_fullscreen_direct=1 (or XV6_WLCOMP_FULLSCREEN_DIRECT).
+ */
+static int wlcomp_fullscreen_direct_enabled(void)
+{
+    static int initialized;
+    static int enabled;
+    const char *env;
+
+    if (initialized)
+        return enabled;
+    initialized = 1;
+    enabled = cmdline_flag_enabled("wlcomp_fullscreen_direct");
+    env = getenv("XV6_WLCOMP_FULLSCREEN_DIRECT");
+    if (env && *env)
+        enabled = strcmp(env, "0") != 0 && strcmp(env, "no") != 0 &&
+                  strcmp(env, "false") != 0 && strcmp(env, "off") != 0;
+    return enabled;
+}
+
+static int surface_is_fullscreen_direct(const struct wlcomp_surface *surf)
+{
+    const struct wlcomp_buffer *buf;
+
+    if (!wlcomp_fullscreen_direct_enabled())
+        return 0;
+    if (!surf || !surf->xdg_toplevel || surf->is_subsurface ||
+        surf->minimized)
+        return 0;
+    buf = surf->committed_buf;
+    if (!buf || !buf->is_gpu_bo)
+        return 0;
+    return buf->width == (int32_t)g_fb_w && buf->height == (int32_t)g_fb_h;
+}
+
+/*
+ * Return the mapped toplevel that currently owns the whole scanout via the
+ * unredirection path (if any).  When this returns non-NULL the render loop
+ * bypasses the desktop chrome compose + scanout present entirely and only
+ * hands the client resource to QEMU, so the single virtio-gpu control queue
+ * is left free for the client to render at its native cadence.
+ */
+static struct wlcomp_surface *compositor_fullscreen_direct_surface(void)
+{
+    struct wlcomp_surface *surf;
+
+    if (!wlcomp_fullscreen_direct_enabled())
+        return NULL;
+    wl_list_for_each(surf, &g_surfaces, link) {
+        if (surf->mapped && surf->committed_buf &&
+            !surf->committed_buf->y_inverted &&
+            surface_is_fullscreen_direct(surf))
+            return surf;
+    }
+    return NULL;
+}
+
 static int surface_tree_visible(const struct wlcomp_surface *surf);
 static void surface_window_geometry(const struct wlcomp_surface *s,
                                     int32_t *gx, int32_t *gy,
@@ -356,7 +439,8 @@ static int surface_is_webkit_window(const struct wlcomp_surface *surf)
 
 static int surface_has_window_frame(const struct wlcomp_surface *surf)
 {
-    return surf && surf->xdg_toplevel && !surface_is_webkit_window(surf);
+    return surf && surf->xdg_toplevel && !surface_is_webkit_window(surf) &&
+           !surface_is_fullscreen_direct(surf);
 }
 
 static int32_t work_area_w(void)
@@ -431,7 +515,15 @@ static void maximized_surface_origin(const struct wlcomp_surface *surf,
 static int frame_callback_interval_ms(void)
 {
     static int initialized;
-    static int interval_ms = 4;
+    /*
+     * wlcomp has a software-present loop rather than a hardware-vblank source.
+     * A nominal 16ms callback interval is too conservative here because the
+     * client still has to render, flush, and recommit before the next visible
+     * frame.  The 6ms default keeps Mesa's frame-callback throttle enabled but
+     * gives the compositor enough headroom to approach the display cadence
+     * without the overdrive/regression seen at 4ms.
+     */
+    static int interval_ms = 6;
     const char *env;
 
     if (initialized)
@@ -449,18 +541,225 @@ static int frame_callback_interval_ms(void)
     return interval_ms;
 }
 
+static uint32_t g_next_frame_callback_ms;
+
 static int frame_callbacks_due(uint32_t now)
 {
-    static uint32_t next_frame_ms;
     int interval_ms = frame_callback_interval_ms();
 
     if (interval_ms <= 0)
         return 1;
-    if (next_frame_ms == 0 || now >= next_frame_ms) {
-        next_frame_ms = now + (uint32_t)interval_ms;
+    if (g_next_frame_callback_ms == 0 || now >= g_next_frame_callback_ms) {
+        g_next_frame_callback_ms = now + (uint32_t)interval_ms;
         return 1;
     }
     return 0;
+}
+
+static int frame_callback_deadline_wait_enabled(void)
+{
+    static int initialized;
+    static int enabled;
+    const char *env;
+
+    if (initialized)
+        return enabled;
+    initialized = 1;
+    enabled = cmdline_int_value("wlcomp_callback_deadline_wait", enabled) != 0;
+    env = getenv("XV6_WLCOMP_CALLBACK_DEADLINE_WAIT");
+    if (env && *env)
+        enabled = strcmp(env, "0") != 0 && strcmp(env, "no") != 0 &&
+                  strcmp(env, "false") != 0 && strcmp(env, "off") != 0;
+    return enabled;
+}
+
+static int frame_callback_deadline_timeout_ms(uint32_t now, int fallback_ms)
+{
+    uint32_t delta;
+
+    if (!frame_callback_deadline_wait_enabled())
+        return fallback_ms;
+    if (frame_callback_interval_ms() <= 0)
+        return 0;
+    if (g_next_frame_callback_ms == 0 || now >= g_next_frame_callback_ms)
+        return 0;
+    delta = g_next_frame_callback_ms - now;
+    if (delta > 16)
+        return 16;
+    return (int)delta;
+}
+
+static int frame_perf_enabled(void)
+{
+    static int initialized;
+    static int enabled;
+    const char *env;
+
+    if (initialized)
+        return enabled;
+    initialized = 1;
+    enabled = cmdline_int_value("wlcomp_frame_perf", 0) != 0;
+    env = getenv("XV6_WLCOMP_FRAME_PERF");
+    if (env && *env)
+        enabled = strcmp(env, "0") != 0 && strcmp(env, "no") != 0 &&
+                  strcmp(env, "false") != 0 && strcmp(env, "off") != 0;
+    return enabled;
+}
+
+static int surface_frame_callback_count(struct wlcomp_surface *surf)
+{
+    struct wlcomp_frame_callback *cb;
+    int count = 0;
+
+    if (!surf)
+        return 0;
+    wl_list_for_each(cb, &surf->frame_callbacks, link)
+        count++;
+    return count;
+}
+
+static int frame_callbacks_pending_count(void)
+{
+    struct wlcomp_surface *surf;
+    int count = 0;
+
+    wl_list_for_each(surf, &g_surfaces, link)
+        count += surface_frame_callback_count(surf);
+    return count;
+}
+
+static void frame_perf_note(uint32_t now, const char *stage, int pending_before,
+                            int delivered, int blocked, int due)
+{
+    static uint32_t last_log_ms;
+    static uint32_t last_delivery_ms;
+    static uint64_t delivered_total;
+    static uint64_t blocked_total;
+    static uint64_t pending_total;
+    static uint64_t pending_nonzero_total;
+    static uint64_t samples;
+    static uint64_t pending_samples;
+    static uint64_t due_samples;
+    static uint64_t not_due_samples;
+    static uint64_t delivery_interval_total_ms;
+    static uint32_t delivery_interval_max_ms;
+    uint32_t interval_ms = 0;
+
+    if (!frame_perf_enabled())
+        return;
+    samples++;
+    pending_total += (uint64_t)pending_before;
+    if (pending_before > 0) {
+        pending_samples++;
+        pending_nonzero_total += (uint64_t)pending_before;
+    }
+    if (due)
+        due_samples++;
+    else
+        not_due_samples++;
+    delivered_total += (uint64_t)delivered;
+    blocked_total += (uint64_t)blocked;
+    if (delivered > 0) {
+        if (last_delivery_ms != 0) {
+            interval_ms = now - last_delivery_ms;
+            delivery_interval_total_ms += interval_ms;
+            if (interval_ms > delivery_interval_max_ms)
+                delivery_interval_max_ms = interval_ms;
+        }
+        last_delivery_ms = now;
+    }
+    if (last_log_ms == 0)
+        last_log_ms = now;
+    if (now - last_log_ms < 1000)
+        return;
+
+    fprintf(stderr,
+            "wlcomp: frame callbacks stage=%s interval=%d samples=%lu "
+            "pending_samples=%lu empty_samples=%lu due=%lu not_due=%lu "
+            "delivered=%lu blocked=%lu pending_avg=%lu "
+            "pending_nonzero_avg=%lu delivery_avg_ms=%lu "
+            "delivery_max_ms=%u last_delivered=%d last_pending=%d "
+            "last_interval_ms=%u\n",
+            stage ? stage : "unknown", frame_callback_interval_ms(),
+            (unsigned long)samples, (unsigned long)pending_samples,
+            (unsigned long)(samples - pending_samples),
+            (unsigned long)due_samples, (unsigned long)not_due_samples,
+            (unsigned long)delivered_total,
+            (unsigned long)blocked_total,
+            samples ? (unsigned long)(pending_total / samples) : 0,
+            pending_samples ?
+                (unsigned long)(pending_nonzero_total / pending_samples) : 0,
+            delivered_total > 1 ?
+                (unsigned long)(delivery_interval_total_ms /
+                                (delivered_total - 1)) : 0,
+            delivery_interval_max_ms, delivered, pending_before,
+            interval_ms);
+    last_log_ms = now;
+    delivered_total = 0;
+    blocked_total = 0;
+    pending_total = 0;
+    pending_nonzero_total = 0;
+    samples = 0;
+    pending_samples = 0;
+    due_samples = 0;
+    not_due_samples = 0;
+    delivery_interval_total_ms = 0;
+    delivery_interval_max_ms = 0;
+}
+
+static void frame_perf_note_loop_wait(int requested_ms, uint32_t elapsed_ms,
+                                      int pending_before, int nready)
+{
+    static uint32_t last_log_ms;
+    static uint64_t samples;
+    static uint64_t pending_samples;
+    static uint64_t ready_samples;
+    static uint64_t timeout_samples;
+    static uint64_t requested_total_ms;
+    static uint64_t elapsed_total_ms;
+    static uint32_t elapsed_max_ms;
+    uint32_t now;
+
+    if (!frame_perf_enabled())
+        return;
+
+    samples++;
+    if (pending_before)
+        pending_samples++;
+    if (nready > 0)
+        ready_samples++;
+    else if (nready == 0)
+        timeout_samples++;
+    requested_total_ms += (uint64_t)requested_ms;
+    elapsed_total_ms += (uint64_t)elapsed_ms;
+    if (elapsed_ms > elapsed_max_ms)
+        elapsed_max_ms = elapsed_ms;
+
+    now = get_time_ms();
+    if (last_log_ms == 0)
+        last_log_ms = now;
+    if (now - last_log_ms < 1000)
+        return;
+
+    fprintf(stderr,
+            "wlcomp: frame loop wait samples=%lu pending_samples=%lu "
+            "ready=%lu timeout=%lu request_avg_ms=%lu elapsed_avg_ms=%lu "
+            "elapsed_max_ms=%u last_request_ms=%d last_elapsed_ms=%u "
+            "last_pending=%d last_nready=%d\n",
+            (unsigned long)samples, (unsigned long)pending_samples,
+            (unsigned long)ready_samples, (unsigned long)timeout_samples,
+            samples ? (unsigned long)(requested_total_ms / samples) : 0,
+            samples ? (unsigned long)(elapsed_total_ms / samples) : 0,
+            elapsed_max_ms, requested_ms, elapsed_ms, pending_before, nready);
+
+    last_log_ms = now;
+    samples = 0;
+    pending_samples = 0;
+    ready_samples = 0;
+    timeout_samples = 0;
+    requested_total_ms = 0;
+    elapsed_total_ms = 0;
+    elapsed_max_ms = 0;
 }
 
 static int surface_has_unpresented_d3d12_buffer(struct wlcomp_surface *surf)
@@ -474,24 +773,46 @@ static int surface_has_unpresented_d3d12_buffer(struct wlcomp_surface *surf)
 static void damage_all_frame_callbacks(uint32_t now)
 {
     struct wlcomp_surface *cb_surf;
+    int pending_before = frame_callbacks_pending_count();
+    int delivered = 0;
+    int blocked = 0;
+    int due;
 
-    if (!frame_callbacks_due(now))
+    if (pending_before <= 0) {
+        frame_perf_note(now, "damage", pending_before, 0, 0, 0);
         return;
+    }
+
+    due = frame_callbacks_due(now);
+    if (!due) {
+        frame_perf_note(now, "damage", pending_before, 0, 0, 0);
+        return;
+    }
 
     wl_list_for_each(cb_surf, &g_surfaces, link) {
         struct wlcomp_frame_callback *cb;
         struct wlcomp_frame_callback *tmp;
 
-        if (surface_has_unpresented_d3d12_buffer(cb_surf))
+        if (surface_has_unpresented_d3d12_buffer(cb_surf)) {
+            blocked += surface_frame_callback_count(cb_surf);
             continue;
+        }
         wl_list_for_each_safe(cb, tmp, &cb_surf->frame_callbacks, link) {
             xv6_d3d12_observe_frame_callback(cb_surf, now);
             wl_callback_send_done(cb->resource, now);
             wl_resource_destroy(cb->resource);
             wl_list_remove(&cb->link);
             free(cb);
+            delivered++;
         }
     }
+    frame_perf_note(now, "damage", pending_before, delivered, blocked, 1);
+}
+
+static void frame_perf_note_after_present(uint32_t now, int pending_before,
+                                          int delivered, int due)
+{
+    frame_perf_note(now, "after_present", pending_before, delivered, 0, due);
 }
 
 static int any_frame_callbacks_pending(void)

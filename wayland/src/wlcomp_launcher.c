@@ -886,8 +886,9 @@ static int url_needs_network_wait(const char *url)
            strncmp(url, "http://localhost", 16) != 0;
 }
 
-void wlcomp_launcher_launch(const char *path, const char *name,
-                            const char *arg)
+void wlcomp_launcher_launch_args(const char *path, const char *name,
+                                 const char *arg1, const char *arg2,
+                                 const char *arg3)
 {
     if (!path) return;
     if (!path[0] || access(path, X_OK) != 0) return;
@@ -925,7 +926,7 @@ void wlcomp_launcher_launch(const char *path, const char *name,
         if (is_webkit)
             disable_child_coredumps();
 
-        if (!is_webkitgpusmoke) {
+        if (!is_webkitgpusmoke && !is_mesa_gl) {
             int logfd = open("/tmp/app_log.txt",
                              O_WRONLY | O_CREAT | O_TRUNC, 0644);
             if (logfd >= 0) {
@@ -958,14 +959,24 @@ void wlcomp_launcher_launch(const char *path, const char *name,
             }
         }
 
-        if (is_minibrowser && url_needs_network_wait(arg)) {
-            fprintf(stderr, "wlcomp: waiting for network before %s\n", arg);
+        if (is_minibrowser && url_needs_network_wait(arg1)) {
+            fprintf(stderr, "wlcomp: waiting for network before %s\n", arg1);
             if (wlcomp_sync_resolv_conf_from_netconf(WEBKIT_NET_WAIT_US) != 0)
                 usleep(WEBKIT_NET_WAIT_US);
         }
 
-        char *argv_def[] = { (char *)app_name, (char *)arg, NULL };
+        char *argv_def[5];
         char *argv_noarg[] = { (char *)app_name, NULL };
+        int argv_def_i = 0;
+
+        argv_def[argv_def_i++] = (char *)app_name;
+        if (arg1)
+            argv_def[argv_def_i++] = (char *)arg1;
+        if (arg2)
+            argv_def[argv_def_i++] = (char *)arg2;
+        if (arg3)
+            argv_def[argv_def_i++] = (char *)arg3;
+        argv_def[argv_def_i] = NULL;
         char *argv_minibrowser[] = {
             (char *)app_name,
             "--autoplay-policy=allow",
@@ -980,7 +991,7 @@ void wlcomp_launcher_launch(const char *path, const char *name,
             "--enable-dns-prefetching=false",
             "--enable-offline-web-application-cache=false",
             (char *)webkit_feature_flags,
-            (char *)(arg ? arg : WEBKIT_DEFAULT_URL),
+            (char *)(arg1 ? arg1 : WEBKIT_DEFAULT_URL),
             NULL,
         };
         char *argv_minibrowser_js[] = {
@@ -997,7 +1008,7 @@ void wlcomp_launcher_launch(const char *path, const char *name,
             "--enable-dns-prefetching=false",
             "--enable-offline-web-application-cache=false",
             (char *)webkit_feature_flags,
-            (char *)(arg ? arg : WEBKIT_DEFAULT_URL),
+            (char *)(arg1 ? arg1 : WEBKIT_DEFAULT_URL),
             NULL,
         };
         char *argv_minibrowser_accel[] = {
@@ -1014,7 +1025,7 @@ void wlcomp_launcher_launch(const char *path, const char *name,
             "--enable-dns-prefetching=false",
             "--enable-offline-web-application-cache=false",
             (char *)webkit_feature_flags,
-            (char *)(arg ? arg : WEBKIT_DEFAULT_URL),
+            (char *)(arg1 ? arg1 : WEBKIT_DEFAULT_URL),
             NULL,
         };
         char *argv_minibrowser_accel_js[] = {
@@ -1031,13 +1042,17 @@ void wlcomp_launcher_launch(const char *path, const char *name,
             "--enable-dns-prefetching=false",
             "--enable-offline-web-application-cache=false",
             (char *)webkit_feature_flags,
-            (char *)(arg ? arg : WEBKIT_DEFAULT_URL),
+            (char *)(arg1 ? arg1 : WEBKIT_DEFAULT_URL),
             NULL,
         };
         char webkit_gpu_run_id_value[64];
         char webkit_gpu_run_id_env[96];
         char webkit_gpu_validate_run_id_env[112];
         char webkit_wlcomp_d3d12_run_id_env[112];
+        char mesa_perf_log_env[32];
+        char mesa_wayland_color_buffers_env[48];
+        int mesa_color_buffers =
+            launcher_cmdline_int_value("glsmoke_color_buffers", 0);
 
         snprintf(webkit_gpu_run_id_value, sizeof(webkit_gpu_run_id_value),
                  "webkit-%d-%ld", getpid(), (long)time(NULL));
@@ -1049,7 +1064,18 @@ void wlcomp_launcher_launch(const char *path, const char *name,
         snprintf(webkit_wlcomp_d3d12_run_id_env,
                  sizeof(webkit_wlcomp_d3d12_run_id_env),
                  "XV6_WLCOMP_D3D12_RUN_ID=%s", webkit_gpu_run_id_value);
-        char **argv = arg ? argv_def : argv_noarg;
+        snprintf(mesa_perf_log_env, sizeof(mesa_perf_log_env),
+                 "XV6_MESA_PERF_LOG=%d",
+                 launcher_cmdline_int_value("glsmoke_mesa_perf", 0) != 0);
+        if (mesa_color_buffers < 0)
+            mesa_color_buffers = 0;
+        if (mesa_color_buffers > 4)
+            mesa_color_buffers = 4;
+        snprintf(mesa_wayland_color_buffers_env,
+                 sizeof(mesa_wayland_color_buffers_env),
+                 "XV6_MESA_WAYLAND_COLOR_BUFFERS=%d",
+                 mesa_color_buffers);
+        char **argv = (arg1 || arg2 || arg3) ? argv_def : argv_noarg;
         char *envp_default[] = {
             "HOME=/",
             "PATH=/bin:/usr/bin",
@@ -1199,7 +1225,7 @@ void wlcomp_launcher_launch(const char *path, const char *name,
             "MESA_LOADER_DRIVER_OVERRIDE=d3d12",
             "GALLIUM_DRIVER=d3d12",
             "EGL_PLATFORM=wayland",
-            "XV6_MESA_WAYLAND_THROTTLE=0",
+            "XV6_MESA_WAYLAND_THROTTLE=1",
             "XV6_MESA_WAYLAND_XV6GPU=1",
             "XV6_MESA_PERF_LOG=0",
             "XV6_MESA_WAYLAND_INPLACE_PRESENT=1",
@@ -1272,7 +1298,10 @@ void wlcomp_launcher_launch(const char *path, const char *name,
             "LIBGL_ALWAYS_SOFTWARE=0",
             "GALLIUM_DRIVER=virgl",
             "EGL_PLATFORM=wayland",
+            "XV6_MESA_WAYLAND_THROTTLE=1",
+            mesa_perf_log_env,
             "XV6_MESAWLEGL_SHM_PRESENT=0",
+            mesa_wayland_color_buffers_env,
             NULL
         };
         char *envp_mesa_dxg[] = {
@@ -1292,7 +1321,8 @@ void wlcomp_launcher_launch(const char *path, const char *name,
             "EGL_PLATFORM=wayland",
             "XV6_MESA_WAYLAND_THROTTLE=0",
             "XV6_MESA_WAYLAND_XV6GPU=1",
-            "XV6_MESA_PERF_LOG=0",
+            mesa_perf_log_env,
+            mesa_wayland_color_buffers_env,
             "XV6_MESA_WAYLAND_INPLACE_PRESENT=1",
             "XV6_D3D12_ENABLE_NATIVE_PRESENT=1",
             "XV6_D3D12_PRESENT_INTERVAL=1",
@@ -1315,6 +1345,7 @@ void wlcomp_launcher_launch(const char *path, const char *name,
             "EGL_PLATFORM=wayland",
             "MESA_LOADER_DRIVER_OVERRIDE=swrast",
             "LIBGL_DRIVERS_PATH=/lib/dri",
+            mesa_wayland_color_buffers_env,
             NULL
         };
         char **envp = envp_default;
@@ -1364,6 +1395,12 @@ void wlcomp_launcher_launch(const char *path, const char *name,
     snprintf(g_child_name[slot], sizeof(g_child_name[slot]), "%s",
              app_name);
     fprintf(stderr, "wlcomp: launched %s (pid %d)\n", app_name, pid);
+}
+
+void wlcomp_launcher_launch(const char *path, const char *name,
+                            const char *arg)
+{
+    wlcomp_launcher_launch_args(path, name, arg, NULL, NULL);
 }
 
 void wlcomp_launcher_launch_noarg(const char *path, const char *name)

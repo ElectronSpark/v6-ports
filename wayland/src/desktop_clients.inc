@@ -924,6 +924,37 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
         char *webkit_gdk_gl_env =
             webkit_disable_gdk_gl_by_cmdline() ? "GDK_GL=disable" :
                                                  "GDK_GL=gles";
+        char mesa_wayland_color_buffers_env[48] =
+            "XV6_MESA_WAYLAND_COLOR_BUFFERS=0";
+        char mesa_perf_log_env[32] = "XV6_MESA_PERF_LOG=0";
+        char mesa_wayland_throttle_env[40] = "XV6_MESA_WAYLAND_THROTTLE=1";
+        if (is_mesa_gl) {
+            char mesa_cmdline_buf[512];
+
+            if (read_cmdline(mesa_cmdline_buf, sizeof(mesa_cmdline_buf)) == 0) {
+                int mesa_color_buffers =
+                    cmdline_int_value(mesa_cmdline_buf,
+                                      "glsmoke_color_buffers", 0);
+
+                if (mesa_color_buffers < 0)
+                    mesa_color_buffers = 0;
+                if (mesa_color_buffers > 4)
+                    mesa_color_buffers = 4;
+                snprintf(mesa_wayland_color_buffers_env,
+                         sizeof(mesa_wayland_color_buffers_env),
+                         "XV6_MESA_WAYLAND_COLOR_BUFFERS=%d",
+                         mesa_color_buffers);
+                snprintf(mesa_perf_log_env, sizeof(mesa_perf_log_env),
+                         "XV6_MESA_PERF_LOG=%d",
+                         cmdline_int_value(mesa_cmdline_buf,
+                                           "glsmoke_mesa_perf", 0) != 0);
+                snprintf(mesa_wayland_throttle_env,
+                         sizeof(mesa_wayland_throttle_env),
+                         "XV6_MESA_WAYLAND_THROTTLE=%d",
+                         cmdline_int_value(mesa_cmdline_buf,
+                                           "glsmoke_mesa_throttle", 1) != 0);
+            }
+        }
         char *argv_minibrowser[] = {
             (char *)app_name,
             "--autoplay-policy=allow",
@@ -1317,7 +1348,10 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             "LIBGL_ALWAYS_SOFTWARE=0",
             "GALLIUM_DRIVER=virgl",
             "EGL_PLATFORM=wayland",
+            mesa_wayland_throttle_env,
+            mesa_perf_log_env,
             "XV6_MESAWLEGL_SHM_PRESENT=0",
+            mesa_wayland_color_buffers_env,
             NULL
         };
         char *envp_mesa_dxg[] = {
@@ -1335,15 +1369,16 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             "GALLIUM_DRIVER=d3d12",
             "LIBGL_DRIVERS_PATH=/lib/dri",
             "EGL_PLATFORM=wayland",
-            "XV6_MESA_WAYLAND_THROTTLE=0",
+            mesa_wayland_throttle_env,
             "XV6_MESA_WAYLAND_XV6GPU=1",
-            "XV6_MESA_PERF_LOG=0",
+            mesa_perf_log_env,
             "XV6_MESA_WAYLAND_INPLACE_PRESENT=1",
             "XV6_D3D12_ENABLE_NATIVE_PRESENT=1",
             "XV6_D3D12_PRESENT_INTERVAL=1",
             "XV6_D3D12_REQUIRE_NATIVE_PRESENT=1",
             "XV6_D3D12_COPY_EXPORT=0",
             "vblank_mode=0",
+            mesa_wayland_color_buffers_env,
             NULL
         };
         char *envp_mesa_accel_sw[] = {
@@ -1360,6 +1395,7 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             "EGL_PLATFORM=wayland",
             "MESA_LOADER_DRIVER_OVERRIDE=swrast",
             "LIBGL_DRIVERS_PATH=/lib/dri",
+            mesa_wayland_color_buffers_env,
             NULL
         };
         int minibrowser_accel =

@@ -6,6 +6,9 @@ static uint32_t *g_fb_buf;  /* compositing buffer */
 static uint64_t g_fb_bo_size;
 static uint32_t g_fb_bo_handle;
 static int      g_fb_bo_backed;
+static int      g_fb_virgl_backed;
+static uint32_t g_fb_virgl_ctx_id;
+static uint32_t g_fb_virgl_resource_id;
 static int      g_fb_direct_scanout;
 static uint64_t g_fb_bo_last_present_fence;
 static uint64_t g_fb_bo_last_signaled_fence;
@@ -71,9 +74,29 @@ static uint64_t g_damage_interval_max_ms;
 static uint64_t g_fb_blit_present_attempt_count;
 static uint64_t g_fb_blit_present_success_count;
 
+struct wlcomp_virgl_fb_target {
+    uint32_t *buf;
+    uint32_t pitch;
+    uint64_t size;
+    uint32_t bo_handle;
+    uint32_t resource_id;
+};
+
+static struct wlcomp_virgl_fb_target g_fb_virgl_back_target;
+static int g_fb_virgl_back_target_ready;
+static struct wlcomp_virgl_fb_target g_fb_virgl_extra_target;
+static int g_fb_virgl_extra_target_ready;
+static uint64_t g_fb_virgl_flip_count;
+
 #define MAX_RELEASE_QUEUE 64
 static struct wlcomp_buffer *g_release_queue[MAX_RELEASE_QUEUE];
 static int g_release_queue_count;
+static uint64_t g_buffer_release_trace_total;
+static uint64_t g_buffer_release_trace_gpu_immediate;
+static uint64_t g_buffer_release_trace_queued;
+static uint64_t g_buffer_release_trace_flushed;
+static uint64_t g_scanout_trace_submits;
+static uint64_t g_scanout_trace_rebinds;
 
 /* Input state */
 static int      g_mouse_fd = -1;
@@ -173,6 +196,18 @@ static void damage_full_reason(enum full_damage_reason reason)
         reason = FULL_DAMAGE_OTHER;
     g_damage_stats.full_damage[reason]++;
     g_full_repaint_pending = 1;
+    g_damage[0].x1 = 0;
+    g_damage[0].y1 = 0;
+    g_damage[0].x2 = (int32_t)g_fb_w;
+    g_damage[0].y2 = (int32_t)g_fb_h;
+    g_damage_count = 1;
+}
+
+static void damage_full_for_flip(void)
+{
+    if (g_fb_w == 0 || g_fb_h == 0)
+        return;
+    g_damage_stats.full_damage[FULL_DAMAGE_OTHER]++;
     g_damage[0].x1 = 0;
     g_damage[0].y1 = 0;
     g_damage[0].x2 = (int32_t)g_fb_w;
@@ -348,6 +383,44 @@ static void release_framebuffer_backing(void)
     if (g_fb_direct_scanout) {
         munmap(g_fb_buf, g_fb_bo_size);
     } else if (g_fb_bo_backed) {
+        if (g_fb_virgl_back_target_ready) {
+            if (g_fb_virgl_back_target.bo_handle) {
+                struct fb_gpu_bo_destroy destroy;
+
+                memset(&destroy, 0, sizeof(destroy));
+                destroy.handle = g_fb_virgl_back_target.bo_handle;
+                ioctl(g_fb_fd, FB_GPU_BO_DESTROY, &destroy);
+            }
+            if (g_fb_virgl_back_target.buf)
+                munmap(g_fb_virgl_back_target.buf,
+                       g_fb_virgl_back_target.size);
+            if (g_fb_virgl_back_target.resource_id) {
+                struct fb_gpu_virgl_resource_destroy destroy_res;
+
+                memset(&destroy_res, 0, sizeof(destroy_res));
+                destroy_res.resource_id = g_fb_virgl_back_target.resource_id;
+                ioctl(g_fb_fd, FB_GPU_VIRGL_RESOURCE_DESTROY, &destroy_res);
+            }
+        }
+        if (g_fb_virgl_extra_target_ready) {
+            if (g_fb_virgl_extra_target.bo_handle) {
+                struct fb_gpu_bo_destroy destroy;
+
+                memset(&destroy, 0, sizeof(destroy));
+                destroy.handle = g_fb_virgl_extra_target.bo_handle;
+                ioctl(g_fb_fd, FB_GPU_BO_DESTROY, &destroy);
+            }
+            if (g_fb_virgl_extra_target.buf)
+                munmap(g_fb_virgl_extra_target.buf,
+                       g_fb_virgl_extra_target.size);
+            if (g_fb_virgl_extra_target.resource_id) {
+                struct fb_gpu_virgl_resource_destroy destroy_res;
+
+                memset(&destroy_res, 0, sizeof(destroy_res));
+                destroy_res.resource_id = g_fb_virgl_extra_target.resource_id;
+                ioctl(g_fb_fd, FB_GPU_VIRGL_RESOURCE_DESTROY, &destroy_res);
+            }
+        }
         if (g_fb_bo_handle) {
             struct fb_gpu_bo_destroy destroy;
 
@@ -356,6 +429,20 @@ static void release_framebuffer_backing(void)
             ioctl(g_fb_fd, FB_GPU_BO_DESTROY, &destroy);
         }
         munmap(g_fb_buf, g_fb_bo_size);
+        if (g_fb_virgl_resource_id) {
+            struct fb_gpu_virgl_resource_destroy destroy_res;
+
+            memset(&destroy_res, 0, sizeof(destroy_res));
+            destroy_res.resource_id = g_fb_virgl_resource_id;
+            ioctl(g_fb_fd, FB_GPU_VIRGL_RESOURCE_DESTROY, &destroy_res);
+        }
+        if (g_fb_virgl_ctx_id) {
+            struct fb_gpu_virgl_ctx destroy_ctx;
+
+            memset(&destroy_ctx, 0, sizeof(destroy_ctx));
+            destroy_ctx.ctx_id = g_fb_virgl_ctx_id;
+            ioctl(g_fb_fd, FB_GPU_VIRGL_CTX_DESTROY, &destroy_ctx);
+        }
     } else {
         free(g_fb_buf);
     }
@@ -363,7 +450,600 @@ static void release_framebuffer_backing(void)
     g_fb_bo_size = 0;
     g_fb_bo_handle = 0;
     g_fb_bo_backed = 0;
+    g_fb_virgl_backed = 0;
+    g_fb_virgl_ctx_id = 0;
+    g_fb_virgl_resource_id = 0;
     g_fb_direct_scanout = 0;
+    memset(&g_fb_virgl_back_target, 0, sizeof(g_fb_virgl_back_target));
+    g_fb_virgl_back_target_ready = 0;
+    memset(&g_fb_virgl_extra_target, 0, sizeof(g_fb_virgl_extra_target));
+    g_fb_virgl_extra_target_ready = 0;
+    g_fb_virgl_flip_count = 0;
+}
+
+static int wlcomp_virgl_fb_flip_enabled(void)
+{
+    static int initialized;
+    static int enabled;
+    const char *env;
+
+    if (initialized)
+        return enabled;
+    initialized = 1;
+    enabled = cmdline_int_value("wlcomp_virgl_fb_flip", 0) != 0;
+    env = getenv("XV6_WLCOMP_VIRGL_FB_FLIP");
+    if (env && *env)
+        enabled = strcmp(env, "0") != 0 && strcmp(env, "no") != 0 &&
+                  strcmp(env, "false") != 0 && strcmp(env, "off") != 0;
+    return enabled;
+}
+
+static int wlcomp_page_flip_present_enabled(void)
+{
+    static int initialized;
+    static int enabled;
+    const char *env;
+
+    if (initialized)
+        return enabled;
+    initialized = 1;
+    enabled = cmdline_int_value("wlcomp_page_flip_present", 0) != 0;
+    env = getenv("XV6_WLCOMP_PAGE_FLIP_PRESENT");
+    if (env && *env)
+        enabled = strcmp(env, "0") != 0 &&
+                  strcmp(env, "no") != 0 &&
+                  strcmp(env, "false") != 0 &&
+                  strcmp(env, "off") != 0;
+    return enabled;
+}
+
+static int wlcomp_scanout_perf_enabled(void)
+{
+    static int initialized;
+    static int enabled;
+    const char *env;
+
+    if (initialized)
+        return enabled;
+    initialized = 1;
+    enabled = cmdline_int_value("wlcomp_scanout_perf", 0) != 0;
+    env = getenv("XV6_WLCOMP_SCANOUT_PERF");
+    if (env && *env)
+        enabled = strcmp(env, "0") != 0 &&
+                  strcmp(env, "no") != 0 &&
+                  strcmp(env, "false") != 0 &&
+                  strcmp(env, "off") != 0;
+    if (enabled)
+        fprintf(stderr, "wlcomp: scanout perf diagnostics enabled\n");
+    return enabled;
+}
+
+static void wlcomp_scanout_perf_note(uint64_t dt_us, uint32_t x, uint32_t y,
+                                     uint32_t w, uint32_t h, int ret,
+                                     int page_flip)
+{
+    static uint32_t next_log_ms;
+    static uint64_t submits;
+    static uint64_t failures;
+    static uint64_t page_flips;
+    static uint64_t total_us;
+    static uint64_t max_us;
+    static uint64_t pixels;
+    static uint64_t bucket_lt2;
+    static uint64_t bucket_2_5;
+    static uint64_t bucket_5_10;
+    static uint64_t bucket_10_20;
+    static uint64_t bucket_ge20;
+    static uint32_t last_x, last_y, last_w, last_h;
+    uint32_t now;
+    uint64_t count;
+
+    if (!wlcomp_scanout_perf_enabled())
+        return;
+    submits++;
+    if (ret != 0)
+        failures++;
+    if (page_flip)
+        page_flips++;
+    total_us += dt_us;
+    if (dt_us > max_us)
+        max_us = dt_us;
+    pixels += (uint64_t)w * h;
+    if (dt_us < 2000)
+        bucket_lt2++;
+    else if (dt_us < 5000)
+        bucket_2_5++;
+    else if (dt_us < 10000)
+        bucket_5_10++;
+    else if (dt_us < 20000)
+        bucket_10_20++;
+    else
+        bucket_ge20++;
+    last_x = x;
+    last_y = y;
+    last_w = w;
+    last_h = h;
+
+    now = get_time_ms();
+    if (next_log_ms == 0)
+        next_log_ms = now + 1000;
+    if (now < next_log_ms)
+        return;
+    count = submits ? submits : 1;
+    fprintf(stderr,
+            "wlcomp: scanout-perf submits=%lu failures=%lu page_flips=%lu "
+            "avg_us=%lu max_us=%lu avg_pixels=%lu "
+            "buckets_lt2=%lu b2_5=%lu b5_10=%lu b10_20=%lu b20p=%lu "
+            "last_rect=%u,%u %ux%u\n",
+            (unsigned long)submits,
+            (unsigned long)failures,
+            (unsigned long)page_flips,
+            (unsigned long)(total_us / count),
+            (unsigned long)max_us,
+            (unsigned long)(pixels / count),
+            (unsigned long)bucket_lt2,
+            (unsigned long)bucket_2_5,
+            (unsigned long)bucket_5_10,
+            (unsigned long)bucket_10_20,
+            (unsigned long)bucket_ge20,
+            last_x, last_y, last_w, last_h);
+    submits = 0;
+    failures = 0;
+    page_flips = 0;
+    total_us = 0;
+    max_us = 0;
+    pixels = 0;
+    bucket_lt2 = 0;
+    bucket_2_5 = 0;
+    bucket_5_10 = 0;
+    bucket_10_20 = 0;
+    bucket_ge20 = 0;
+    next_log_ms = now + 1000;
+}
+
+static int wlcomp_virgl_framebuffer_flip_ready(void)
+{
+    return g_fb_virgl_backed && g_fb_virgl_back_target_ready &&
+           (wlcomp_virgl_fb_flip_enabled() ||
+            wlcomp_page_flip_present_enabled());
+}
+
+static int wlcomp_virgl_fb_copy_before_flip_enabled(void)
+{
+    static int initialized;
+    static int enabled;
+    const char *env;
+
+    if (initialized)
+        return enabled;
+    initialized = 1;
+    enabled = cmdline_int_value("wlcomp_virgl_fb_copy_before_flip", 0) != 0;
+    env = getenv("XV6_WLCOMP_VIRGL_FB_COPY_BEFORE_FLIP");
+    if (env && *env)
+        enabled = strcmp(env, "0") != 0 && strcmp(env, "no") != 0 &&
+                  strcmp(env, "false") != 0 && strcmp(env, "off") != 0;
+    return enabled;
+}
+
+static int wlcomp_virgl_fb_copy_damage_before_flip_enabled(void)
+{
+    static int initialized;
+    static int enabled;
+    const char *env;
+
+    if (initialized)
+        return enabled;
+    initialized = 1;
+    enabled = cmdline_int_value("wlcomp_virgl_fb_copy_damage_before_flip", 0) != 0;
+    env = getenv("XV6_WLCOMP_VIRGL_FB_COPY_DAMAGE_BEFORE_FLIP");
+    if (env && *env)
+        enabled = strcmp(env, "0") != 0 && strcmp(env, "no") != 0 &&
+                  strcmp(env, "false") != 0 && strcmp(env, "off") != 0;
+    return enabled;
+}
+
+static int wlcomp_virgl_swap_render_target(void)
+{
+    struct wlcomp_virgl_fb_target old_front;
+    static int flip_logs;
+
+    if (!wlcomp_virgl_framebuffer_flip_ready())
+        return 0;
+    old_front.buf = g_fb_buf;
+    old_front.pitch = g_fb_pitch;
+    old_front.size = g_fb_bo_size;
+    old_front.bo_handle = g_fb_bo_handle;
+    old_front.resource_id = g_fb_virgl_resource_id;
+
+    if (!old_front.buf || old_front.pitch == 0 ||
+        old_front.bo_handle == 0 || old_front.resource_id == 0 ||
+        !g_fb_virgl_back_target.buf ||
+        g_fb_virgl_back_target.pitch == 0 ||
+        g_fb_virgl_back_target.bo_handle == 0 ||
+        g_fb_virgl_back_target.resource_id == 0)
+        return 0;
+
+    g_fb_buf = g_fb_virgl_back_target.buf;
+    g_fb_pitch = g_fb_virgl_back_target.pitch;
+    g_fb_bo_size = g_fb_virgl_back_target.size;
+    g_fb_bo_handle = g_fb_virgl_back_target.bo_handle;
+    g_fb_virgl_resource_id = g_fb_virgl_back_target.resource_id;
+    if (g_fb_virgl_extra_target_ready) {
+        g_fb_virgl_back_target = g_fb_virgl_extra_target;
+        g_fb_virgl_extra_target = old_front;
+    } else {
+        g_fb_virgl_back_target = old_front;
+    }
+    g_fb_virgl_flip_count++;
+
+    if (flip_logs < 16) {
+        fprintf(stderr,
+                "wlcomp: virgl framebuffer flip render_res=%u render_handle=%u back_res=%u back_handle=%u extra_res=%u extra_handle=%u count=%lu\n",
+                g_fb_virgl_resource_id, g_fb_bo_handle,
+                g_fb_virgl_back_target.resource_id,
+                g_fb_virgl_back_target.bo_handle,
+                g_fb_virgl_extra_target_ready ?
+                    g_fb_virgl_extra_target.resource_id : 0,
+                g_fb_virgl_extra_target_ready ?
+                    g_fb_virgl_extra_target.bo_handle : 0,
+                (unsigned long)g_fb_virgl_flip_count);
+        flip_logs++;
+    }
+    return 1;
+}
+
+static int wlcomp_virgl_copy_displayed_to_render_target_rects(
+    const struct damage_rect *rects, int rect_count)
+{
+    struct fb_gpu_bo_copy copy;
+    struct damage_rect u;
+    uint64_t copy_pixels;
+    int full_copy;
+    static int copy_logs;
+    static int copy_error_logs;
+    static uint64_t stat_copies;
+    static uint64_t stat_pixels;
+    static uint64_t stat_full;
+    static uint64_t stat_partial;
+    static uint32_t next_stat_ms;
+
+    if (!wlcomp_virgl_framebuffer_flip_ready() ||
+        !wlcomp_virgl_fb_copy_before_flip_enabled())
+        return 0;
+    if (g_fb_bo_handle == 0 ||
+        g_fb_virgl_back_target.bo_handle == 0 ||
+        g_fb_w == 0 || g_fb_h == 0)
+        return 0;
+
+    if (rects && rect_count > 0 &&
+        wlcomp_virgl_fb_copy_damage_before_flip_enabled()) {
+        int copied = 0;
+
+        for (int i = 0; i < rect_count; i++) {
+            struct damage_rect r = rects[i];
+            uint64_t copy_pixels;
+            int full_copy;
+
+            if (r.x1 < 0) r.x1 = 0;
+            if (r.y1 < 0) r.y1 = 0;
+            if (r.x2 > (int32_t)g_fb_w) r.x2 = (int32_t)g_fb_w;
+            if (r.y2 > (int32_t)g_fb_h) r.y2 = (int32_t)g_fb_h;
+            if (r.x1 >= r.x2 || r.y1 >= r.y2)
+                continue;
+            memset(&copy, 0, sizeof(copy));
+            copy.src_handle = g_fb_virgl_back_target.bo_handle;
+            copy.dst_handle = g_fb_bo_handle;
+            copy.src_x = (uint32_t)r.x1;
+            copy.src_y = (uint32_t)r.y1;
+            copy.dst_x = (uint32_t)r.x1;
+            copy.dst_y = (uint32_t)r.y1;
+            copy.w = (uint32_t)(r.x2 - r.x1);
+            copy.h = (uint32_t)(r.y2 - r.y1);
+            if (ioctl(g_fb_fd, FB_GPU_BO_COPY, &copy) != 0) {
+                if (copy_error_logs < 8) {
+                    fprintf(stderr,
+                            "wlcomp: virgl framebuffer copy-before-flip failed errno=%d (%s) src_handle=%u dst_handle=%u rect=%u,%u %ux%u\n",
+                            errno, strerror(errno), copy.src_handle,
+                            copy.dst_handle, copy.dst_x, copy.dst_y,
+                            copy.w, copy.h);
+                    copy_error_logs++;
+                }
+                return 0;
+            }
+            copied = 1;
+            copy_pixels = (uint64_t)copy.w * copy.h;
+            full_copy = copy.dst_x == 0 && copy.dst_y == 0 &&
+                        copy.w == g_fb_w && copy.h == g_fb_h;
+            stat_copies++;
+            stat_pixels += copy_pixels;
+            if (full_copy)
+                stat_full++;
+            else
+                stat_partial++;
+            if (copy_logs < 16) {
+                fprintf(stderr,
+                        "wlcomp: virgl framebuffer copy-before-flip src_handle=%u dst_handle=%u rect=%u,%u %ux%u fence=%lu\n",
+                        copy.src_handle, copy.dst_handle, copy.dst_x,
+                        copy.dst_y, copy.w, copy.h,
+                        (unsigned long)copy.fence);
+                copy_logs++;
+            }
+        }
+        if (!copied)
+            return 0;
+        goto maybe_log_stats;
+    }
+
+    memset(&copy, 0, sizeof(copy));
+    copy.src_handle = g_fb_virgl_back_target.bo_handle;
+    copy.dst_handle = g_fb_bo_handle;
+    if (rects && rect_count > 0) {
+        int have = 0;
+
+        for (int i = 0; i < rect_count; i++) {
+            struct damage_rect r = rects[i];
+
+            if (r.x1 < 0) r.x1 = 0;
+            if (r.y1 < 0) r.y1 = 0;
+            if (r.x2 > (int32_t)g_fb_w) r.x2 = (int32_t)g_fb_w;
+            if (r.y2 > (int32_t)g_fb_h) r.y2 = (int32_t)g_fb_h;
+            if (r.x1 >= r.x2 || r.y1 >= r.y2)
+                continue;
+            if (!have) {
+                u = r;
+                have = 1;
+            } else {
+                rect_merge(&u, &r);
+            }
+        }
+        if (!have)
+            return 0;
+        copy.src_x = (uint32_t)u.x1;
+        copy.src_y = (uint32_t)u.y1;
+        copy.dst_x = (uint32_t)u.x1;
+        copy.dst_y = (uint32_t)u.y1;
+        copy.w = (uint32_t)(u.x2 - u.x1);
+        copy.h = (uint32_t)(u.y2 - u.y1);
+    } else {
+        copy.w = g_fb_w;
+        copy.h = g_fb_h;
+    }
+    if (ioctl(g_fb_fd, FB_GPU_BO_COPY, &copy) != 0) {
+        if (copy_error_logs < 8) {
+            fprintf(stderr,
+                    "wlcomp: virgl framebuffer copy-before-flip failed errno=%d (%s) src_handle=%u dst_handle=%u rect=%u,%u %ux%u\n",
+                    errno, strerror(errno), copy.src_handle,
+                    copy.dst_handle, copy.dst_x, copy.dst_y,
+                    copy.w, copy.h);
+            copy_error_logs++;
+        }
+        return 0;
+    }
+    copy_pixels = (uint64_t)copy.w * copy.h;
+    full_copy = copy.dst_x == 0 && copy.dst_y == 0 &&
+                copy.w == g_fb_w && copy.h == g_fb_h;
+    stat_copies++;
+    stat_pixels += copy_pixels;
+    if (full_copy)
+        stat_full++;
+    else
+        stat_partial++;
+    if (copy_logs < 16) {
+        fprintf(stderr,
+                "wlcomp: virgl framebuffer copy-before-flip src_handle=%u dst_handle=%u rect=%u,%u %ux%u fence=%lu\n",
+                copy.src_handle, copy.dst_handle, copy.dst_x, copy.dst_y,
+                copy.w, copy.h,
+                (unsigned long)copy.fence);
+        copy_logs++;
+    }
+maybe_log_stats:
+    if (next_stat_ms == 0)
+        next_stat_ms = get_time_ms() + 1000;
+    if (get_time_ms() >= next_stat_ms) {
+        uint64_t copies = stat_copies ? stat_copies : 1;
+
+        fprintf(stderr,
+                "wlcomp: virgl framebuffer copy-before-flip-stats copies=%lu avg_pixels=%lu full=%lu partial=%lu\n",
+                (unsigned long)stat_copies,
+                (unsigned long)(stat_pixels / copies),
+                (unsigned long)stat_full,
+                (unsigned long)stat_partial);
+        stat_copies = 0;
+        stat_pixels = 0;
+        stat_full = 0;
+        stat_partial = 0;
+        next_stat_ms = get_time_ms() + 1000;
+    }
+    return 1;
+}
+
+static int wlcomp_virgl_copy_displayed_to_render_target(void)
+{
+    return wlcomp_virgl_copy_displayed_to_render_target_rects(NULL, 0);
+}
+
+static int alloc_virgl_framebuffer_target(uint32_t ctx_id,
+                                          const char *label,
+                                          struct wlcomp_virgl_fb_target *out)
+{
+    struct fb_gpu_virgl_resource_create res;
+    struct fb_gpu_virgl_resource_export_fd export_fd;
+    struct fb_gpu_bo_import_fd import_fd;
+    int ret;
+
+    memset(&res, 0, sizeof(res));
+    memset(out, 0, sizeof(*out));
+    res.ctx_id = ctx_id;
+    res.target = WLCOMP_PIPE_TEXTURE_2D;
+    res.format = WLCOMP_VIRGL_FORMAT_B8G8R8A8_UNORM;
+    res.bind = WLCOMP_VIRGL_BIND_RENDER_TARGET |
+               WLCOMP_VIRGL_BIND_SAMPLER_VIEW |
+               WLCOMP_VIRGL_BIND_DISPLAY_TARGET |
+               WLCOMP_VIRGL_BIND_SCANOUT |
+               WLCOMP_VIRGL_BIND_SHARED |
+               WLCOMP_VIRGL_BIND_LINEAR;
+    res.width = g_fb_w;
+    res.height = g_fb_h;
+    res.depth = 1;
+    res.array_size = 1;
+    ret = ioctl(g_fb_fd, FB_GPU_VIRGL_RESOURCE_CREATE, &res);
+    if (ret != 0 || res.resource_id == 0 || res.addr == 0 || res.size == 0) {
+        fprintf(stderr,
+                "wlcomp: virgl framebuffer %s resource create failed ret=%d errno=%d (%s) ctx=%u res=%u addr=0x%lx size=%lu\n",
+                label, ret, errno, strerror(errno), ctx_id, res.resource_id,
+                (unsigned long)res.addr, (unsigned long)res.size);
+        return -1;
+    }
+
+    memset(&export_fd, 0, sizeof(export_fd));
+    export_fd.resource_id = res.resource_id;
+    export_fd.fd = -1;
+    ret = ioctl(g_fb_fd, FB_GPU_VIRGL_RESOURCE_EXPORT_FD, &export_fd);
+    if (ret != 0 || export_fd.fd < 0) {
+        fprintf(stderr,
+                "wlcomp: virgl framebuffer %s export failed ret=%d errno=%d (%s) res=%u fd=%d\n",
+                label, ret, errno, strerror(errno), res.resource_id,
+                export_fd.fd);
+        goto fail_res;
+    }
+
+    memset(&import_fd, 0, sizeof(import_fd));
+    import_fd.fd = export_fd.fd;
+    import_fd.format = DRM_FORMAT_XRGB8888;
+    import_fd.modifier = DRM_FORMAT_MOD_LINEAR;
+    import_fd.plane_count = 1;
+    import_fd.offsets[0] = 0;
+    import_fd.strides[0] = export_fd.pitch;
+    ret = ioctl(g_fb_fd, FB_GPU_BO_IMPORT_FD, &import_fd);
+    close(export_fd.fd);
+    if (ret != 0 || import_fd.handle == 0 ||
+        import_fd.addr == 0 || import_fd.size == 0) {
+        fprintf(stderr,
+                "wlcomp: virgl framebuffer %s import failed ret=%d errno=%d (%s) res=%u handle=%u addr=0x%lx size=%lu\n",
+                label, ret, errno, strerror(errno), res.resource_id,
+                import_fd.handle, (unsigned long)import_fd.addr,
+                (unsigned long)import_fd.size);
+        goto fail_res;
+    }
+
+    out->buf = (uint32_t *)(uintptr_t)import_fd.addr;
+    out->pitch = import_fd.pitch;
+    out->size = import_fd.size;
+    out->bo_handle = import_fd.handle;
+    out->resource_id = res.resource_id;
+    memset(out->buf, 0, (size_t)out->size);
+    fprintf(stderr,
+            "wlcomp: using virgl framebuffer %s target res=%u ctx=%u handle=%u addr=0x%lx size=%lu pitch=%u\n",
+            label, out->resource_id, ctx_id, out->bo_handle,
+            (unsigned long)import_fd.addr, (unsigned long)out->size,
+            out->pitch);
+    return 0;
+
+fail_res:
+    if (res.resource_id != 0) {
+        struct fb_gpu_virgl_resource_destroy destroy_res;
+
+        memset(&destroy_res, 0, sizeof(destroy_res));
+        destroy_res.resource_id = res.resource_id;
+        ioctl(g_fb_fd, FB_GPU_VIRGL_RESOURCE_DESTROY, &destroy_res);
+    }
+    return -1;
+}
+
+static int alloc_virgl_framebuffer_backing(void)
+{
+    struct fb_gpu_virgl_ctx ctx;
+    struct wlcomp_virgl_fb_target front;
+    int target_count;
+
+    memset(&ctx, 0, sizeof(ctx));
+    snprintf(ctx.debug_name, sizeof(ctx.debug_name), "wlcomp-scanout");
+    if (ioctl(g_fb_fd, FB_GPU_VIRGL_CTX_CREATE, &ctx) != 0 ||
+        ctx.ctx_id == 0) {
+        fprintf(stderr,
+                "wlcomp: virgl framebuffer ctx create failed errno=%d (%s)\n",
+                errno, strerror(errno));
+        return -1;
+    }
+
+    if (alloc_virgl_framebuffer_target(ctx.ctx_id, "front", &front) != 0)
+        goto fail_ctx;
+
+    g_fb_buf = front.buf;
+    g_fb_pitch = front.pitch;
+    g_fb_bo_size = front.size;
+    g_fb_bo_handle = front.bo_handle;
+    g_fb_bo_backed = 1;
+    g_fb_virgl_backed = 1;
+    g_fb_virgl_ctx_id = ctx.ctx_id;
+    g_fb_virgl_resource_id = front.resource_id;
+
+    target_count = cmdline_int_value("wlcomp_virgl_fb_buffers", 1);
+    if (target_count < 1)
+        target_count = 1;
+    if (wlcomp_page_flip_present_enabled() && target_count < 2)
+        target_count = 2;
+    if (cmdline_int_value("wlcomp_virgl_fb_buffers", 1) >= 3 &&
+        target_count < 3)
+        target_count = 3;
+    if (target_count > 1) {
+        if (alloc_virgl_framebuffer_target(ctx.ctx_id, "back",
+                                           &g_fb_virgl_back_target) == 0) {
+            g_fb_virgl_back_target_ready = 1;
+            fprintf(stderr,
+                    "wlcomp: virgl framebuffer double-buffer prep ready front_res=%u back_res=%u\n",
+                    g_fb_virgl_resource_id,
+                    g_fb_virgl_back_target.resource_id);
+        } else if (cmdline_flag_enabled("wlcomp_virgl_fb_buffers_require")) {
+            goto fail_front;
+        } else {
+            fprintf(stderr,
+                    "wlcomp: virgl framebuffer back target unavailable; continuing single-buffered\n");
+        }
+    }
+    if (target_count > 2 && g_fb_virgl_back_target_ready) {
+        if (alloc_virgl_framebuffer_target(ctx.ctx_id, "back2",
+                                           &g_fb_virgl_extra_target) == 0) {
+            g_fb_virgl_extra_target_ready = 1;
+            fprintf(stderr,
+                    "wlcomp: virgl framebuffer triple-buffer prep ready front_res=%u back_res=%u extra_res=%u\n",
+                    g_fb_virgl_resource_id,
+                    g_fb_virgl_back_target.resource_id,
+                    g_fb_virgl_extra_target.resource_id);
+        } else if (cmdline_flag_enabled("wlcomp_virgl_fb_buffers_require")) {
+            goto fail_front;
+        } else {
+            fprintf(stderr,
+                    "wlcomp: virgl framebuffer third target unavailable; continuing double-buffered\n");
+        }
+    }
+    return 0;
+
+fail_front:
+    if (g_fb_bo_handle) {
+        struct fb_gpu_bo_destroy destroy;
+
+        memset(&destroy, 0, sizeof(destroy));
+        destroy.handle = g_fb_bo_handle;
+        ioctl(g_fb_fd, FB_GPU_BO_DESTROY, &destroy);
+    }
+    if (g_fb_buf)
+        munmap(g_fb_buf, g_fb_bo_size);
+    if (g_fb_virgl_resource_id) {
+        struct fb_gpu_virgl_resource_destroy destroy_res;
+
+        memset(&destroy_res, 0, sizeof(destroy_res));
+        destroy_res.resource_id = g_fb_virgl_resource_id;
+        ioctl(g_fb_fd, FB_GPU_VIRGL_RESOURCE_DESTROY, &destroy_res);
+    }
+    g_fb_buf = NULL;
+    g_fb_bo_handle = 0;
+    g_fb_bo_size = 0;
+    g_fb_virgl_resource_id = 0;
+fail_ctx:
+    if (ctx.ctx_id != 0)
+        ioctl(g_fb_fd, FB_GPU_VIRGL_CTX_DESTROY, &ctx);
+    return -1;
 }
 
 static int alloc_framebuffer_backing(void)
@@ -374,7 +1054,12 @@ static int alloc_framebuffer_backing(void)
     const char *use_direct = getenv("XV6_WLCOMP_FB_DIRECT");
     const char *use_bo = getenv("XV6_WLCOMP_FB_BO");
     const char *use_gpu_compose = getenv("XV6_WLCOMP_GPU_COMPOSE");
+    int pageflip_diag_requested =
+        cmdline_int_value("wlcomp_pageflip_diag", 0) != 0;
+    int page_flip_present_requested = wlcomp_page_flip_present_enabled();
     int gpu_compose_requested =
+        page_flip_present_requested ||
+        pageflip_diag_requested ||
         cmdline_flag_enabled("wlcomp_gpu_compose") ||
         (use_gpu_compose && *use_gpu_compose &&
          atoi(use_gpu_compose) != 0);
@@ -410,6 +1095,14 @@ static int alloc_framebuffer_backing(void)
                 ret, errno, strerror(errno), scanout.addr, scanout.size,
                 scanout.pitch, scanout.width, scanout.height);
     }
+
+    if ((page_flip_present_requested ||
+         pageflip_diag_requested ||
+         cmdline_flag_enabled("wlcomp_virgl_fb") ||
+         cmdline_flag_enabled("wlcomp_gl_target_fb")) &&
+        !cmdline_flag_enabled("wlcomp_no_virgl_fb") &&
+        alloc_virgl_framebuffer_backing() == 0)
+        return 0;
 
     if (bo_requested) {
         int ret;
@@ -448,9 +1141,244 @@ static int alloc_framebuffer_backing(void)
     return 0;
 }
 
-static int present_damage_rects(int fb_w, uint32_t now)
+static int present_virgl_scanout_rects(const struct damage_rect *scanout_rects,
+                                       int scanout_rect_count)
 {
-    static uint32_t last_present_ms;
+    int ok = 1;
+
+    if (g_fb_virgl_backed) {
+        const struct damage_rect full_rect = {
+            0, 0, (int32_t)g_fb_w, (int32_t)g_fb_h
+        };
+        static int scanout_error_logs;
+
+        if (cmdline_flag_enabled("wlcomp_virgl_full_scanout")) {
+            scanout_rects = &full_rect;
+            scanout_rect_count = 1;
+        } else if (!scanout_rects || scanout_rect_count <= 0) {
+            scanout_rects = &full_rect;
+            scanout_rect_count = 1;
+        }
+        if (wlcomp_page_flip_present_enabled()) {
+            struct fb_gpu_page_flip flip;
+            static uint32_t last_scanout_resource_id;
+            static int page_flip_logs;
+            uint64_t t0;
+            uint64_t dt;
+            int ret;
+
+            memset(&flip, 0, sizeof(flip));
+            flip.handle = g_fb_bo_handle;
+            if (g_fb_virgl_resource_id != last_scanout_resource_id) {
+                g_scanout_trace_rebinds++;
+                last_scanout_resource_id = g_fb_virgl_resource_id;
+            }
+            g_scanout_trace_submits++;
+            t0 = wlcomp_scanout_perf_enabled() ? get_time_us() : 0;
+            ret = ioctl(g_fb_fd, FB_GPU_PAGE_FLIP, &flip);
+            dt = t0 ? get_time_us() - t0 : 0;
+            wlcomp_scanout_perf_note(dt, 0, 0, g_fb_w, g_fb_h, ret, 1);
+            if (ret == 0) {
+                if (flip.fence > g_fb_bo_last_present_fence)
+                    g_fb_bo_last_present_fence = flip.fence;
+                if (page_flip_logs < 8) {
+                    fprintf(stderr,
+                            "wlcomp: virgl framebuffer page-flip handle=%u res=%u fence=%lu\n",
+                            g_fb_bo_handle, g_fb_virgl_resource_id,
+                            (unsigned long)flip.fence);
+                    page_flip_logs++;
+                }
+                return 1;
+            }
+            ok = 0;
+            if (scanout_error_logs < 8) {
+                fprintf(stderr,
+                        "wlcomp: virgl framebuffer page-flip failed errno=%d (%s) handle=%u res=%u\n",
+                        errno, strerror(errno), g_fb_bo_handle,
+                        g_fb_virgl_resource_id);
+                scanout_error_logs++;
+            }
+            return ok;
+        }
+        if (scanout_rect_count > 1 &&
+            !cmdline_flag_enabled("wlcomp_virgl_multi_flush")) {
+            static struct damage_rect union_rect;
+
+            union_rect = scanout_rects[0];
+            for (int i = 1; i < scanout_rect_count; i++) {
+                const struct damage_rect *r = &scanout_rects[i];
+
+                if (r->x1 >= r->x2 || r->y1 >= r->y2)
+                    continue;
+                if (r->x1 < union_rect.x1) union_rect.x1 = r->x1;
+                if (r->y1 < union_rect.y1) union_rect.y1 = r->y1;
+                if (r->x2 > union_rect.x2) union_rect.x2 = r->x2;
+                if (r->y2 > union_rect.y2) union_rect.y2 = r->y2;
+            }
+            if (union_rect.x1 < 0) union_rect.x1 = 0;
+            if (union_rect.y1 < 0) union_rect.y1 = 0;
+            if (union_rect.x2 > (int32_t)g_fb_w)
+                union_rect.x2 = (int32_t)g_fb_w;
+            if (union_rect.y2 > (int32_t)g_fb_h)
+                union_rect.y2 = (int32_t)g_fb_h;
+            scanout_rects = &union_rect;
+            scanout_rect_count = 1;
+        }
+        for (int i = 0; i < scanout_rect_count; i++) {
+            const struct damage_rect *r = &scanout_rects[i];
+            struct fb_gpu_bo_present cmd;
+            static uint32_t last_scanout_resource_id;
+            uint64_t t0;
+            uint64_t dt;
+            int ret;
+
+            if (r->x1 >= r->x2 || r->y1 >= r->y2)
+                continue;
+            memset(&cmd, 0, sizeof(cmd));
+            cmd.x = (uint32_t)r->x1;
+            cmd.y = (uint32_t)r->y1;
+            cmd.w = (uint32_t)(r->x2 - r->x1);
+            cmd.h = (uint32_t)(r->y2 - r->y1);
+            cmd.src_pitch = g_fb_pitch;
+            cmd.pixels = (uint64_t)r->y1 * g_fb_pitch +
+                         (uint64_t)r->x1 * 4;
+            cmd.handle = g_fb_bo_handle;
+            cmd.flags = FB_GPU_BO_PRESENT_F_VIRGL_SCANOUT;
+            if (g_fb_virgl_resource_id != last_scanout_resource_id) {
+                g_scanout_trace_rebinds++;
+                last_scanout_resource_id = g_fb_virgl_resource_id;
+            }
+            g_scanout_trace_submits++;
+            t0 = wlcomp_scanout_perf_enabled() ? get_time_us() : 0;
+            ret = ioctl(g_fb_fd, FB_GPU_BO_PRESENT, &cmd);
+            dt = t0 ? get_time_us() - t0 : 0;
+            wlcomp_scanout_perf_note(dt, cmd.x, cmd.y, cmd.w, cmd.h, ret, 0);
+            if (ret == 0 && cmd.fence > g_fb_bo_last_present_fence) {
+                g_fb_bo_last_present_fence = cmd.fence;
+            } else if (ret != 0) {
+                ok = 0;
+                if (scanout_error_logs < 8) {
+                    fprintf(stderr,
+                            "wlcomp: virgl framebuffer scanout failed errno=%d (%s) handle=%u res=%u rect=%u,%u %ux%u\n",
+                            errno, strerror(errno), g_fb_bo_handle,
+                            g_fb_virgl_resource_id, cmd.x, cmd.y, cmd.w,
+                            cmd.h);
+                    scanout_error_logs++;
+                }
+                break;
+            }
+        }
+    }
+    return ok;
+}
+
+static int mirror_cpu_damage_to_virgl_target(
+    const struct wlcomp_virgl_fb_target *target,
+    const struct damage_rect *r)
+{
+    struct fb_gpu_virgl_transfer transfer;
+    uint32_t w;
+    uint32_t h;
+
+    if (!target || !r || !g_fb_buf || !target->buf ||
+        target->resource_id == 0 || g_fb_pitch == 0 || target->pitch == 0 ||
+        r->x1 >= r->x2 || r->y1 >= r->y2)
+        return 1;
+    w = (uint32_t)(r->x2 - r->x1);
+    h = (uint32_t)(r->y2 - r->y1);
+    for (uint32_t row = 0; row < h; row++) {
+        uint8_t *src = (uint8_t *)g_fb_buf +
+            (uint64_t)(r->y1 + (int32_t)row) * g_fb_pitch +
+            (uint64_t)r->x1 * 4;
+        uint8_t *dst = (uint8_t *)target->buf +
+            (uint64_t)(r->y1 + (int32_t)row) *
+                target->pitch +
+            (uint64_t)r->x1 * 4;
+
+        memcpy(dst, src, (size_t)w * 4);
+    }
+
+    memset(&transfer, 0, sizeof(transfer));
+    transfer.resource_id = target->resource_id;
+    transfer.x = (uint32_t)r->x1;
+    transfer.y = (uint32_t)r->y1;
+    transfer.w = w;
+    transfer.h = h;
+    transfer.d = 1;
+    transfer.offset = (uint64_t)r->y1 * target->pitch +
+                      (uint64_t)r->x1 * 4;
+    transfer.stride = target->pitch;
+    transfer.layer_stride =
+        target->pitch * (uint64_t)g_fb_h;
+    if (ioctl(g_fb_fd, FB_GPU_VIRGL_TRANSFER_TO_HOST, &transfer) != 0) {
+        static int mirror_error_logs;
+
+        if (mirror_error_logs < 8) {
+            fprintf(stderr,
+                    "wlcomp: virgl framebuffer inactive-target mirror failed errno=%d (%s) res=%u rect=%u,%u %ux%u\n",
+                    errno, strerror(errno),
+                    target->resource_id,
+                    transfer.x, transfer.y, transfer.w, transfer.h);
+            mirror_error_logs++;
+        }
+        return 0;
+    }
+    return 1;
+}
+
+static int mirror_cpu_damage_to_virgl_inactive_targets(
+    const struct damage_rect *r)
+{
+    int ok = 1;
+
+    if (!g_fb_virgl_back_target_ready)
+        return 1;
+    if (!mirror_cpu_damage_to_virgl_target(&g_fb_virgl_back_target, r))
+        ok = 0;
+    if (g_fb_virgl_extra_target_ready &&
+        !mirror_cpu_damage_to_virgl_target(&g_fb_virgl_extra_target, r))
+        ok = 0;
+    return ok;
+}
+
+static uint32_t g_fb_last_present_ms;
+
+/*
+ * Account one presented frame for the visible-fps stats (the /tmp/wlcomp-fps
+ * file the demo reads as displayed_fps).  Shared by present_damage_rects() and
+ * the fullscreen-direct unredirection path, which bypasses that function but
+ * still presents a client frame to the scanout.
+ */
+static void framebuffer_account_present_frame(uint32_t now,
+                                              uint64_t present_pixels,
+                                              int rect_count, int full_frame)
+{
+    g_damage_stats.frames++;
+    if (g_fb_last_present_ms != 0) {
+        uint32_t interval = now - g_fb_last_present_ms;
+
+        g_damage_stats.frame_interval_sum_ms += interval;
+        if (interval > g_damage_stats.frame_interval_max_ms)
+            g_damage_stats.frame_interval_max_ms = interval;
+        if (interval > g_damage_interval_max_ms)
+            g_damage_interval_max_ms = interval;
+        if (interval > 25)
+            g_damage_stats.frame_interval_over_25ms++;
+        if (interval > 40)
+            g_damage_stats.frame_interval_over_40ms++;
+    }
+    g_fb_last_present_ms = now;
+    g_damage_stats.present_rects += (uint64_t)rect_count;
+    g_damage_stats.present_pixels += present_pixels;
+    if (full_frame)
+        g_damage_stats.present_full_frames++;
+}
+
+static int present_damage_rects(int fb_w, uint32_t now,
+                                const struct damage_rect *scanout_rects,
+                                int scanout_rect_count,
+                                int skip_virgl_scanout)
+{
     int stride = g_fb_pitch ? (int)(g_fb_pitch / 4) : fb_w;
     int rect_count = g_damage_count;
     uint64_t present_pixels = 0;
@@ -466,7 +1394,36 @@ static int present_damage_rects(int fb_w, uint32_t now)
         if (r->x1 == 0 && r->y1 == 0 &&
             r->x2 == (int32_t)g_fb_w && r->y2 == (int32_t)g_fb_h)
             full_frame = 1;
-        if (g_fb_direct_scanout) {
+        if (g_fb_virgl_backed) {
+            struct fb_gpu_virgl_transfer transfer;
+
+            memset(&transfer, 0, sizeof(transfer));
+            transfer.resource_id = g_fb_virgl_resource_id;
+            transfer.x = (uint32_t)r->x1;
+            transfer.y = (uint32_t)r->y1;
+            transfer.w = w;
+            transfer.h = h;
+            transfer.d = 1;
+            transfer.offset = (uint64_t)r->y1 * g_fb_pitch +
+                              (uint64_t)r->x1 * 4;
+            transfer.stride = g_fb_pitch;
+            transfer.layer_stride = g_fb_pitch * g_fb_h;
+            if (ioctl(g_fb_fd, FB_GPU_VIRGL_TRANSFER_TO_HOST,
+                      &transfer) != 0) {
+                static int upload_error_logs;
+
+                ok = 0;
+                if (upload_error_logs < 8) {
+                    fprintf(stderr,
+                            "wlcomp: virgl framebuffer upload failed errno=%d (%s) res=%u rect=%u,%u %ux%u\n",
+                            errno, strerror(errno), g_fb_virgl_resource_id,
+                            transfer.x, transfer.y, transfer.w, transfer.h);
+                    upload_error_logs++;
+                }
+            }
+            if (!mirror_cpu_damage_to_virgl_inactive_targets(r))
+                ok = 0;
+        } else if (g_fb_direct_scanout) {
             struct fb_gpu_scanout_flush cmd;
 
             cmd.x = (uint32_t)r->x1;
@@ -523,25 +1480,10 @@ static int present_damage_rects(int fb_w, uint32_t now)
             }
         }
     }
-    g_damage_stats.frames++;
-    if (last_present_ms != 0) {
-        uint32_t interval = now - last_present_ms;
-
-        g_damage_stats.frame_interval_sum_ms += interval;
-        if (interval > g_damage_stats.frame_interval_max_ms)
-            g_damage_stats.frame_interval_max_ms = interval;
-        if (interval > g_damage_interval_max_ms)
-            g_damage_interval_max_ms = interval;
-        if (interval > 25)
-            g_damage_stats.frame_interval_over_25ms++;
-        if (interval > 40)
-            g_damage_stats.frame_interval_over_40ms++;
-    }
-    last_present_ms = now;
-    g_damage_stats.present_rects += (uint64_t)rect_count;
-    g_damage_stats.present_pixels += present_pixels;
-    if (full_frame)
-        g_damage_stats.present_full_frames++;
+    if (g_fb_virgl_backed && ok && !skip_virgl_scanout)
+        ok = present_virgl_scanout_rects(scanout_rects, scanout_rect_count);
+    framebuffer_account_present_frame(now, present_pixels, rect_count,
+                                      full_frame);
     g_damage_count = 0;
     if (g_fb_direct_scanout || g_fb_bo_backed) {
         /*

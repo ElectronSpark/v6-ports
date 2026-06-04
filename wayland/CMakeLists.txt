@@ -17,6 +17,7 @@ set(DIRECTX_HEADERS_DIR
 set(WLCOMP_INCLUDE_SRCS
     ${WAYLAND_SRC_DIR}/wlcomp_fb.inc
     ${WAYLAND_SRC_DIR}/wlcomp_surface_state.inc
+    ${WAYLAND_SRC_DIR}/wlcomp_gl_compose.inc
     ${WAYLAND_SRC_DIR}/wlcomp_buffer_shm.inc
     ${WAYLAND_SRC_DIR}/wlcomp_dmabuf.inc
     ${WAYLAND_SRC_DIR}/wlcomp_gpu_sync.inc
@@ -29,7 +30,7 @@ set(WLCOMP_INCLUDE_SRCS
 set(DESKTOP_INCLUDE_SRCS
     ${WAYLAND_SRC_DIR}/desktop_clients.inc)
 
-foreach(_src wlcomp.c wlcomp_desktop.c wlcomp_desktop.h wlcomp_draw.c wlcomp_draw.h wlcomp_iwin.h wlcomp_iwin_calc.c wlcomp_iwin_calc.h wlcomp_iwin_demo.c wlcomp_iwin_demo.h wlcomp_iwin_filemgr.c wlcomp_iwin_filemgr.h wlcomp_iwin_terminal.c wlcomp_iwin_terminal.h wlcomp_iwin_text.c wlcomp_iwin_text.h wlcomp_keymap.c wlcomp_keymap.h wlcomp_launcher.c wlcomp_launcher.h wlcomp_swgl.c wlcomp_swgl.h desktop.c filemgr.c glsmoke.c glmaze.c peanutgb.c mesaglsmoke.c mesawlegl.c mesademo.c gl_program.c gl_program.h gl_fps_overlay.c gl_fps_overlay.h mesawlegl_sphere.c mesawlegl_sphere.h pixel_fps_overlay.c pixel_fps_overlay.h xv6_icon.c xv6_icon.h xv6_icon_filemgr.c xv6_icon_glmaze.c xv6_icon_peanutgb.c xv6_present_buffer.c xv6_present_buffer.h mesaeglinfo.c mesaglfeature.c mesad3d12probe.c gpu_substrate_validate.c dmabufsmoke.c d3d12sharedsmoke.c drmgpuprobe.c webkitgpusmoke.c xv6_egl_gles.c xv6memshim.c font8x16.h)
+foreach(_src wlcomp.c wlcomp_desktop.c wlcomp_desktop.h wlcomp_draw.c wlcomp_draw.h wlcomp_iwin.h wlcomp_iwin_calc.c wlcomp_iwin_calc.h wlcomp_iwin_demo.c wlcomp_iwin_demo.h wlcomp_iwin_filemgr.c wlcomp_iwin_filemgr.h wlcomp_iwin_terminal.c wlcomp_iwin_terminal.h wlcomp_iwin_text.c wlcomp_iwin_text.h wlcomp_keymap.c wlcomp_keymap.h wlcomp_launcher.c wlcomp_launcher.h wlcomp_swgl.c wlcomp_swgl.h desktop.c filemgr.c glsmoke.c glmaze.c peanutgb.c mesaglsmoke.c mesawlegl.c mesakmsgl.c mesademo.c gl_program.c gl_program.h gl_fps_overlay.c gl_fps_overlay.h mesawlegl_sphere.c mesawlegl_sphere.h pixel_fps_overlay.c pixel_fps_overlay.h xv6_icon.c xv6_icon.h xv6_icon_filemgr.c xv6_icon_glmaze.c xv6_icon_peanutgb.c xv6_present_buffer.c xv6_present_buffer.h mesaeglinfo.c mesaglfeature.c mesad3d12probe.c gpu_substrate_validate.c dmabufsmoke.c d3d12sharedsmoke.c drmgpuprobe.c webkitgpusmoke.c xv6_egl_gles.c xv6memshim.c font8x16.h)
     if(NOT EXISTS "${WAYLAND_SRC_DIR}/${_src}")
         message(FATAL_ERROR "ports/wayland: missing ${WAYLAND_SRC_DIR}/${_src}")
     endif()
@@ -90,6 +91,7 @@ set(_glmaze_bin   ${_wl_build}/glmaze)
 set(_peanutgb_bin ${_wl_build}/peanutgb)
 set(_mesaglsmoke_bin ${_wl_build}/mesaglsmoke)
 set(_mesawlegl_bin ${_wl_build}/mesawlegl)
+set(_mesakmsgl_bin ${_wl_build}/mesakmsgl)
 set(_mesademo_bin ${_wl_build}/mesademo)
 set(_mesaeglinfo_bin ${_wl_build}/mesaeglinfo)
 set(_mesaglfeature_bin ${_wl_build}/mesaglfeature)
@@ -116,6 +118,7 @@ set(_glmaze_installed ${XV6_SYSROOT}/bin/glmaze)
 set(_peanutgb_installed ${XV6_SYSROOT}/bin/peanutgb)
 set(_mesaglsmoke_installed ${XV6_SYSROOT}/bin/mesaglsmoke)
 set(_mesawlegl_installed ${XV6_SYSROOT}/bin/mesawlegl)
+set(_mesakmsgl_installed ${XV6_SYSROOT}/bin/mesakmsgl)
 set(_mesademo_installed ${XV6_SYSROOT}/bin/mesademo)
 set(_mesaeglinfo_installed ${XV6_SYSROOT}/bin/mesaeglinfo)
 set(_mesaglfeature_installed ${XV6_SYSROOT}/bin/mesaglfeature)
@@ -294,6 +297,7 @@ if(XV6_WAYLAND_HOST_GLIBC)
                     ${_host_wayland_server_lib}
                     ${_host_wayland_private_lib}
                     ${_host_wayland_util_lib}
+                    -lEGL -lGLESv2 -lgbm
                     -lffi -lpthread -ldl -lrt -lm
         DEPENDS ${_host_wl_stamp}
                 ${_wl_src} ${_wl_font} ${_xdg_header} ${_xdg_code}
@@ -361,6 +365,7 @@ else()
                     ${_xdg_code} ${_dmabuf_code}
                     ${_explicit_sync_code}
                     ${XV6_SYSROOT}/lib/libwayland-server.a
+                    -lEGL -lGLESv2 -lgbm
                     -lffi -lpthread -ldl -lrt -lm
         DEPENDS ${_wl_src} ${_wl_font} ${_xdg_header} ${_xdg_code}
                 ${_dmabuf_header} ${_dmabuf_code}
@@ -719,6 +724,26 @@ add_custom_command(
     VERBATIM)
 
 add_custom_command(
+    OUTPUT  ${_mesakmsgl_bin}
+    COMMAND ${CMAKE_C_COMPILER} ${_wayland_opt_cflags} -Wall
+                -isystem ${XV6_SYSROOT}/include
+                -isystem ${XV6_SYSROOT}/include/libdrm
+                -I ${WAYLAND_SRC_DIR}
+                -L ${XV6_SYSROOT}/lib
+                -Wl,-rpath-link,${XV6_SYSROOT}/lib
+                -Wl,-rpath,/lib
+                -o ${_mesakmsgl_bin}
+                ${WAYLAND_SRC_DIR}/mesakmsgl.c
+                ${WAYLAND_SRC_DIR}/mesawlegl_sphere.c
+                -lEGL -lGLESv2 -lgbm -ldrm
+                -lpthread -ldl -lrt -lm
+    DEPENDS ${WAYLAND_SRC_DIR}/mesakmsgl.c
+            ${WAYLAND_SRC_DIR}/mesawlegl_sphere.c
+            ${WAYLAND_SRC_DIR}/mesawlegl_sphere.h
+    COMMENT "Compiling Mesa direct KMS/GBM GL demo"
+    VERBATIM)
+
+add_custom_command(
     OUTPUT  ${_mesademo_bin}
     COMMAND ${CMAKE_C_COMPILER} ${_wayland_opt_cflags} -Wall
                 -isystem ${XV6_SYSROOT}/include
@@ -866,6 +891,7 @@ add_custom_command(
             ${_glsmoke_installed} ${_glmaze_installed}
             ${_peanutgb_installed}
             ${_mesaglsmoke_installed} ${_mesawlegl_installed}
+            ${_mesakmsgl_installed}
             ${_mesademo_installed}
             ${_mesaeglinfo_installed} ${_mesaglfeature_installed}
             ${_mesad3d12probe_installed}
@@ -885,6 +911,7 @@ add_custom_command(
             ${WAYLAND_SRC_DIR}/glmaze-data ${XV6_SYSROOT}/share/glmaze
     COMMAND ${CMAKE_COMMAND} -E copy ${_mesaglsmoke_bin} ${_mesaglsmoke_installed}
     COMMAND ${CMAKE_COMMAND} -E copy ${_mesawlegl_bin} ${_mesawlegl_installed}
+    COMMAND ${CMAKE_COMMAND} -E copy ${_mesakmsgl_bin} ${_mesakmsgl_installed}
     COMMAND ${CMAKE_COMMAND} -E copy ${_mesademo_bin} ${_mesademo_installed}
     COMMAND ${CMAKE_COMMAND} -E copy ${_mesaeglinfo_bin} ${_mesaeglinfo_installed}
     COMMAND ${CMAKE_COMMAND} -E copy ${_mesaglfeature_bin} ${_mesaglfeature_installed}
@@ -900,7 +927,7 @@ add_custom_command(
     DEPENDS ${_wl_bin} ${_desktop_bin} ${_filemgr_bin}
             ${_glsmoke_bin} ${_glmaze_bin} ${_peanutgb_bin}
             ${_mesaglsmoke_bin}
-            ${_mesawlegl_bin} ${_mesademo_bin}
+            ${_mesawlegl_bin} ${_mesakmsgl_bin} ${_mesademo_bin}
             ${_mesaeglinfo_bin} ${_mesaglfeature_bin}
             ${_mesad3d12probe_bin} ${_gpu_substrate_validate_bin}
             ${_dmabufsmoke_bin} ${_d3d12sharedsmoke_bin}
@@ -913,7 +940,7 @@ add_custom_target(port-wayland ALL DEPENDS
     ${_wl_installed} ${_desktop_installed} ${_filemgr_installed}
     ${_glsmoke_installed} ${_glmaze_installed} ${_peanutgb_installed}
     ${_mesaglsmoke_installed} ${_mesawlegl_installed}
-    ${_mesademo_installed}
+    ${_mesakmsgl_installed} ${_mesademo_installed}
     ${_mesaeglinfo_installed} ${_mesaglfeature_installed}
     ${_mesad3d12probe_installed}
     ${_gpu_substrate_validate_installed}
@@ -940,6 +967,7 @@ add_custom_target(port-wayland-clean
             ${_wl_installed} ${_desktop_installed} ${_filemgr_installed}
             ${_glsmoke_installed}
             ${_mesaglsmoke_installed} ${_mesawlegl_installed}
+            ${_mesakmsgl_installed}
             ${_mesademo_installed}
             ${_mesaeglinfo_installed} ${_mesaglfeature_installed}
             ${_mesad3d12probe_installed}

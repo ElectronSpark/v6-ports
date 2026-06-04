@@ -48,11 +48,14 @@ static void dmabuf_buffer_import_common(struct wl_client *client,
 {
     struct dmabuf_params *params = wl_resource_get_user_data(params_res);
     struct fb_gpu_bo_import_fd imports[4];
+    struct fb_gpu_bo_info infos[4];
     struct wlcomp_buffer *buf;
     struct wl_resource *buf_res;
     uint32_t wl_format;
     uint32_t plane_count;
     uint32_t imported_count = 0;
+    uint64_t implicit_fence = 0;
+    uint64_t explicit_fence = 0;
     pid_t client_pid = 0;
     uid_t client_uid = 0;
     gid_t client_gid = 0;
@@ -120,6 +123,7 @@ static void dmabuf_buffer_import_common(struct wl_client *client,
     }
 
     memset(imports, 0, sizeof(imports));
+    memset(infos, 0, sizeof(infos));
     for (uint32_t i = 0; i < plane_count; i++) {
         uint32_t rows = (format == DRM_FORMAT_NV12 && i == 1) ?
                         (uint32_t)((height + 1) / 2) : (uint32_t)height;
@@ -155,6 +159,19 @@ static void dmabuf_buffer_import_common(struct wl_client *client,
             return;
         }
         imported_count++;
+        infos[i].handle = imports[i].handle;
+        if (ioctl(g_fb_fd, FB_GPU_BO_INFO, &infos[i]) < 0) {
+            memset(&infos[i], 0, sizeof(infos[i]));
+            infos[i].handle = imports[i].handle;
+        }
+        if (imports[i].implicit_fence > implicit_fence)
+            implicit_fence = imports[i].implicit_fence;
+        if (infos[i].implicit_fence > implicit_fence)
+            implicit_fence = infos[i].implicit_fence;
+        if (imports[i].explicit_fence > explicit_fence)
+            explicit_fence = imports[i].explicit_fence;
+        if (infos[i].explicit_fence > explicit_fence)
+            explicit_fence = infos[i].explicit_fence;
         if (imports[i].format != format ||
             imports[i].plane_count != plane_count ||
             imports[i].modifier != params->modifier[0]) {
@@ -220,12 +237,16 @@ static void dmabuf_buffer_import_common(struct wl_client *client,
         wl_resource_post_no_memory(params_res);
         return;
     }
+    for (uint32_t i = 0; i < 4; i++)
+        buf->plane_dmabuf_fd[i] = -1;
     buf->is_gpu_bo = 1;
     buf->gpu_addr = imports[0].addr;
     buf->gpu_size = imports[0].size;
     buf->gpu_handle = imports[0].handle;
     buf->owns_gpu_handle = 1;
     buf->acquire_fence_fd = -1;
+    buf->implicit_fence = implicit_fence;
+    buf->explicit_fence = explicit_fence;
     buf->width = width;
     buf->height = height;
     buf->stride = params->stride[0];
@@ -236,6 +257,17 @@ static void dmabuf_buffer_import_common(struct wl_client *client,
         buf->plane_gpu_addr[i] = imports[i].addr;
         buf->plane_gpu_size[i] = imports[i].size;
         buf->plane_gpu_handle[i] = imports[i].handle;
+        buf->plane_dmabuf_fd[i] = dup(params->fd[i]);
+        if (buf->plane_dmabuf_fd[i] < 0) {
+            buffer_free(buf);
+            wl_resource_post_no_memory(params_res);
+            return;
+        }
+        buf->plane_virtio_resource_id[i] = infos[i].virtio_resource_id;
+        buf->plane_virtio_resource_owner_id[i] =
+            infos[i].virtio_resource_owner_id;
+        buf->plane_virtio_resource_owner_tgid[i] =
+            infos[i].virtio_resource_owner_tgid;
     }
     buf->format = wl_format;
     buf->y_inverted = (flags & ZWP_LINUX_BUFFER_PARAMS_V1_FLAGS_Y_INVERT) != 0;
@@ -255,9 +287,16 @@ static void dmabuf_buffer_import_common(struct wl_client *client,
 
         if (wlcomp_verbose_log_enabled() || dmabuf_buffer_logs < 4) {
             fprintf(stderr,
-                    "wlcomp: dmabuf buffer pid=%d size=%dx%d stride=%u fmt=0x%x planes=%u flags=0x%x\n",
+                    "wlcomp: dmabuf buffer pid=%d size=%dx%d stride=%u fmt=0x%x planes=%u flags=0x%x virgl_res=%u owner_tgid=%d\n",
                     client_pid, width, height, params->stride[0], format,
-                    plane_count, flags);
+                    plane_count, flags, buf->plane_virtio_resource_id[0],
+                    buf->plane_virtio_resource_owner_tgid[0]);
+            if (buf->implicit_fence || buf->explicit_fence)
+                fprintf(stderr,
+                        "wlcomp: dmabuf fences pid=%d implicit=%lu explicit=%lu virgl_res=%u\n",
+                        client_pid, (unsigned long)buf->implicit_fence,
+                        (unsigned long)buf->explicit_fence,
+                        buf->plane_virtio_resource_id[0]);
             if (!wlcomp_verbose_log_enabled())
                 dmabuf_buffer_logs++;
         }

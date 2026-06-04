@@ -123,9 +123,22 @@ int main(void)
     char *mesaglsmoke[] = { "mesaglsmoke", "--frames=6", "--loops=1",
                             "--resize-every=3", NULL };
     char *virgltest[] = { "virgltest", NULL };
+    char *virgl_copy[] = { "virgltest", "--copy-region", NULL };
+    char *virgl_copy_scanout[] = {
+        "virgltest", "--copy-region-scanout", NULL
+    };
+    char *virgl_copy_clear[] = {
+        "virgltest", "--copy-region-clear-src", NULL
+    };
+    char *virgl_copy_clear_render_bind[] = {
+        "virgltest", "--copy-region-clear-src-render-bind", NULL
+    };
     char *virgl_async[] = { "virgltest", "--async-submit", NULL };
     char *virgl_invalid[] = { "virgltest", "--invalid-submit", NULL };
     char *virgl_bad[] = { "virgltest", "--bad-submit", NULL };
+    char *virgl_dmabuf_import[] = {
+        "virgltest", "--dmabuf-resource-import", NULL
+    };
     char *mouseinject[] = { "mouseinject", "65535", "65535", NULL };
     char *gpubuf3[] = { "gpubuftest", "3", NULL };
     char *gpubuf_owner[] = { "gpubuftest", "--render-owner", NULL };
@@ -138,9 +151,15 @@ int main(void)
         { "__GPUV_MESAWLEGL6_DONE_0__", 1, mesawlegl6 },
         { "__GPUV_MESAGL_DONE_0__", 1, mesaglsmoke },
         { "__GPUV_VIRGL_DONE_0__", 1, virgltest },
+        { "__GPUV_VIRGL_COPY_DONE_0__", 1, virgl_copy },
+        { "__GPUV_VIRGL_COPY_SCANOUT_DONE_0__", 1, virgl_copy_scanout },
+        { "__GPUV_VIRGL_COPY_CLEAR_DONE_0__", 1, virgl_copy_clear },
+        { "__GPUV_VIRGL_COPY_CLEAR_RENDER_BIND_DONE_0__", 1,
+          virgl_copy_clear_render_bind },
         { "__GPUV_VIRGL_ASYNC_DONE_0__", 1, virgl_async },
         { "__GPUV_VIRGL_INVALID_DONE_0__", 1, virgl_invalid },
         { "__GPUV_VIRGL_BAD_DONE_0__", 1, virgl_bad },
+        { "__GPUV_VIRGL_DMABUF_IMPORT_DONE_0__", 1, virgl_dmabuf_import },
         { "__GPUV_MOUSE_DONE_0__", 0, mouseinject },
         { "__GPUV_GPUBUF3_DONE_0__", 0, gpubuf3 },
         { "__GPUV_GPUBUFOWNER_DONE_0__", 0, gpubuf_owner },

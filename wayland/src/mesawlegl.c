@@ -44,6 +44,7 @@
 #define SOFTWARE_DEMO_H 135
 #define FPS_TEXT_MAX 16
 #define FPS_EVIDENCE_PATH "/tmp/mesawlegl-fps"
+#define WLCOMP_FPS_PATH "/tmp/wlcomp-fps"
 #define D3D12_PRESENT_EVIDENCE_PATH "/tmp/wlcomp-d3d12-present"
 
 struct vertex {
@@ -130,6 +131,9 @@ struct app_state {
     unsigned long source_content_frame;
     unsigned long source_content_hash;
     char fps_text[FPS_TEXT_MAX];
+    int client_capture_enabled;
+    int client_capture_done;
+    int client_capture_frame;
 
     /*
      * Honest blit-present path: glReadPixels the genuinely GPU-rendered
@@ -194,6 +198,9 @@ struct d3d12_present_evidence {
     char display_bind_transport_source[80];
     char display_bind_completion_source[32];
 };
+
+static int mesa_env_requests_accel(void);
+static int read_wlcomp_visible_fps(double *fps_out);
 
 static EGLDisplay get_wayland_display(struct wl_display *display)
 {
@@ -542,6 +549,7 @@ static void append_fps_evidence(struct app_state *app, double now,
     int strict_finite_fps_evidence = 0;
     double effective_presented_fps = 0.0;
     double displayed_fps = 0.0;
+    double compositor_fps = 0.0;
 
     if (displayed_fps_out)
         *displayed_fps_out = 0.0;
@@ -625,6 +633,16 @@ static void append_fps_evidence(struct app_state *app, double now,
     }
     if (native_fps_credit)
         displayed_fps = effective_presented_fps;
+    if (!native_fps_credit && app->sphere_demo && !app->software_demo &&
+        mesa_env_requests_accel() && read_wlcomp_visible_fps(&compositor_fps)) {
+        /*
+         * KVM/virgl does not produce the Hyper-V D3D12 native-present evidence
+         * file.  Use the compositor's scanout-present cadence for the label so
+         * the demo no longer advertises a faster client-loop FPS.
+         */
+        displayed_fps = compositor_fps;
+        source = "virgl-compositor-present";
+    }
     if (displayed_fps_out)
         *displayed_fps_out = displayed_fps;
     if (native_fps_credit_out)
@@ -1532,26 +1550,30 @@ static void render_fps_overlay(struct app_state *app)
 {
     struct vertex vertices[512];
     int count = 0;
-    float w = 0.105f;
-    float h = 0.185f;
-    float gap = 0.026f;
+    float w = 0.085f;
+    float h = 0.150f;
+    float gap = 0.020f;
     float x = -0.88f;
     float y = 0.82f;
+    const char *text;
 
     if (!app->sphere_demo || app->fps_text[0] == '\0')
         return;
 
-    overlay_emit_rect(vertices, &count, -0.95f, 0.93f, 0.02f, 0.55f,
+    text = strchr(app->fps_text, ' ');
+    text = text ? text + 1 : app->fps_text;
+
+    overlay_emit_rect(vertices, &count, -0.95f, 0.93f, -0.42f, 0.61f,
                       0.00f, 0.00f, 0.00f, 0.82f);
-    overlay_emit_rect(vertices, &count, -0.95f, 0.93f, 0.02f, 0.89f,
+    overlay_emit_rect(vertices, &count, -0.95f, 0.93f, -0.42f, 0.89f,
                       0.10f, 0.78f, 1.00f, 0.94f);
-    overlay_emit_rect(vertices, &count, -0.95f, 0.59f, 0.02f, 0.55f,
+    overlay_emit_rect(vertices, &count, -0.95f, 0.65f, -0.42f, 0.61f,
                       0.10f, 0.78f, 1.00f, 0.94f);
-    overlay_emit_rect(vertices, &count, -0.95f, 0.93f, -0.91f, 0.55f,
+    overlay_emit_rect(vertices, &count, -0.95f, 0.93f, -0.91f, 0.61f,
                       0.10f, 0.78f, 1.00f, 0.94f);
-    overlay_emit_rect(vertices, &count, -0.02f, 0.93f, 0.02f, 0.55f,
+    overlay_emit_rect(vertices, &count, -0.46f, 0.93f, -0.42f, 0.61f,
                       0.10f, 0.78f, 1.00f, 0.94f);
-    for (const char *p = app->fps_text; *p && count + 42 < 512; p++) {
+    for (const char *p = text; *p && count + 42 < 512; p++) {
         if (*p == ' ') {
             x += w * 0.55f;
             continue;
@@ -1756,6 +1778,35 @@ static int mesa_env_requests_accel(void)
     return 0;
 }
 
+static int read_wlcomp_visible_fps(double *fps_out)
+{
+    FILE *fp;
+    char buf[256];
+    char *p;
+    double fps;
+
+    if (fps_out)
+        *fps_out = 0.0;
+    fp = fopen(WLCOMP_FPS_PATH, "r");
+    if (!fp)
+        return 0;
+    if (!fgets(buf, sizeof(buf), fp)) {
+        fclose(fp);
+        return 0;
+    }
+    fclose(fp);
+
+    p = strstr(buf, "fps=");
+    if (!p)
+        return 0;
+    fps = strtod(p + 4, NULL);
+    if (fps <= 0.0 || fps > 1000.0)
+        return 0;
+    if (fps_out)
+        *fps_out = fps;
+    return 1;
+}
+
 static void clamp_demo_size(struct app_state *app)
 {
     if (!app->sphere_demo || app->max_width <= 0 || app->max_height <= 0)
@@ -1789,14 +1840,19 @@ static void update_demo_fps(struct app_state *app)
     fps = elapsed > 0.0 ? (double)app->fps_frame_count / elapsed : 0.0;
     append_fps_evidence(app, now, elapsed, fps, &displayed_fps,
                         &native_fps_credit);
-    app->fps_value = native_fps_credit ? displayed_fps : fps;
+    app->fps_value = displayed_fps > 0.0 ? displayed_fps : fps;
     /*
      * In shm-present mode the frames are genuinely GPU-rendered and then
      * blit-presented to the display every loop iteration, so the honest
      * on-screen rate is the app-loop fps. native_fps_credit (native scanout
      * present) legitimately stays 0 and is still reported on stderr below.
      */
-    if (app->shm_present || !native_fps_credit) {
+    if (displayed_fps > 0.0 && !app->shm_present) {
+        snprintf(app->fps_text, sizeof(app->fps_text), "FPS %.1f",
+                 displayed_fps);
+        snprintf(title, sizeof(title), "Mesa 3D Demo - %.1f FPS",
+                 displayed_fps);
+    } else if (app->shm_present || !native_fps_credit) {
         snprintf(app->fps_text, sizeof(app->fps_text), "FPS %.1f", fps);
         snprintf(title, sizeof(title), "Mesa 3D Demo - %.1f FPS", fps);
     } else {
@@ -1920,6 +1976,77 @@ static int present_via_shm(struct app_state *app)
     return 0;
 }
 
+static int write_client_capture(struct app_state *app)
+{
+    const char *path = "/capture-client.ppm";
+    FILE *fp;
+    uint8_t *pixels;
+    uint8_t *row;
+    size_t bytes;
+
+    if (!app->client_capture_enabled || app->client_capture_done ||
+        app->frame < app->client_capture_frame)
+        return 0;
+    app->client_capture_done = 1;
+    if (app->width <= 0 || app->height <= 0)
+        return -1;
+    bytes = (size_t)app->width * (size_t)app->height * 4;
+    pixels = malloc(bytes);
+    row = malloc((size_t)app->width * 3);
+    if (!pixels || !row) {
+        free(pixels);
+        free(row);
+        fprintf(stderr, "mesawlegl: client capture allocation failed\n");
+        return -1;
+    }
+
+    glFinish();
+    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    glReadPixels(0, 0, app->width, app->height, app->read_format,
+                 GL_UNSIGNED_BYTE, pixels);
+    fp = fopen(path, "wb");
+    if (!fp) {
+        free(pixels);
+        free(row);
+        fprintf(stderr, "mesawlegl: client capture open failed\n");
+        return -1;
+    }
+    fprintf(fp, "P6\n%d %d\n255\n", app->width, app->height);
+    for (int y = app->height - 1; y >= 0; y--) {
+        uint32_t *src =
+            (uint32_t *)(pixels + (size_t)y * (size_t)app->width * 4);
+
+        for (int x = 0; x < app->width; x++) {
+            uint32_t px = src[x];
+
+            if (app->read_format == GL_BGRA_EXT) {
+                row[x * 3 + 0] = (uint8_t)((px >> 16) & 0xff);
+                row[x * 3 + 1] = (uint8_t)((px >> 8) & 0xff);
+                row[x * 3 + 2] = (uint8_t)(px & 0xff);
+            } else {
+                row[x * 3 + 0] = (uint8_t)(px & 0xff);
+                row[x * 3 + 1] = (uint8_t)((px >> 8) & 0xff);
+                row[x * 3 + 2] = (uint8_t)((px >> 16) & 0xff);
+            }
+        }
+        if (fwrite(row, (size_t)app->width * 3, 1, fp) != 1) {
+            fclose(fp);
+            free(pixels);
+            free(row);
+            fprintf(stderr, "mesawlegl: client capture write failed\n");
+            return -1;
+        }
+    }
+    fclose(fp);
+    free(pixels);
+    free(row);
+    fprintf(stderr,
+            "mesawlegl: captured %s frame=%d size=%dx%d read_format=%s\n",
+            path, app->frame, app->width, app->height,
+            app->read_format == GL_BGRA_EXT ? "bgra" : "rgba");
+    return 0;
+}
+
 static int draw_and_swap(struct app_state *app)
 {
     if (app->sphere_demo)
@@ -1930,6 +2057,8 @@ static int draw_and_swap(struct app_state *app)
         render_simple_frame(app);
     update_source_content_hash(app);
     render_fps_overlay(app);
+    if (write_client_capture(app) != 0)
+        return -1;
     if (glGetError() != GL_NO_ERROR) {
         fprintf(stderr, "mesawlegl[%d]: GL error during frame\n", app->loop);
         return -1;
@@ -2325,6 +2454,16 @@ static int parse_nonnegative_arg(const char *arg, const char *prefix,
     return value >= 0 ? value : fallback;
 }
 
+static int parse_positive_env(const char *value, int fallback)
+{
+    int parsed;
+
+    if (!value || !value[0])
+        return fallback;
+    parsed = atoi(value);
+    return parsed > 0 ? parsed : fallback;
+}
+
 static int parse_size_arg(const char *arg, int *width, int *height)
 {
     const char *s = arg + 7;
@@ -2358,6 +2497,7 @@ static int run_client(int loop, int frames, int resize_every, int api_smoke,
     int rc = 0;
     double start_sec;
     double elapsed_sec;
+    double next_frame_sec;
     int render_width;
     int render_height;
 
@@ -2390,6 +2530,10 @@ static int run_client(int loop, int frames, int resize_every, int api_smoke,
     app.fps_frame_count = 0;
     app.fps_value = 0.0;
     app.last_display_bind_completed_id = 0;
+    app.client_capture_enabled = env_enabled("XV6_MESAWLEGL_CAPTURE");
+    app.client_capture_done = 0;
+    app.client_capture_frame =
+        parse_positive_env(getenv("XV6_MESAWLEGL_CAPTURE_FRAME"), 30);
     snprintf(app.fps_text, sizeof(app.fps_text), "FPS --.-");
 
     if (init_wayland(&app) < 0) {
@@ -2411,7 +2555,7 @@ static int run_client(int loop, int frames, int resize_every, int api_smoke,
         if (shm_override && shm_override[0])
             app.shm_present = env_enabled("XV6_MESAWLEGL_SHM_PRESENT");
         else
-            app.shm_present = app.sphere_demo && !app.software_demo;
+            app.shm_present = app.sphere_demo && app.software_demo;
         if (app.shm_present && !app.shm) {
             fprintf(stderr,
                     "mesawlegl[%d]: wl_shm unavailable, falling back to eglSwapBuffers present\n",
@@ -2434,7 +2578,10 @@ static int run_client(int loop, int frames, int resize_every, int api_smoke,
             loop, app.width, app.height, render_width, render_height,
             app.render_div, app.present_interval, app.pace_us);
     start_sec = monotonic_seconds();
-    for (app.frame = 0; rc == 0 && app.running && app.frame < app.max_frames;
+    next_frame_sec = start_sec;
+    for (app.frame = 0;
+         rc == 0 && app.running &&
+         (app.max_frames <= 0 || app.frame < app.max_frames);
          app.frame++) {
         if (app.resize_every > 0 && app.frame > 0 &&
             app.frame % app.resize_every == 0) {
@@ -2456,13 +2603,42 @@ static int run_client(int loop, int frames, int resize_every, int api_smoke,
             break;
         }
         wl_display_dispatch_pending(app.display);
-        if (app.pace_us > 0)
-            usleep((useconds_t)app.pace_us);
+        if (app.pace_us > 0) {
+            double now = monotonic_seconds();
+            double delay;
+
+            next_frame_sec += (double)app.pace_us / 1000000.0;
+            delay = next_frame_sec - now;
+            if (delay > 0.0)
+                usleep((useconds_t)(delay * 1000000.0));
+            else if (delay < -0.25)
+                next_frame_sec = now;
+        }
     }
     elapsed_sec = monotonic_seconds() - start_sec;
     if (!app.configured)
         rc = 1;
     append_demo_interaction_evidence(&app, elapsed_sec, rc);
+    {
+        char complete_buf[192];
+        int complete_len;
+
+        complete_len = snprintf(
+            complete_buf, sizeof(complete_buf),
+            "mesawlegl_completion_matrix loop=%d frames=%d status=%d "
+            "render_div=%d present_interval=%d pace_us=%d\n",
+            loop, app.frame, rc, app.render_div, app.present_interval,
+            app.pace_us);
+        if (complete_len > 0) {
+            ssize_t written;
+
+            if (complete_len >= (int)sizeof(complete_buf))
+                complete_len = (int)sizeof(complete_buf) - 1;
+            written = write(STDERR_FILENO, complete_buf,
+                            (size_t)complete_len);
+            (void)written;
+        }
+    }
     cleanup(&app);
     fprintf(stderr,
             "mesawlegl[%d]: complete frames=%d status=%d elapsed=%.3fs fps=%.1f window=%dx%d render=%dx%d render_div=%d present_interval=%d pace_us=%d\n",
@@ -2475,7 +2651,7 @@ static int run_client(int loop, int frames, int resize_every, int api_smoke,
 
 int main(int argc, char **argv)
 {
-    int frames = 120;
+    int frames = 0;
     int loops = 1;
     int resize_every = 0;
     int api_smoke = 1;
@@ -2484,9 +2660,7 @@ int main(int argc, char **argv)
     int window_height = WINDOW_H;
     int render_div = 1;
     int present_interval = 1;
-    int pace_us = 16000;
-    int present_interval_set = 0;
-    int pace_us_set = 0;
+    int pace_us = 0;
     int software_demo;
     int accel_requested;
     int rc = 0;
@@ -2500,7 +2674,7 @@ int main(int argc, char **argv)
 
     for (int i = 1; i < argc; i++) {
         if (strncmp(argv[i], "--frames=", 9) == 0) {
-            frames = parse_positive_arg(argv[i], "--frames=", frames);
+            frames = parse_nonnegative_arg(argv[i], "--frames=", frames);
         } else if (strncmp(argv[i], "--loops=", 8) == 0) {
             loops = parse_positive_arg(argv[i], "--loops=", loops);
         } else if (strncmp(argv[i], "--resize-every=", 15) == 0) {
@@ -2517,10 +2691,8 @@ int main(int argc, char **argv)
         } else if (strncmp(argv[i], "--present-interval=", 19) == 0) {
             present_interval = parse_nonnegative_arg(
                 argv[i], "--present-interval=", present_interval);
-            present_interval_set = 1;
         } else if (strncmp(argv[i], "--pace-us=", 10) == 0) {
             pace_us = parse_nonnegative_arg(argv[i], "--pace-us=", pace_us);
-            pace_us_set = 1;
         } else if (strcmp(argv[i], "--simple") == 0) {
             api_smoke = 0;
             sphere_demo = 0;
@@ -2528,17 +2700,13 @@ int main(int argc, char **argv)
             api_smoke = 1;
             sphere_demo = 0;
         } else if (strcmp(argv[i], "--demo") == 0) {
-            frames = 3600;
             resize_every = 0;
             api_smoke = 0;
             sphere_demo = 1;
-            if (!present_interval_set)
-                present_interval = 0;
-            if (!pace_us_set)
-                pace_us = 0;
         } else if (strcmp(argv[i], "--help") == 0) {
             fprintf(stderr,
-                    "usage: %s [--frames=N] [--loops=N] [--resize-every=N] [--size=WxH] [--render-div=N] [--present-interval=N] [--pace-us=N] [--api-smoke|--simple|--demo]\n",
+                    "usage: %s [--frames=N] [--loops=N] [--resize-every=N] [--size=WxH] [--render-div=N] [--present-interval=N] [--pace-us=N] [--api-smoke|--simple|--demo]\n"
+                    "  --frames=0, or omitting --frames, runs until the window closes\n",
                     argv[0]);
             return 0;
         } else {

@@ -13,6 +13,9 @@ struct wlcomp_launcher_ops {
 };
 
 void wlcomp_launcher_init(const struct wlcomp_launcher_ops *ops);
+void wlcomp_launcher_launch_args(const char *path, const char *name,
+                                 const char *arg1, const char *arg2,
+                                 const char *arg3);
 void wlcomp_launcher_launch(const char *path, const char *name, const char *arg);
 void wlcomp_launcher_launch_noarg(const char *path, const char *name);
 void wlcomp_launcher_reap(void);

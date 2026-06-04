@@ -59,6 +59,16 @@ static void toplevel_set_app_id(struct wl_client *c, struct wl_resource *r,
         int32_t max_w = (int32_t)g_fb_w - 32;
         int32_t max_h = (int32_t)g_fb_h - TASKBAR_H - 32;
 
+        if (wlcomp_fullscreen_direct_enabled()) {
+            /*
+             * Unredirected fullscreen client: configure it to the whole
+             * screen so its buffer can be handed straight to the scanout.
+             */
+            max_w = (int32_t)g_fb_w;
+            max_h = (int32_t)g_fb_h;
+            w = max_w;
+            h = max_h;
+        }
         if (max_w < 320)
             max_w = (int32_t)g_fb_w;
         if (max_h < 240)

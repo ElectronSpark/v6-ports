@@ -126,9 +126,35 @@ static void surface_commit(struct wl_client *client, struct wl_resource *resourc
         }
         if (old_committed && !surf->pending_buf)
             damage_surface(surf);
+        if (old_committed && surf->pending_buf &&
+            surf->pending_buf->is_gpu_bo &&
+            !surf->pending_buf->is_d3d12_shared &&
+            !buffer_acquire_ready(surf->pending_buf)) {
+            static int defer_logs;
+            struct wlcomp_buffer *old_deferred = surf->deferred_buf;
+
+            surf->deferred_buf = surf->pending_buf;
+            surf->pending_buf = NULL;
+            surf->has_pending_buffer = 0;
+            if (old_deferred && old_deferred != surf->deferred_buf) {
+                queue_buffer_release(old_deferred);
+                buffer_maybe_free(old_deferred);
+            }
+            if (defer_logs < 16) {
+                fprintf(stderr,
+                        "wlcomp: deferred gpu buffer commit pid=%d res=%u until acquire-ready\n",
+                        surf->client_pid,
+                        surf->deferred_buf->plane_virtio_resource_id[0]);
+                defer_logs++;
+            }
+            surface_pending_damage_clear(surf);
+            return;
+        }
         surf->committed_buf = surf->pending_buf;
         surf->pending_buf = NULL;
         surf->has_pending_buffer = 0;
+        if (surf->committed_buf)
+            surf->committed_buf->gpu_compose_presented = 0;
         if (surf->committed_buf && surf->committed_buf->is_d3d12_shared) {
             surf->committed_buf->d3d12_present_complete = 0;
             surf->committed_buf->d3d12_failclosed_client_unblocked = 0;
@@ -188,6 +214,11 @@ static void surface_commit(struct wl_client *client, struct wl_resource *resourc
         surf->y = ((int32_t)g_fb_h - 36 - gh) / 2;
         if (surf->x < 0) surf->x = 0;
         if (surf->y < 0) surf->y = 0;
+        if (surface_is_fullscreen_direct(surf)) {
+            /* Unredirected client owns the whole scanout: pin to origin. */
+            surf->x = 0;
+            surf->y = 0;
+        }
         surf->mapped = 1;
         first_map = 1;
         fprintf(stderr, "wlcomp: mapped toplevel pid=%d size=%dx%d geom=%dx%d\n",
@@ -331,6 +362,44 @@ static void surface_commit(struct wl_client *client, struct wl_resource *resourc
     surface_pending_damage_clear(surf);
 }
 
+static void surface_promote_deferred_buffers(void)
+{
+    struct wlcomp_surface *surf;
+    static int promote_logs;
+
+    wl_list_for_each(surf, &g_surfaces, link) {
+        struct wlcomp_buffer *buf = surf->deferred_buf;
+        struct wlcomp_buffer *old_committed;
+        int old_buffer_released;
+
+        if (!buf)
+            continue;
+        if (!buffer_acquire_ready(buf))
+            continue;
+
+        old_committed = surf->committed_buf;
+        old_buffer_released = surf->buffer_released;
+        surf->deferred_buf = NULL;
+        surf->committed_buf = buf;
+        surf->buffer_released = 0;
+        buf->gpu_compose_presented = 0;
+
+        if (old_committed && old_committed != buf) {
+            if (old_committed->resource && !old_buffer_released)
+                queue_buffer_release(old_committed);
+            buffer_maybe_free(old_committed);
+        }
+        damage_surface(surf);
+        if (promote_logs < 16) {
+            fprintf(stderr,
+                    "wlcomp: promoted deferred gpu buffer pid=%d res=%u acquire-ready\n",
+                    surf->client_pid,
+                    buf->plane_virtio_resource_id[0]);
+            promote_logs++;
+        }
+    }
+}
+
 static void surface_set_buffer_transform(struct wl_client *client,
                                          struct wl_resource *resource,
                                          int32_t transform)
@@ -380,6 +449,7 @@ static void surface_destroy_handler(struct wl_resource *resource)
     if (surf) {
         struct wlcomp_buffer *pending_buf = surf->pending_buf;
         struct wlcomp_buffer *committed_buf = surf->committed_buf;
+        struct wlcomp_buffer *deferred_buf = surf->deferred_buf;
         struct wlcomp_surface *child;
         struct wlcomp_frame_callback *cb;
         struct wlcomp_frame_callback *tmp;
@@ -428,8 +498,11 @@ static void surface_destroy_handler(struct wl_resource *resource)
         wl_list_remove(&surf->link);
         free(surf);
 
-        if (pending_buf && pending_buf != committed_buf)
+        if (pending_buf && pending_buf != committed_buf &&
+            pending_buf != deferred_buf)
             buffer_maybe_free(pending_buf);
+        if (deferred_buf && deferred_buf != committed_buf)
+            buffer_maybe_free(deferred_buf);
         buffer_maybe_free(committed_buf);
     }
 }

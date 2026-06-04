@@ -32,6 +32,13 @@ static void launch_desktop_app_arg(const char *path, const char *name,
     wlcomp_launcher_launch(path, name, arg);
 }
 
+static void launch_desktop_app_args(const char *path, const char *name,
+                                    const char *arg1, const char *arg2,
+                                    const char *arg3)
+{
+    wlcomp_launcher_launch_args(path, name, arg1, arg2, arg3);
+}
+
 static void launch_desktop_app(const char *path, const char *name)
 {
     wlcomp_launcher_launch_noarg(path, name);
@@ -1174,9 +1181,24 @@ static void open_calc(void)
 
 static void open_3ddemo(void)
 {
-    if (access("/bin/mesawlegl", 0) == 0) {
-        launch_desktop_app_arg("/bin/mesawlegl", "mesawlegl",
-                               "--demo");
+    if (access("/bin/mesawlegl", X_OK) == 0) {
+        static char present_arg[32];
+        int present_interval =
+            cmdline_int_value("glsmoke_present_interval", -1);
+
+        if (present_interval >= 0) {
+            snprintf(present_arg, sizeof(present_arg),
+                     "--present-interval=%d", present_interval);
+            launch_desktop_app_args("/bin/mesawlegl", "mesawlegl",
+                                    "--demo", present_arg, NULL);
+        } else {
+            launch_desktop_app_arg("/bin/mesawlegl", "mesawlegl", "--demo");
+        }
+        return;
+    }
+
+    if (access("/bin/mesademo", X_OK) == 0) {
+        launch_desktop_app("/bin/mesademo", "mesademo");
         return;
     }
 

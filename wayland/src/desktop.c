@@ -41,6 +41,8 @@
 #define FB_GPU_BACKEND_F_RENDER_NODE 0x0001
 #define FB_GPU_BACKEND_F_DXG_TRANSPORT 0x0008
 #define FB_GPU_BACKEND_F_OPENGL_SUBMIT 0x0020
+#define FB_GPU_DISPLAY_WAIT 0x462D
+#define FB_GPU_DISPLAY_WAIT_F_WAIT 0x1
 #define D3D12_DISPLAY_BIND_FIELD_MAX 64
 #define DRM_IOCTL_VIRTGPU_GETPARAM 0xc0106443UL
 #define VIRTGPU_PARAM_3D_FEATURES  1
@@ -74,6 +76,14 @@ struct fb_gpu_backend_info_compat {
     uint32_t dxg_vgpu_rx;
     char name[32];
     char renderer[64];
+};
+
+struct fb_gpu_display_wait_compat {
+    uint32_t flags;
+    uint32_t refresh_millihz;
+    uint64_t wait_for;
+    uint64_t presented;
+    uint64_t completed;
 };
 
 struct webkit_gpu_contract_state {
@@ -2359,6 +2369,22 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
         char webkit_gpu_run_id_env[96];
         char webkit_gpu_validate_run_id_env[112];
         char webkit_wlcomp_d3d12_run_id_env[112];
+        char mesa_capture_env[] = "XV6_MESAWLEGL_CAPTURE=0";
+        char mesa_capture_frame_env[48];
+        char mesa_wayland_color_buffers_env[48] =
+            "XV6_MESA_WAYLAND_COLOR_BUFFERS=0";
+        char mesa_perf_log_env[32] = "XV6_MESA_PERF_LOG=0";
+        char mesa_wayland_throttle_env[40] = "XV6_MESA_WAYLAND_THROTTLE=1";
+        char mesa_cmdline_buf[512];
+        char mesa_size_arg[32];
+        char mesa_present_arg[32];
+        char mesa_render_arg[32];
+        int mesa_capture = 0;
+        int mesa_capture_frame = 30;
+
+        mesa_size_arg[0] = '\0';
+        mesa_present_arg[0] = '\0';
+        mesa_render_arg[0] = '\0';
 
         snprintf(webkit_gpu_run_id_value, sizeof(webkit_gpu_run_id_value),
                  "webkit-%d-%ld", getpid(), (long)time(NULL));
@@ -2370,6 +2396,110 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
         snprintf(webkit_wlcomp_d3d12_run_id_env,
                  sizeof(webkit_wlcomp_d3d12_run_id_env),
                  "XV6_WLCOMP_D3D12_RUN_ID=%s", webkit_gpu_run_id_value);
+        if (is_mesa_gl &&
+            read_cmdline(mesa_cmdline_buf, sizeof(mesa_cmdline_buf)) == 0) {
+            mesa_capture =
+                cmdline_int_value(mesa_cmdline_buf, "glsmoke_capture", 0);
+            mesa_capture_frame =
+                cmdline_int_value(mesa_cmdline_buf, "glsmoke_capture_frame",
+                                  mesa_capture_frame);
+            if (mesa_capture_frame <= 0)
+                mesa_capture_frame = 30;
+            {
+                int mesa_color_buffers =
+                    cmdline_int_value(mesa_cmdline_buf,
+                                      "glsmoke_color_buffers", 0);
+
+                if (mesa_color_buffers < 0)
+                    mesa_color_buffers = 0;
+                if (mesa_color_buffers > 4)
+                    mesa_color_buffers = 4;
+                snprintf(mesa_wayland_color_buffers_env,
+                         sizeof(mesa_wayland_color_buffers_env),
+                         "XV6_MESA_WAYLAND_COLOR_BUFFERS=%d",
+                         mesa_color_buffers);
+            }
+            snprintf(mesa_perf_log_env, sizeof(mesa_perf_log_env),
+                     "XV6_MESA_PERF_LOG=%d",
+                     cmdline_int_value(mesa_cmdline_buf,
+                                       "glsmoke_mesa_perf", 0) != 0);
+            snprintf(mesa_wayland_throttle_env,
+                     sizeof(mesa_wayland_throttle_env),
+                     "XV6_MESA_WAYLAND_THROTTLE=%d",
+                     cmdline_int_value(mesa_cmdline_buf,
+                                       "glsmoke_mesa_throttle", 1) != 0);
+            /*
+             * Fullscreen-single-client direct scanout (Alpine-style
+             * unredirection): launch the demo at the exact screen size so the
+             * compositor can hand its virgl resource straight to the scanout.
+             * The screen size comes from the kernel video= argument; default
+             * to 1280x800 to match the standard desktop mode.
+             */
+            if (cmdline_int_value(mesa_cmdline_buf, "wlcomp_fullscreen_direct",
+                                  0) != 0) {
+                int sw = 1280;
+                int sh = 800;
+                const char *vid = strstr(mesa_cmdline_buf, "video=");
+
+                if (vid) {
+                    int pw, ph;
+
+                    if (sscanf(vid + 6, "%dx%d", &pw, &ph) == 2 &&
+                        pw > 0 && ph > 0) {
+                        sw = pw;
+                        sh = ph;
+                    }
+                }
+                snprintf(mesa_size_arg, sizeof(mesa_size_arg),
+                         "--size=%dx%d", sw, sh);
+            }
+            /*
+             * Diagnostic: let glsmoke_present_interval=N drive the demo's
+             * eglSwapInterval.  present_interval=0 frees the client from the
+             * frame-callback/vsync handshake so we can tell whether the demo
+             * is callback-throttled (jumps well past 30) or render-bound on
+             * the single virtio-gpu control queue (stays ~30).
+             */
+            {
+                const char *pip = strstr(mesa_cmdline_buf,
+                                         "glsmoke_present_interval=");
+                if (pip) {
+                    int pi = atoi(pip + strlen("glsmoke_present_interval="));
+                    if (pi < 0)
+                        pi = 0;
+                    snprintf(mesa_present_arg, sizeof(mesa_present_arg),
+                             "--present-interval=%d", pi);
+                }
+            }
+            /*
+             * Diagnostic: lower the demo's offscreen render resolution while
+             * keeping the window/scanout size fixed.  This separates client
+             * GL render cost from compositor scanout/display cost.
+             */
+            {
+                const char *rdp = strstr(mesa_cmdline_buf,
+                                         "glsmoke_render_div=");
+                if (rdp) {
+                    int rd = atoi(rdp + strlen("glsmoke_render_div="));
+                    if (rd < 1)
+                        rd = 1;
+                    if (rd > 16)
+                        rd = 16;
+                    snprintf(mesa_render_arg, sizeof(mesa_render_arg),
+                             "--render-div=%d", rd);
+                }
+            }
+        }
+        snprintf(mesa_capture_env, sizeof(mesa_capture_env),
+                 "XV6_MESAWLEGL_CAPTURE=%d", mesa_capture ? 1 : 0);
+        snprintf(mesa_capture_frame_env, sizeof(mesa_capture_frame_env),
+                 "XV6_MESAWLEGL_CAPTURE_FRAME=%d", mesa_capture_frame);
+        if (is_mesa_gl) {
+            fprintf(stderr,
+                    "[desktop] Mesa env perf=%s throttle=%s color_buffers=%s\n",
+                    mesa_perf_log_env, mesa_wayland_throttle_env,
+                    mesa_wayland_color_buffers_env);
+        }
         char *argv_minibrowser[] = {
             (char *)name,
             "--autoplay-policy=allow",
@@ -2831,7 +2961,12 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             "LIBGL_ALWAYS_SOFTWARE=0",
             "GALLIUM_DRIVER=virgl",
             "EGL_PLATFORM=wayland",
+            mesa_wayland_throttle_env,
+            mesa_perf_log_env,
             "XV6_MESAWLEGL_SHM_PRESENT=0",
+            mesa_capture_env,
+            mesa_capture_frame_env,
+            mesa_wayland_color_buffers_env,
             NULL
         };
         char *envp_mesa_accel_sw[] = {
@@ -2848,6 +2983,9 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             "EGL_PLATFORM=wayland",
             "MESA_LOADER_DRIVER_OVERRIDE=swrast",
             "LIBGL_DRIVERS_PATH=/lib/dri",
+            mesa_capture_env,
+            mesa_capture_frame_env,
+            mesa_wayland_color_buffers_env,
             NULL
         };
         /* Hyper-V GPU-P: render Mesa GL demos on the host GPU via d3d12. */
@@ -2867,6 +3005,11 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             "MESA_D3D12_DEFAULT_ADAPTER_NAME=NVIDIA",
             "LIBGL_DRIVERS_PATH=/lib/dri",
             "EGL_PLATFORM=wayland",
+            mesa_wayland_throttle_env,
+            mesa_perf_log_env,
+            mesa_capture_env,
+            mesa_capture_frame_env,
+            mesa_wayland_color_buffers_env,
             NULL
         };
         int minibrowser_accel =
@@ -2893,6 +3036,31 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
         int render_node_available = xv6_render_node_available();
         struct webkit_gpu_contract_state contract;
         char **argv_exec = argv_default;
+        char *argv_mesa_fullscreen[8];
+
+        if (is_mesa_gl &&
+            (mesa_size_arg[0] || mesa_present_arg[0] || mesa_render_arg[0])) {
+            int ai = 0;
+
+            argv_mesa_fullscreen[ai++] = (char *)name;
+            if (mesa_size_arg[0])
+                argv_mesa_fullscreen[ai++] = mesa_size_arg;
+            if (mesa_present_arg[0])
+                argv_mesa_fullscreen[ai++] = mesa_present_arg;
+            if (mesa_render_arg[0])
+                argv_mesa_fullscreen[ai++] = mesa_render_arg;
+            if (arg1)
+                argv_mesa_fullscreen[ai++] = (char *)arg1;
+            if (arg2)
+                argv_mesa_fullscreen[ai++] = (char *)arg2;
+            if (arg3)
+                argv_mesa_fullscreen[ai++] = (char *)arg3;
+            argv_mesa_fullscreen[ai] = NULL;
+            argv_exec = argv_mesa_fullscreen;
+            fprintf(stderr,
+                    "[desktop] mesa demo argv override: %s %s %s %s\n",
+                    name, mesa_size_arg, mesa_present_arg, mesa_render_arg);
+        }
         compute_webkit_gpu_contract(opengl_submit_available,
                                     dxg_transport_available,
                                     render_node_available,
@@ -3054,6 +3222,165 @@ static void write_child_status_file(const char *path, const char *label,
             (void)write(fd, buf, (size_t)n);
         close(fd);
     }
+}
+
+static int glsmoke_fbstat_by_cmdline(void);
+
+static int glsmoke_fbstat_settle_ms_by_cmdline(void)
+{
+    char buf[512];
+
+    if (read_cmdline(buf, sizeof(buf)) < 0)
+        return 1200;
+
+    return cmdline_int_value(buf, "glsmoke_fbstat_settle_ms", 1200);
+}
+
+static int glsmoke_fbstat_wait_ms_by_cmdline(void)
+{
+    char buf[512];
+
+    if (read_cmdline(buf, sizeof(buf)) < 0)
+        return 5000;
+
+    return cmdline_int_value(buf, "glsmoke_fbstat_wait_ms", 5000);
+}
+
+static int glsmoke_frame_target_by_cmdline(void)
+{
+    char buf[512];
+
+    if (read_cmdline(buf, sizeof(buf)) < 0)
+        return 0;
+
+    return cmdline_int_value(buf, "glsmoke_frames", 0);
+}
+
+static int fb_display_completed_query(uint64_t *completed)
+{
+    struct fb_gpu_display_wait_compat wait;
+    int fd;
+    int ret;
+
+    if (!completed)
+        return -1;
+    fd = open(XV6_FB_CONTROL_NODE, O_RDONLY | O_CLOEXEC);
+    if (fd < 0)
+        return -1;
+    memset(&wait, 0, sizeof(wait));
+    ret = ioctl(fd, FB_GPU_DISPLAY_WAIT, &wait);
+    close(fd);
+    if (ret != 0)
+        return -1;
+    *completed = wait.completed;
+    return 0;
+}
+
+static void wait_for_fbstat_display_target(int settle_ms)
+{
+    int target = glsmoke_frame_target_by_cmdline();
+    int wait_ms = glsmoke_fbstat_wait_ms_by_cmdline();
+    long long start;
+    uint64_t completed = 0;
+
+    if (settle_ms < 0)
+        settle_ms = 0;
+    if (settle_ms > 5000)
+        settle_ms = 5000;
+    if (wait_ms < settle_ms)
+        wait_ms = settle_ms;
+    if (wait_ms > 10000)
+        wait_ms = 10000;
+
+    if (target <= 0) {
+        if (settle_ms > 0)
+            usleep((useconds_t)settle_ms * 1000);
+        return;
+    }
+
+    start = monotonic_ms();
+    for (;;) {
+        long long elapsed;
+
+        if (fb_display_completed_query(&completed) == 0 &&
+            completed >= (uint64_t)target)
+            break;
+        elapsed = monotonic_ms() - start;
+        if (elapsed >= wait_ms)
+            break;
+        usleep(50000);
+    }
+    if (settle_ms > 0) {
+        long long elapsed = monotonic_ms() - start;
+
+        if (elapsed < settle_ms)
+            usleep((useconds_t)(settle_ms - elapsed) * 1000);
+    }
+    fprintf(stderr,
+            "[desktop] fbstat display settle target=%d completed=%lu wait_ms=%d\n",
+            target, (unsigned long)completed, wait_ms);
+}
+
+static void run_fbstat_after_glsmoke(const char *label)
+{
+    pid_t pid;
+    int status;
+    int wlcomp_paused = 0;
+    int settle_ms;
+
+    if (!glsmoke_fbstat_by_cmdline())
+        return;
+
+    fprintf(stderr, "[desktop] fbstat after %s\n", label ? label : "glsmoke");
+    settle_ms = glsmoke_fbstat_settle_ms_by_cmdline();
+    wait_for_fbstat_display_target(settle_ms);
+    /*
+     * The compositor keeps emitting one-second diagnostics after the GL smoke
+     * client exits.  Pause it while fbstat prints its footer so strict validator
+     * line matches do not lose counter names to interleaved wlcomp stderr.
+     */
+    if (wlcomp_pid > 0 && kill(wlcomp_pid, SIGSTOP) == 0) {
+        wlcomp_paused = 1;
+        usleep(50000);
+    }
+    pid = fork();
+    if (pid == 0) {
+        char *argv[] = {
+            "fbstat",
+            NULL,
+        };
+        char *envp[] = {
+            "HOME=/",
+            "PATH=/bin:/usr/bin",
+            NULL,
+        };
+
+        execve("/bin/fbstat", argv, envp);
+        fprintf(stderr, "fbstat: execve failed errno=%d (%s)\n", errno,
+                errno ? strerror(errno) : "no errno from kernel");
+        _exit(127);
+    }
+    if (pid < 0) {
+        fprintf(stderr, "[desktop] fbstat fork failed errno=%d (%s)\n", errno,
+                errno ? strerror(errno) : "no errno from kernel");
+        if (wlcomp_paused)
+            kill(wlcomp_pid, SIGCONT);
+        return;
+    }
+    while (waitpid(pid, &status, 0) < 0) {
+        if (errno != EINTR) {
+            fprintf(stderr,
+                    "[desktop] fbstat wait failed errno=%d (%s)\n", errno,
+                    errno ? strerror(errno) : "no errno from kernel");
+            if (wlcomp_paused)
+                kill(wlcomp_pid, SIGCONT);
+            return;
+        }
+    }
+    if (wlcomp_paused)
+        kill(wlcomp_pid, SIGCONT);
+    fprintf(stderr, "[desktop] fbstat exit status=%d\n",
+            WIFEXITED(status) ? WEXITSTATUS(status) : status);
 }
 
 static void print_glmaze_status_file(void)
@@ -3241,6 +3568,22 @@ static int token_is_enabled(const char *cmdline, const char *key)
     return 0;
 }
 
+static int cmdline_has_key(const char *cmdline, const char *key)
+{
+    size_t key_len = strlen(key);
+    const char *p = cmdline;
+
+    while (*p) {
+        while (*p == ' ' || *p == '\t' || *p == '\n')
+            p++;
+        if (strncmp(p, key, key_len) == 0 && p[key_len] == '=')
+            return 1;
+        while (*p && *p != ' ' && *p != '\t' && *p != '\n')
+            p++;
+    }
+    return 0;
+}
+
 static int read_cmdline(char *buf, size_t buf_size)
 {
     int fd = open("/proc/cmdline", O_RDONLY);
@@ -3284,7 +3627,7 @@ static int cmdline_int_value(const char *cmdline, const char *key, int fallback)
         if (strncmp(p, key, key_len) == 0 && p[key_len] == '=') {
             int value = atoi(p + key_len + 1);
 
-            return value > 0 ? value : fallback;
+            return value >= 0 ? value : fallback;
         }
         while (*p && *p != ' ' && *p != '\t' && *p != '\n')
             p++;
@@ -3748,6 +4091,16 @@ static int glsmoke_demo_by_cmdline(void)
     return token_is_enabled(buf, "glsmoke_demo");
 }
 
+static int glsmoke_fbstat_by_cmdline(void)
+{
+    char buf[512];
+
+    if (read_cmdline(buf, sizeof(buf)) < 0)
+        return 0;
+
+    return token_is_enabled(buf, "glsmoke_fbstat");
+}
+
 static int gpu_validate_enabled_by_cmdline(void)
 {
     char buf[512];
@@ -3787,17 +4140,23 @@ static void glsmoke_args_from_cmdline(char *frames_arg, size_t frames_size,
                                       char *resize_arg, size_t resize_size)
 {
     char buf[512];
-    int frames = 120;
     int loops = 1;
     int resize_every = 0;
+    int frames_set = 0;
+    int frames = 0;
 
     if (read_cmdline(buf, sizeof(buf)) == 0) {
-        frames = cmdline_int_value(buf, "glsmoke_frames", frames);
+        frames_set = cmdline_has_key(buf, "glsmoke_frames");
+        if (frames_set)
+            frames = cmdline_int_value(buf, "glsmoke_frames", 0);
         loops = cmdline_int_value(buf, "glsmoke_loops", loops);
         resize_every = cmdline_int_value(buf, "glsmoke_resize_every",
                                          resize_every);
     }
-    snprintf(frames_arg, frames_size, "--frames=%d", frames);
+    if (frames_set && frames_size > 0)
+        snprintf(frames_arg, frames_size, "--frames=%d", frames);
+    else if (frames_size > 0)
+        frames_arg[0] = '\0';
     snprintf(loops_arg, loops_size, "--loops=%d", loops);
     if (resize_every > 0)
         snprintf(resize_arg, resize_size, "--resize-every=%d", resize_every);
@@ -3956,10 +4315,14 @@ int main(void)
                                   sizeof(loops_arg), resize_arg,
                                   sizeof(resize_arg));
         client_pid = demo ?
-            launch_client(client_path, client_name, "--demo", frames_arg,
-                          loops_arg) :
-            launch_client(client_path, client_name, frames_arg, loops_arg,
-                          resize_arg[0] ? resize_arg : NULL);
+            launch_client(client_path, client_name, "--demo",
+                          frames_arg[0] ? frames_arg : loops_arg,
+                          frames_arg[0] ? loops_arg : NULL) :
+            launch_client(client_path, client_name,
+                          frames_arg[0] ? frames_arg : loops_arg,
+                          frames_arg[0] ? loops_arg :
+                                           (resize_arg[0] ? resize_arg : NULL),
+                          frames_arg[0] && resize_arg[0] ? resize_arg : NULL);
         if (client_pid < 0) {
             perror("[desktop] fork GL smoke");
             cleanup();
@@ -3991,6 +4354,7 @@ int main(void)
                 if (exited == client_pid) {
                     write_child_status_file("/tmp/glsmoke-status", client_name,
                                             exited, status);
+                    run_fbstat_after_glsmoke(client_name);
                     if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
                         fprintf(stderr,
                                 "[desktop] GL smoke exited (status %d)\n",
@@ -4221,6 +4585,7 @@ int main(void)
             } else if (exited == glsmoke_pid) {
                 write_child_status_file("/tmp/glsmoke-status", "glsmoke",
                                         exited, status);
+                run_fbstat_after_glsmoke("glsmoke");
                 if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
                     fprintf(stderr, "[desktop] GL smoke exited (status %d)\n",
                             WIFEXITED(status) ? WEXITSTATUS(status) : status);

@@ -79,12 +79,24 @@ struct drm_virtgpu_getparam_compat {
 #define FB_GPU_BO_DESTROY    0x4616
 #define FB_GPU_BO_IMPORT     0x4617
 #define FB_GPU_BO_FENCE      0x4618
+#define FB_GPU_BO_EXPORT_FD  0x4622
 #define FB_GPU_FENCE_EXPORT_FD 0x4624
 #define FB_GPU_BO_IMPORT_FD  0x4623
+#define FB_GPU_VIRGL_FENCE   0x461C
+#define FB_GPU_VIRGL_CTX_CREATE  0x4619
+#define FB_GPU_VIRGL_CTX_DESTROY 0x461A
+#define FB_GPU_VIRGL_RESOURCE_CREATE 0x461E
+#define FB_GPU_VIRGL_RESOURCE_DESTROY 0x461F
+#define FB_GPU_VIRGL_TRANSFER_TO_HOST 0x4620
+#define FB_GPU_VIRGL_RESOURCE_EXPORT_FD 0x4628
 #define FB_GPU_SCANOUT_MAP   0x4629
 #define FB_GPU_SCANOUT_FLUSH 0x462A
 #define FB_GPU_DISPLAY_WAIT  0x462D
+#define FB_GPU_BO_INFO       0x462E
+#define FB_GPU_BO_COPY       0x4636
+#define FB_GPU_PAGE_FLIP     0x4637
 #define FB_GPU_DISPLAY_WAIT_F_WAIT 0x1
+#define FB_GPU_VIRGL_FENCE_WAIT 0x1
 
 #ifndef DRM_FORMAT_MOD_LINEAR
 #define DRM_FORMAT_MOD_LINEAR 0
@@ -93,6 +105,15 @@ struct drm_virtgpu_getparam_compat {
 #define FB_GPU_BO_F_EXPORTABLE 0x1
 #define FB_GPU_BO_PRESENT_F_VIRGL_COPY 0x1
 #define FB_GPU_BO_PRESENT_F_VIRGL_SCANOUT 0x2
+#define FB_GPU_BO_PRESENT_F_READBACK_FALLBACK 0x80000000u
+#define WLCOMP_VIRGL_FORMAT_B8G8R8A8_UNORM 1
+#define WLCOMP_VIRGL_BIND_RENDER_TARGET (1u << 1)
+#define WLCOMP_VIRGL_BIND_SAMPLER_VIEW  (1u << 3)
+#define WLCOMP_VIRGL_BIND_DISPLAY_TARGET (1u << 7)
+#define WLCOMP_VIRGL_BIND_SCANOUT       (1u << 18)
+#define WLCOMP_VIRGL_BIND_SHARED        (1u << 20)
+#define WLCOMP_VIRGL_BIND_LINEAR        (1u << 22)
+#define WLCOMP_PIPE_TEXTURE_2D 2
 #define MAX_DAMAGE_RECTS     32
 
 struct fb_var_screeninfo {
@@ -121,6 +142,18 @@ struct fb_gpu_bo_present {
     uint64_t fence;
 };
 
+struct fb_gpu_bo_copy {
+    uint32_t src_handle, dst_handle;
+    uint32_t src_x, src_y, dst_x, dst_y;
+    uint32_t w, h, flags, reserved;
+    uint64_t fence;
+};
+
+struct fb_gpu_page_flip {
+    uint32_t handle, flags;
+    uint64_t fence;
+};
+
 struct fb_gpu_display_wait {
     uint32_t flags;
     uint32_t refresh_millihz;
@@ -142,6 +175,12 @@ struct fb_gpu_bo_destroy {
     uint32_t handle, flags;
 };
 
+struct fb_gpu_bo_export_fd {
+    uint32_t handle, flags;
+    int32_t fd;
+    uint32_t reserved;
+};
+
 struct fb_gpu_bo_import {
     uint32_t handle, flags, width, height, pitch, reserved;
     uint64_t size, addr;
@@ -152,6 +191,13 @@ struct fb_gpu_bo_fence {
     uint64_t wait_for;
     uint64_t signaled;
     uint64_t last_present;
+};
+
+struct fb_gpu_virgl_fence {
+    uint32_t flags;
+    uint32_t reserved;
+    uint64_t wait_for;
+    uint64_t signaled;
 };
 
 struct fb_gpu_fence_export_fd {
@@ -171,6 +217,53 @@ struct fb_gpu_bo_import_fd {
     uint32_t offsets[4];
     uint32_t strides[4];
     uint64_t implicit_fence, explicit_fence;
+};
+
+struct fb_gpu_bo_info {
+    uint32_t handle, flags, width, height, pitch, format;
+    uint64_t modifier, size, addr_align, size_align;
+    uint32_t page_size, reserved;
+    uint64_t mmap_offset;
+    uint32_t plane_count, metadata_flags;
+    uint32_t offsets[4];
+    uint32_t strides[4];
+    uint64_t implicit_fence, explicit_fence;
+    uint32_t virtio_resource_id, reserved1;
+    uint64_t virtio_resource_owner_id;
+    int32_t virtio_resource_owner_tgid;
+    uint32_t reserved2;
+};
+
+struct fb_gpu_virgl_ctx {
+    uint32_t ctx_id;
+    uint32_t flags;
+    char debug_name[64];
+};
+
+struct fb_gpu_virgl_resource_create {
+    uint32_t ctx_id, flags, resource_id, target;
+    uint32_t format, bind, width, height;
+    uint32_t depth, array_size, last_level, nr_samples;
+    uint64_t size, addr;
+};
+
+struct fb_gpu_virgl_resource_destroy {
+    uint32_t resource_id;
+    uint32_t flags;
+};
+
+struct fb_gpu_virgl_resource_export_fd {
+    uint32_t resource_id, flags;
+    int32_t fd;
+    uint32_t handle, width, height, pitch, reserved;
+    uint64_t size;
+};
+
+struct fb_gpu_virgl_transfer {
+    uint32_t resource_id, flags;
+    uint32_t x, y, z, w, h, d;
+    uint64_t offset;
+    uint32_t level, stride, layer_stride, padding;
 };
 
 /* ── Mouse event (matches kernel struct mouse_event) ──────────────── */
@@ -263,6 +356,8 @@ static uint64_t get_time_us(void)
 
 #include "wlcomp_surface_state.inc"
 
+#include "wlcomp_gl_compose.inc"
+
 #include "wlcomp_buffer_shm.inc"
 
 #include "wlcomp_dmabuf.inc"
@@ -289,6 +384,22 @@ static void sig_handler(int sig)
 {
     (void)sig;
     g_running = 0;
+}
+
+static int callback_pending_epoll_timeout_ms(void)
+{
+    static int initialized;
+    static int timeout_ms = 4;
+
+    if (!initialized) {
+        timeout_ms = cmdline_int_value("wlcomp_callback_poll_ms", timeout_ms);
+        if (timeout_ms < 0)
+            timeout_ms = 0;
+        if (timeout_ms > 1000)
+            timeout_ms = 1000;
+        initialized = 1;
+    }
+    return timeout_ms;
 }
 
 int main(int argc, char **argv)
@@ -409,12 +520,27 @@ int main(int argc, char **argv)
     while (g_running) {
         struct epoll_event events[8];
         int nready;
+        int callbacks_pending;
+        int wait_ms;
+        uint32_t wait_t0;
 
         wl_display_flush_clients(g_display);
         wl_event_loop_dispatch(loop, 0);
 
-        nready = epoll_wait(epfd, events, 8,
-                            any_frame_callbacks_pending() ? 4 : 16);
+        callbacks_pending = any_frame_callbacks_pending();
+        wait_ms = callbacks_pending ? callback_pending_epoll_timeout_ms() : 16;
+        if (callbacks_pending)
+            wait_ms = frame_callback_deadline_timeout_ms(get_time_ms(),
+                                                         wait_ms);
+        wait_t0 = frame_perf_enabled() ? get_time_ms() : 0;
+
+        nready = epoll_wait(epfd, events, 8, wait_ms);
+        if (frame_perf_enabled()) {
+            uint32_t wait_elapsed = get_time_ms() - wait_t0;
+
+            frame_perf_note_loop_wait(wait_ms, wait_elapsed,
+                                      callbacks_pending, nready);
+        }
         for (int i = 0; i < nready; i++) {
             if (events[i].data.fd == wl_fd)
                 wl_event_loop_dispatch(loop, 0);
