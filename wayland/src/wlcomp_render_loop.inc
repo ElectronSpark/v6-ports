@@ -255,6 +255,27 @@ static int present_trace_enabled(void)
     return enabled;
 }
 
+static int present_trace_interval_ms(void)
+{
+    static int initialized;
+    static int interval_ms;
+    const char *env;
+
+    if (initialized)
+        return interval_ms;
+    initialized = 1;
+    interval_ms = g_fb_virgl_backed ? 5000 : 1000;
+    env = getenv("XV6_WLCOMP_TRACE_PRESENT_MS");
+    if (env && *env)
+        interval_ms = atoi(env);
+    interval_ms = cmdline_int_value("wlcomp_trace_present_ms", interval_ms);
+    if (interval_ms < 250)
+        interval_ms = 250;
+    if (interval_ms > 10000)
+        interval_ms = 10000;
+    return interval_ms;
+}
+
 /*
  * Pipelined frame callbacks: release each client to render its next frame as
  * soon as its current buffer has been latched for compositing, instead of
@@ -406,11 +427,13 @@ static void present_trace_maybe_log(uint32_t now)
     uint64_t release_flushed;
     uint64_t scanout_submits;
     uint64_t scanout_rebinds;
+    int interval_ms;
 
     if (!present_trace_enabled())
         return;
+    interval_ms = present_trace_interval_ms();
     if (next_log_ms == 0) {
-        next_log_ms = now + 1000;
+        next_log_ms = now + (uint32_t)interval_ms;
         return;
     }
     if (now < next_log_ms)
@@ -461,7 +484,7 @@ static void present_trace_maybe_log(uint32_t now)
     prev_scanout_submits = g_scanout_trace_submits;
     prev_scanout_rebinds = g_scanout_trace_rebinds;
     memset(a, 0, sizeof(*a));
-    next_log_ms = now + 1000;
+    next_log_ms = now + (uint32_t)interval_ms;
 }
 static struct gpu_compose_pending g_gpu_compose_pending[MAX_GPU_COMPOSE_PENDING];
 static int g_gpu_compose_pending_count;
@@ -615,7 +638,7 @@ static void virgl_damage_flip_gpu_window_warmup(void)
         if (!buf->is_gpu_bo || !gpu_compose_can_present_surface(surf, buf))
             continue;
         visible_gpu_window = 1;
-        if (!buffer_acquire_ready(buf))
+        if (!buffer_ready_for_gl_compose_latch(buf))
             continue;
         if (!seen_gpu_window) {
             seen_gpu_window = 1;
@@ -754,6 +777,7 @@ static int gpu_compose_damage_prefilter(void)
 {
     struct wlcomp_surface *surf;
     int added = 0;
+    static int import_skip_logs;
 
     if (!prefilter_gpu_damage_enabled() || !gpu_compose_enabled() ||
         g_damage_count <= 0)
@@ -770,8 +794,20 @@ static int gpu_compose_damage_prefilter(void)
             continue;
         if (!gpu_compose_can_present_surface(surf, buf))
             continue;
-        if (!buffer_acquire_ready(buf))
+        if (!buffer_ready_for_gl_compose_latch(buf))
             continue;
+        if (wlcomp_gl_compose_enabled() &&
+            !wlcomp_gl_compose_probe_buffer(buf)) {
+            if (present_trace_enabled() && import_skip_logs < 16) {
+                fprintf(stderr,
+                        "wlcomp: gpu-compose prefilter kept cpu damage after dmabuf import miss pid=%d res=%u tried=%d ready=%d\n",
+                        surf->client_pid,
+                        buf->plane_virtio_resource_id[0],
+                        buf->gl_import_tried, buf->gl_import_ready);
+                import_skip_logs++;
+            }
+            continue;
+        }
         if (gpu_compose_pending_add_damage(surf, buf))
             added = 1;
     }
@@ -793,6 +829,14 @@ static int gpu_compose_pending_flush(void)
                                        item->col1))
             presented++;
     }
+    /*
+     * A queued GL release sync is not useful until the command stream has
+     * been submitted.  Submit the batched compose before early frame callbacks
+     * so Mesa can recycle its previous dma-buf while the scanout present is
+     * still in flight.
+     */
+    if (presented > 0 && wlcomp_gl_compose_submit_fence_enabled())
+        wlcomp_gl_compose_flush_submitted();
     gpu_compose_pending_reset();
     return presented;
 }
@@ -982,7 +1026,8 @@ static void paint_scene(int fb_w, int fb_h, int *acquire_blocked)
         struct wlcomp_buffer *buf = surf->committed_buf;
         uint8_t *src_bytes;
         uint32_t *src;
-        if (!buffer_acquire_ready(buf)) {
+        if (!buffer_acquire_ready(buf) &&
+            !buffer_ready_for_gl_compose_latch(buf)) {
             *acquire_blocked = 1;
             continue;
         }
@@ -1222,7 +1267,7 @@ static void release_cpu_copied_buffers_after_paint(void)
             if (!buf->gpu_compose_presented)
                 continue;
         }
-        if (!buffer_acquire_ready(buf))
+        if (!buffer_ready_for_gl_compose_latch(buf))
             continue;
 
         if (gpu_compose_release_logs < 12) {
@@ -1446,6 +1491,7 @@ static void composite_and_flip(void)
     tune_damage_for_present();
     int acquire_blocked = 0;
     int paint_count;
+    int early_callbacks_done = 0;
     struct damage_rect paint_rects[MAX_DAMAGE_RECTS];
     struct wlcomp_surface *surf;
 
@@ -1454,6 +1500,20 @@ static void composite_and_flip(void)
     paint_count = g_damage_count;
     for (int i = 0; i < paint_count; i++)
         paint_rects[i] = g_damage[i];
+
+    /*
+     * Once gpu_compose_damage_prefilter() has copied the committed buffer
+     * pointers into g_gpu_compose_pending, this frame's client content is
+     * latched.  Wake GPU clients before the CPU chrome paint so their next
+     * render overlaps both chrome upload and scanout present.  CPU-only frames
+     * use the existing after-paint callback path below.
+     */
+    if (g_gpu_compose_pending_count > 0 &&
+        pipeline_frame_callbacks_enabled()) {
+        damage_all_frame_callbacks(now);
+        wl_display_flush_clients(g_display);
+        early_callbacks_done = 1;
+    }
 
     for (int i = 0; i < paint_count; i++) {
         struct wlcomp_draw_clip draw_clip;
@@ -1480,7 +1540,7 @@ static void composite_and_flip(void)
      * storage once it is safe.  d3d12-shared single-buffer clients are skipped
      * by damage_all_frame_callbacks() until their present completes.
      */
-    if (pipeline_frame_callbacks_enabled()) {
+    if (!early_callbacks_done && pipeline_frame_callbacks_enabled()) {
         damage_all_frame_callbacks(now);
         wl_display_flush_clients(g_display);
     }
@@ -1588,7 +1648,9 @@ static void composite_and_flip(void)
             display_present_ok =
                 present_virgl_scanout_rects(scanout_rects,
                                             scanout_rect_count);
-            if (display_present_ok && wlcomp_gl_compose_flush_after_scanout())
+            if (display_present_ok &&
+                wlcomp_gl_compose_flush_after_scanout() &&
+                !wlcomp_gl_compose_submit_fence_enabled())
                 wlcomp_gl_compose_flush_submitted();
             if (display_present_ok)
                 virgl_flip_copy_rects_remember(scanout_rects,
@@ -1652,7 +1714,7 @@ static void composite_and_flip(void)
         int ready = !surf->committed_buf ||
                     (!surface_has_unpresented_d3d12_buffer(surf) &&
                      present_ready &&
-                     buffer_acquire_ready(surf->committed_buf));
+                     buffer_ready_for_gl_compose_latch(surf->committed_buf));
 
         if (ready)
             surface_release_committed_buffer(surf);

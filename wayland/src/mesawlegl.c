@@ -94,6 +94,7 @@ struct app_state {
     GLuint depth_stencil_rb;
     GLuint sphere_program;
     GLuint sphere_vbo;
+    GLuint overlay_vbo;
     GLint attr_pos;
     GLint attr_color;
     GLint attr_tex_pos;
@@ -131,9 +132,18 @@ struct app_state {
     unsigned long source_content_frame;
     unsigned long source_content_hash;
     char fps_text[FPS_TEXT_MAX];
+    char overlay_fps_text[FPS_TEXT_MAX];
+    int overlay_vertex_count;
     int client_capture_enabled;
     int client_capture_done;
     int client_capture_frame;
+    double perf_start_sec;
+    int perf_frames;
+    double perf_render_us;
+    double perf_overlay_us;
+    double perf_swap_us;
+    double perf_fps_us;
+    double perf_flush_us;
 
     /*
      * Honest blit-present path: glReadPixels the genuinely GPU-rendered
@@ -656,6 +666,8 @@ static void append_fps_evidence(struct app_state *app, double now,
         render_height = app->height;
 
     app->fps_sample_seq++;
+    if (!evidence.valid && strcmp(source, "virgl-compositor-present") == 0)
+        return;
     fp = fopen(FPS_EVIDENCE_PATH, "a");
     if (!fp)
         return;
@@ -1563,23 +1575,36 @@ static void render_fps_overlay(struct app_state *app)
     text = strchr(app->fps_text, ' ');
     text = text ? text + 1 : app->fps_text;
 
-    overlay_emit_rect(vertices, &count, -0.95f, 0.93f, -0.42f, 0.61f,
-                      0.00f, 0.00f, 0.00f, 0.82f);
-    overlay_emit_rect(vertices, &count, -0.95f, 0.93f, -0.42f, 0.89f,
-                      0.10f, 0.78f, 1.00f, 0.94f);
-    overlay_emit_rect(vertices, &count, -0.95f, 0.65f, -0.42f, 0.61f,
-                      0.10f, 0.78f, 1.00f, 0.94f);
-    overlay_emit_rect(vertices, &count, -0.95f, 0.93f, -0.91f, 0.61f,
-                      0.10f, 0.78f, 1.00f, 0.94f);
-    overlay_emit_rect(vertices, &count, -0.46f, 0.93f, -0.42f, 0.61f,
-                      0.10f, 0.78f, 1.00f, 0.94f);
-    for (const char *p = text; *p && count + 42 < 512; p++) {
-        if (*p == ' ') {
-            x += w * 0.55f;
-            continue;
+    if (!app->overlay_vbo)
+        return;
+    if (app->overlay_vertex_count <= 0 ||
+        strcmp(app->overlay_fps_text, text) != 0) {
+        overlay_emit_rect(vertices, &count, -0.95f, 0.93f, -0.42f, 0.61f,
+                          0.00f, 0.00f, 0.00f, 0.82f);
+        overlay_emit_rect(vertices, &count, -0.95f, 0.93f, -0.42f, 0.89f,
+                          0.10f, 0.78f, 1.00f, 0.94f);
+        overlay_emit_rect(vertices, &count, -0.95f, 0.65f, -0.42f, 0.61f,
+                          0.10f, 0.78f, 1.00f, 0.94f);
+        overlay_emit_rect(vertices, &count, -0.95f, 0.93f, -0.91f, 0.61f,
+                          0.10f, 0.78f, 1.00f, 0.94f);
+        overlay_emit_rect(vertices, &count, -0.46f, 0.93f, -0.42f, 0.61f,
+                          0.10f, 0.78f, 1.00f, 0.94f);
+        for (const char *p = text; *p && count + 42 < 512; p++) {
+            if (*p == ' ') {
+                x += w * 0.55f;
+                continue;
+            }
+            overlay_emit_glyph(vertices, &count, *p, x, y, w, h);
+            x += w + gap;
         }
-        overlay_emit_glyph(vertices, &count, *p, x, y, w, h);
-        x += w + gap;
+        glBindBuffer(GL_ARRAY_BUFFER, app->overlay_vbo);
+        glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(count * sizeof(vertices[0])),
+                     vertices, GL_DYNAMIC_DRAW);
+        snprintf(app->overlay_fps_text, sizeof(app->overlay_fps_text), "%s",
+                 text);
+        app->overlay_vertex_count = count;
+    } else {
+        glBindBuffer(GL_ARRAY_BUFFER, app->overlay_vbo);
     }
 
     glDisable(GL_DEPTH_TEST);
@@ -1587,14 +1612,14 @@ static void render_fps_overlay(struct app_state *app)
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     glUseProgram(app->program);
-    glBindBuffer(GL_ARRAY_BUFFER, 0);
     glVertexAttribPointer((GLuint)app->attr_pos, 3, GL_FLOAT, GL_FALSE,
-                          sizeof(vertices[0]), &vertices[0].x);
+                          sizeof(vertices[0]), (const void *)0);
     glVertexAttribPointer((GLuint)app->attr_color, 4, GL_FLOAT, GL_FALSE,
-                          sizeof(vertices[0]), &vertices[0].r);
+                          sizeof(vertices[0]),
+                          (const void *)(3 * sizeof(GLfloat)));
     glEnableVertexAttribArray((GLuint)app->attr_pos);
     glEnableVertexAttribArray((GLuint)app->attr_color);
-    glDrawArrays(GL_TRIANGLES, 0, count);
+    glDrawArrays(GL_TRIANGLES, 0, app->overlay_vertex_count);
     glDisable(GL_BLEND);
 }
 
@@ -1711,6 +1736,10 @@ static int init_mesa(struct app_state *app)
         app->uniform_tex < 0)
         return -1;
 
+    glGenBuffers(1, &app->overlay_vbo);
+    if (!app->overlay_vbo)
+        return -1;
+
     if (app->api_smoke && init_api_smoke_resources(app) < 0) {
         fprintf(stderr, "mesawlegl: API smoke resource setup failed\n");
         return -1;
@@ -1741,6 +1770,11 @@ static int env_enabled(const char *name)
     const char *value = getenv(name);
 
     return value && value[0] && strcmp(value, "0") != 0;
+}
+
+static int mesa_perf_log_enabled(void)
+{
+    return env_enabled("XV6_MESAWLEGL_PERF_LOG");
 }
 
 static int env_is_zero(const char *name)
@@ -1817,6 +1851,31 @@ static void clamp_demo_size(struct app_state *app)
         app->height = app->max_height;
 }
 
+static double fps_sample_interval_sec(struct app_state *app)
+{
+    static int initialized;
+    static double interval_sec;
+    const char *env;
+
+    if (initialized)
+        return interval_sec;
+    initialized = 1;
+    interval_sec =
+        app->sphere_demo && !app->software_demo && mesa_env_requests_accel() ?
+            5.0 : 1.0;
+    env = getenv("XV6_MESAWLEGL_FPS_MS");
+    if (env && *env) {
+        int ms = atoi(env);
+
+        if (ms < 250)
+            ms = 250;
+        if (ms > 10000)
+            ms = 10000;
+        interval_sec = (double)ms / 1000.0;
+    }
+    return interval_sec;
+}
+
 static void update_demo_fps(struct app_state *app)
 {
     double now;
@@ -1824,7 +1883,6 @@ static void update_demo_fps(struct app_state *app)
     double fps;
     double displayed_fps = 0.0;
     int native_fps_credit = 0;
-    char title[96];
 
     if (!app->sphere_demo || !app->toplevel)
         return;
@@ -1834,7 +1892,7 @@ static void update_demo_fps(struct app_state *app)
         app->fps_start_sec = now;
     app->fps_frame_count++;
     elapsed = now - app->fps_start_sec;
-    if (elapsed < 1.0)
+    if (elapsed < fps_sample_interval_sec(app))
         return;
 
     fps = elapsed > 0.0 ? (double)app->fps_frame_count / elapsed : 0.0;
@@ -1850,18 +1908,12 @@ static void update_demo_fps(struct app_state *app)
     if (displayed_fps > 0.0 && !app->shm_present) {
         snprintf(app->fps_text, sizeof(app->fps_text), "FPS %.1f",
                  displayed_fps);
-        snprintf(title, sizeof(title), "Mesa 3D Demo - %.1f FPS",
-                 displayed_fps);
     } else if (app->shm_present || !native_fps_credit) {
         snprintf(app->fps_text, sizeof(app->fps_text), "FPS %.1f", fps);
-        snprintf(title, sizeof(title), "Mesa 3D Demo - %.1f FPS", fps);
     } else {
         snprintf(app->fps_text, sizeof(app->fps_text), "FPS %.1f",
                  displayed_fps);
-        snprintf(title, sizeof(title), "Mesa 3D Demo - %.1f FPS",
-                 displayed_fps);
     }
-    xdg_toplevel_set_title(app->toplevel, title);
     fprintf(stderr,
             "mesawlegl[%d]: app_loop_fps=%.1f displayed_fps=%.1f "
             "native_fps_credit=%d\n",
@@ -2049,6 +2101,13 @@ static int write_client_capture(struct app_state *app)
 
 static int draw_and_swap(struct app_state *app)
 {
+    int perf = mesa_perf_log_enabled();
+    double t0 = 0.0;
+    double t1 = 0.0;
+    double now = 0.0;
+
+    if (perf)
+        t0 = monotonic_seconds();
     if (app->sphere_demo)
         render_sphere_frame(app);
     else if (app->api_smoke)
@@ -2056,7 +2115,17 @@ static int draw_and_swap(struct app_state *app)
     else
         render_simple_frame(app);
     update_source_content_hash(app);
+    if (perf) {
+        t1 = monotonic_seconds();
+        app->perf_render_us += (t1 - t0) * 1000000.0;
+        t0 = t1;
+    }
     render_fps_overlay(app);
+    if (perf) {
+        t1 = monotonic_seconds();
+        app->perf_overlay_us += (t1 - t0) * 1000000.0;
+        t0 = t1;
+    }
     if (write_client_capture(app) != 0)
         return -1;
     if (glGetError() != GL_NO_ERROR) {
@@ -2071,8 +2140,45 @@ static int draw_and_swap(struct app_state *app)
                 app->loop, eglGetError());
         return -1;
     }
+    if (perf) {
+        t1 = monotonic_seconds();
+        app->perf_swap_us += (t1 - t0) * 1000000.0;
+        t0 = t1;
+    }
     update_demo_fps(app);
+    if (perf) {
+        t1 = monotonic_seconds();
+        app->perf_fps_us += (t1 - t0) * 1000000.0;
+        t0 = t1;
+    }
     wl_display_flush(app->display);
+    if (perf) {
+        t1 = monotonic_seconds();
+        app->perf_flush_us += (t1 - t0) * 1000000.0;
+        app->perf_frames++;
+        now = t1;
+        if (app->perf_start_sec <= 0.0)
+            app->perf_start_sec = now;
+        if (now - app->perf_start_sec >= 1.0 && app->perf_frames > 0) {
+            fprintf(stderr,
+                    "mesawlegl_perf frames=%d render_avg_us=%.0f "
+                    "overlay_avg_us=%.0f swap_avg_us=%.0f "
+                    "fps_avg_us=%.0f flush_avg_us=%.0f\n",
+                    app->perf_frames,
+                    app->perf_render_us / app->perf_frames,
+                    app->perf_overlay_us / app->perf_frames,
+                    app->perf_swap_us / app->perf_frames,
+                    app->perf_fps_us / app->perf_frames,
+                    app->perf_flush_us / app->perf_frames);
+            app->perf_start_sec = now;
+            app->perf_frames = 0;
+            app->perf_render_us = 0.0;
+            app->perf_overlay_us = 0.0;
+            app->perf_swap_us = 0.0;
+            app->perf_fps_us = 0.0;
+            app->perf_flush_us = 0.0;
+        }
+    }
     return 0;
 }
 
@@ -2189,7 +2295,7 @@ static int init_wayland(struct app_state *app)
     app->toplevel = xdg_surface_get_toplevel(app->xdg_surface);
     xdg_toplevel_add_listener(app->toplevel, &toplevel_listener, app);
     xdg_toplevel_set_title(app->toplevel,
-                           app->sphere_demo ? "Mesa 3D Demo - starting" :
+                           app->sphere_demo ? "Mesa 3D Demo" :
                                               "Mesa Native Wayland EGL");
     xdg_toplevel_set_app_id(app->toplevel, "mesawlegl");
     if (app->sphere_demo && app->max_width > 0 && app->max_height > 0) {
@@ -2222,6 +2328,8 @@ static void cleanup(struct app_state *app)
             glDeleteBuffers(1, &app->vbo);
         if (app->sphere_vbo)
             glDeleteBuffers(1, &app->sphere_vbo);
+        if (app->overlay_vbo)
+            glDeleteBuffers(1, &app->overlay_vbo);
         if (app->sphere_program)
             glDeleteProgram(app->sphere_program);
         if (app->tex_program)

@@ -1054,20 +1054,28 @@ static int wlcomp_gl_compose_probe_buffer(struct wlcomp_buffer *buf)
 
     if (!wlcomp_gl_compose_enabled() || !buf || !buf->is_gpu_bo)
         return 0;
-    if (buf->gl_import_tried)
+    if (buf->gl_import_tried && buf->gl_import_ready)
         return buf->gl_import_ready;
+    /*
+     * Import failure can be transient on virgl/d3d12 while the producer is
+     * under pressure.  Cache successful imports, but keep failures retryable;
+     * otherwise one missed EGLImage import latches this wl_buffer onto the
+     * CPU path until the client destroys it.
+     */
+    if (buf->gl_import_tried && !buf->gl_import_ready)
+        buf->gl_import_tried = 0;
     buf->gl_import_tried = 1;
 
     if (!wlcomp_gl_compose_init())
-        return 0;
+        goto fail_retry;
     if (!eglMakeCurrent(g_gl_compose.display, g_gl_compose.surface,
                         g_gl_compose.surface, g_gl_compose.context))
-        return 0;
+        goto fail_retry;
 
     handle = buf->plane_gpu_handle[0] ? buf->plane_gpu_handle[0] :
                                         buf->gpu_handle;
     if (!handle || buf->plane_stride[0] <= 0)
-        return 0;
+        goto fail_retry;
 
     if (buf->plane_dmabuf_fd[0] >= 0) {
         fd = dup(buf->plane_dmabuf_fd[0]);
@@ -1086,7 +1094,7 @@ static int wlcomp_gl_compose_probe_buffer(struct wlcomp_buffer *buf)
                         handle, errno, strerror(errno));
                 g_gl_compose.import_logs++;
             }
-            return 0;
+            goto fail_retry;
         }
         fd = export_fd.fd;
     }
@@ -1127,7 +1135,7 @@ static int wlcomp_gl_compose_probe_buffer(struct wlcomp_buffer *buf)
                     format, buf->plane_virtio_resource_id[0], eglGetError());
             g_gl_compose.import_logs++;
         }
-        return 0;
+        goto fail_retry;
     }
 
     glGenTextures(1, (GLuint *)&buf->gl_texture);
@@ -1151,7 +1159,7 @@ static int wlcomp_gl_compose_probe_buffer(struct wlcomp_buffer *buf)
         glDeleteTextures(1, (GLuint *)&buf->gl_texture);
         buf->gl_texture = 0;
         g_gl_compose.destroy_image(g_gl_compose.display, image);
-        return 0;
+        goto fail_retry;
     }
 
     if (wlcomp_gl_compose_checksum_enabled()) {
@@ -1216,6 +1224,13 @@ static int wlcomp_gl_compose_probe_buffer(struct wlcomp_buffer *buf)
         g_gl_compose.import_logs++;
     }
     return 1;
+
+fail_retry:
+    if (fd >= 0)
+        close(fd);
+    buf->gl_import_tried = 0;
+    buf->gl_import_ready = 0;
+    return 0;
 }
 
 static int wlcomp_gl_compose_present_buffer(struct wlcomp_buffer *buf,

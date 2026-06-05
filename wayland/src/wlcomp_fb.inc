@@ -253,6 +253,25 @@ static int damage_stats_interval_ms(void)
     return interval_ms;
 }
 
+static int damage_stats_stderr_enabled(void)
+{
+    static int initialized;
+    static int enabled;
+    const char *env;
+
+    if (initialized)
+        return enabled;
+    initialized = 1;
+    enabled = !(g_fb_virgl_backed &&
+                cmdline_int_value("wlcomp_trace_present", 0) != 0);
+    env = getenv("XV6_WLCOMP_STATS_STDERR");
+    if (env && *env)
+        enabled = strcmp(env, "0") != 0 && strcmp(env, "no") != 0 &&
+                  strcmp(env, "false") != 0 && strcmp(env, "off") != 0;
+    enabled = cmdline_int_value("wlcomp_stats_stderr", enabled) != 0;
+    return enabled;
+}
+
 static void damage_stats_maybe_log(uint32_t now)
 {
     static uint32_t next_log_ms;
@@ -267,6 +286,11 @@ static void damage_stats_maybe_log(uint32_t now)
     if (now < next_log_ms)
         return;
     cur = g_damage_stats;
+    if (!damage_stats_stderr_enabled()) {
+        last = cur;
+        next_log_ms = now + (uint32_t)interval_ms;
+        return;
+    }
     fprintf(stderr,
             "wlcomp: damage stats frames=%lu rects=%lu pixels=%lu full=%lu "
             "union=%lu avg_interval=%lums max_interval=%lums "
@@ -323,6 +347,8 @@ static void fps_probe_maybe_write(uint32_t now)
 {
     static uint32_t next_write_ms;
     static uint32_t last_ms;
+    static int interval_initialized;
+    static uint32_t interval_ms;
     static struct wlcomp_damage_stats last;
     struct wlcomp_damage_stats cur;
     uint32_t elapsed;
@@ -331,8 +357,21 @@ static void fps_probe_maybe_write(uint32_t now)
     uint64_t fps_x1000;
     FILE *fp;
 
+    if (!interval_initialized) {
+        int configured = cmdline_int_value(
+            "wlcomp_fps_probe_ms",
+            g_fb_virgl_backed ? 5000 : 1000);
+
+        if (configured < 250)
+            configured = 250;
+        if (configured > 10000)
+            configured = 10000;
+        interval_ms = (uint32_t)configured;
+        interval_initialized = 1;
+    }
+
     if (next_write_ms == 0) {
-        next_write_ms = now + 1000;
+        next_write_ms = now + interval_ms;
         last_ms = now;
         last = g_damage_stats;
         return;
@@ -373,7 +412,7 @@ static void fps_probe_maybe_write(uint32_t now)
     last = cur;
     last_ms = now;
     g_damage_interval_max_ms = 0;
-    next_write_ms = now + 1000;
+    next_write_ms = now + interval_ms;
 }
 
 static void release_framebuffer_backing(void)

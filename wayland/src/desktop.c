@@ -2374,6 +2374,7 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
         char mesa_wayland_color_buffers_env[48] =
             "XV6_MESA_WAYLAND_COLOR_BUFFERS=0";
         char mesa_perf_log_env[32] = "XV6_MESA_PERF_LOG=0";
+        char mesa_client_perf_log_env[36] = "XV6_MESAWLEGL_PERF_LOG=0";
         char mesa_wayland_throttle_env[40] = "XV6_MESA_WAYLAND_THROTTLE=1";
         char mesa_cmdline_buf[512];
         char mesa_size_arg[32];
@@ -2423,6 +2424,11 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
                      "XV6_MESA_PERF_LOG=%d",
                      cmdline_int_value(mesa_cmdline_buf,
                                        "glsmoke_mesa_perf", 0) != 0);
+            snprintf(mesa_client_perf_log_env,
+                     sizeof(mesa_client_perf_log_env),
+                     "XV6_MESAWLEGL_PERF_LOG=%d",
+                     cmdline_int_value(mesa_cmdline_buf,
+                                       "glsmoke_client_perf", 0) != 0);
             snprintf(mesa_wayland_throttle_env,
                      sizeof(mesa_wayland_throttle_env),
                      "XV6_MESA_WAYLAND_THROTTLE=%d",
@@ -2963,6 +2969,7 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             "EGL_PLATFORM=wayland",
             mesa_wayland_throttle_env,
             mesa_perf_log_env,
+            mesa_client_perf_log_env,
             "XV6_MESAWLEGL_SHM_PRESENT=0",
             mesa_capture_env,
             mesa_capture_frame_env,
@@ -2983,6 +2990,7 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             "EGL_PLATFORM=wayland",
             "MESA_LOADER_DRIVER_OVERRIDE=swrast",
             "LIBGL_DRIVERS_PATH=/lib/dri",
+            mesa_client_perf_log_env,
             mesa_capture_env,
             mesa_capture_frame_env,
             mesa_wayland_color_buffers_env,
@@ -3007,6 +3015,7 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             "EGL_PLATFORM=wayland",
             mesa_wayland_throttle_env,
             mesa_perf_log_env,
+            mesa_client_perf_log_env,
             mesa_capture_env,
             mesa_capture_frame_env,
             mesa_wayland_color_buffers_env,

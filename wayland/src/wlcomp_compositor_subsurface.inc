@@ -129,7 +129,7 @@ static void surface_commit(struct wl_client *client, struct wl_resource *resourc
         if (old_committed && surf->pending_buf &&
             surf->pending_buf->is_gpu_bo &&
             !surf->pending_buf->is_d3d12_shared &&
-            !buffer_acquire_ready(surf->pending_buf)) {
+            !buffer_ready_for_gl_compose_latch(surf->pending_buf)) {
             static int defer_logs;
             struct wlcomp_buffer *old_deferred = surf->deferred_buf;
 
@@ -374,7 +374,7 @@ static void surface_promote_deferred_buffers(void)
 
         if (!buf)
             continue;
-        if (!buffer_acquire_ready(buf))
+        if (!buffer_ready_for_gl_compose_latch(buf))
             continue;
 
         old_committed = surf->committed_buf;

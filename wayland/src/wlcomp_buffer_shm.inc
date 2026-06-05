@@ -552,6 +552,16 @@ static int buffer_acquire_ready(struct wlcomp_buffer *buf)
     return 0;
 }
 
+static int buffer_ready_for_gl_compose_latch(struct wlcomp_buffer *buf)
+{
+    if (!buf)
+        return 1;
+    if (g_fb_virgl_backed && buf->is_gpu_bo && !buf->is_d3d12_shared &&
+        buf->acquire_fence_fd < 0 && wlcomp_gl_compose_enabled())
+        return 1;
+    return buffer_acquire_ready(buf);
+}
+
 static void *buffer_data(struct wlcomp_buffer *buf)
 {
     static int d3d12_cpu_map_logs;

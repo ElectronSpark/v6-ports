@@ -389,7 +389,7 @@ static void sig_handler(int sig)
 static int callback_pending_epoll_timeout_ms(void)
 {
     static int initialized;
-    static int timeout_ms = 4;
+    static int timeout_ms = 1;
 
     if (!initialized) {
         timeout_ms = cmdline_int_value("wlcomp_callback_poll_ms", timeout_ms);
