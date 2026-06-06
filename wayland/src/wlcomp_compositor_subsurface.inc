@@ -58,7 +58,7 @@ static void surface_frame(struct wl_client *client, struct wl_resource *resource
         return;
     }
     frame_cb->resource = cb;
-    wl_list_insert(surf->frame_callbacks.prev, &frame_cb->link);
+    wl_list_insert(surf->pending_frame_callbacks.prev, &frame_cb->link);
     surface_log_limited(surf, "frame", surf->committed_buf);
 }
 
@@ -76,12 +76,105 @@ static void surface_set_input_region(struct wl_client *client,
     (void)client; (void)resource; (void)region;
 }
 
+static int commit_frame_callbacks_enabled(void)
+{
+    static int initialized;
+    static int enabled;
+    const char *env;
+
+    if (initialized)
+        return enabled;
+    initialized = 1;
+    enabled = cmdline_int_value("wlcomp_callback_on_commit", 0) != 0;
+    env = getenv("XV6_WLCOMP_CALLBACK_ON_COMMIT");
+    if (env && *env)
+        enabled = strcmp(env, "0") != 0 && strcmp(env, "no") != 0 &&
+                  strcmp(env, "false") != 0 && strcmp(env, "off") != 0;
+    return enabled;
+}
+
+static int surface_commit_can_send_frame_callbacks(struct wlcomp_surface *surf)
+{
+    struct wlcomp_buffer *buf;
+
+    if (!commit_frame_callbacks_enabled())
+        return 0;
+    if (!surf || surf->is_cursor || !surf->mapped || !surf->committed_buf)
+        return 0;
+    if (!g_fb_virgl_backed || !gpu_compose_enabled() ||
+        !wlcomp_gl_compose_enabled())
+        return 0;
+    buf = surf->committed_buf;
+    if (!buf->is_gpu_bo || buf->is_d3d12_shared)
+        return 0;
+    if (!buffer_ready_for_gl_compose_latch(buf))
+        return 0;
+    if (!gpu_compose_can_present_surface(surf, buf))
+        return 0;
+    if (!wlcomp_gl_compose_probe_buffer(buf))
+        return 0;
+    return 1;
+}
+
+static int surface_commit_can_stage_gpu_buffer(struct wlcomp_surface *surf,
+                                               struct wlcomp_buffer *old_buf,
+                                               struct wlcomp_buffer *new_buf)
+{
+    if (!commit_frame_callbacks_enabled())
+        return 0;
+    if (!surf || !old_buf || !new_buf || surf->is_cursor)
+        return 0;
+    if (!g_fb_virgl_backed || !gpu_compose_enabled() ||
+        !wlcomp_gl_compose_enabled())
+        return 0;
+    if (!old_buf->is_gpu_bo || old_buf->is_d3d12_shared ||
+        !new_buf->is_gpu_bo || new_buf->is_d3d12_shared)
+        return 0;
+    if (old_buf->gpu_compose_presented || surf->buffer_released)
+        return 0;
+    if (!buffer_ready_for_gl_compose_latch(new_buf))
+        return 0;
+    if (!gpu_compose_can_present_surface(surf, new_buf))
+        return 0;
+    if (!wlcomp_gl_compose_probe_buffer(new_buf))
+        return 0;
+    return 1;
+}
+
+static int surface_send_frame_callbacks_now(struct wlcomp_surface *surf,
+                                            uint32_t now, const char *stage)
+{
+    struct wlcomp_frame_callback *cb;
+    struct wlcomp_frame_callback *tmp;
+    int pending_before = surface_frame_callback_count(surf);
+    int delivered = 0;
+
+    if (pending_before <= 0) {
+        frame_perf_note(now, stage, pending_before, 0, 0, 0);
+        return 0;
+    }
+    if (!frame_callbacks_due(now)) {
+        frame_perf_note(now, stage, pending_before, 0, 0, 0);
+        return 0;
+    }
+    wl_list_for_each_safe(cb, tmp, &surf->frame_callbacks, link) {
+        xv6_d3d12_observe_frame_callback(surf, now);
+        wl_callback_send_done(cb->resource, now);
+        wl_resource_destroy(cb->resource);
+        wl_list_remove(&cb->link);
+        free(cb);
+        delivered++;
+    }
+    frame_perf_note(now, stage, pending_before, delivered, 0, 1);
+    return delivered;
+}
+
 static void surface_commit(struct wl_client *client, struct wl_resource *resource)
 {
     (void)client;
     struct wlcomp_surface *surf = surface_from_resource(resource);
-    struct wlcomp_buffer *old_committed;
-    int old_buffer_released;
+    struct wlcomp_buffer *old_committed = NULL;
+    int old_buffer_released = 0;
     int old_w = 0, old_h = 0;
     int buffer_size_changed = 0;
     int first_map = 0;
@@ -150,9 +243,39 @@ static void surface_commit(struct wl_client *client, struct wl_resource *resourc
             surface_pending_damage_clear(surf);
             return;
         }
+        if (surface_commit_can_stage_gpu_buffer(surf, old_committed,
+                                                surf->pending_buf)) {
+            static int stage_logs;
+            struct wlcomp_buffer *old_staged = surf->staged_buf;
+
+            surf->staged_buf = surf->pending_buf;
+            surf->pending_buf = NULL;
+            surf->has_pending_buffer = 0;
+            surf->staged_buf->gpu_compose_presented = 0;
+            frame_callback_list_append(&surf->staged_frame_callbacks,
+                                       &surf->pending_frame_callbacks);
+            if (old_staged && old_staged != surf->staged_buf) {
+                queue_buffer_release(old_staged);
+                buffer_maybe_free(old_staged);
+            }
+            if (stage_logs < 16) {
+                fprintf(stderr,
+                        "wlcomp: staged gpu buffer pid=%d res=%u behind unlatched res=%u callbacks=%d\n",
+                        surf->client_pid,
+                        surf->staged_buf->plane_virtio_resource_id[0],
+                        old_committed->plane_virtio_resource_id[0],
+                        frame_callback_list_count(
+                            &surf->staged_frame_callbacks));
+                stage_logs++;
+            }
+            surface_pending_damage_clear(surf);
+            return;
+        }
         surf->committed_buf = surf->pending_buf;
         surf->pending_buf = NULL;
         surf->has_pending_buffer = 0;
+        frame_callback_list_append(&surf->frame_callbacks,
+                                   &surf->pending_frame_callbacks);
         if (surf->committed_buf)
             surf->committed_buf->gpu_compose_presented = 0;
         if (surf->committed_buf && surf->committed_buf->is_d3d12_shared) {
@@ -197,9 +320,14 @@ static void surface_commit(struct wl_client *client, struct wl_resource *resourc
         }
 
         surf->buffer_released = 0;
+        if (surf->is_cursor && surf == g_cursor_surface)
+            (void)hw_cursor_upload_surface(surf);
     }
-    else
+    else {
+        frame_callback_list_append(&surf->frame_callbacks,
+                                   &surf->pending_frame_callbacks);
         surface_log_limited(surf, "commit-empty", surf->committed_buf);
+    }
 
     if (!surf->has_pending_buffer && !surf->committed_buf)
         xdg_surface_send_initial_configure_if_needed(surf);
@@ -207,13 +335,26 @@ static void surface_commit(struct wl_client *client, struct wl_resource *resourc
     if (surf->committed_buf && surf->xdg_toplevel && !surf->mapped) {
         /* Center the logical xdg window, not any buffer margins. */
         int32_t gx, gy, gw, gh;
+        int cascade = surface_existing_mapped_toplevels();
+        int32_t desktop_h = (int32_t)g_fb_h - 36;
+        int32_t max_x, max_y;
         surface_window_geometry(surf, &gx, &gy, &gw, &gh);
         (void)gx;
         (void)gy;
         surf->x = ((int32_t)g_fb_w - gw) / 2;
-        surf->y = ((int32_t)g_fb_h - 36 - gh) / 2;
+        surf->y = (desktop_h - gh) / 2;
+        if (cascade > 0) {
+            surf->x += (cascade % 3) * 220;
+            surf->y += (cascade % 3) * 120;
+        }
         if (surf->x < 0) surf->x = 0;
         if (surf->y < 0) surf->y = 0;
+        max_x = (int32_t)g_fb_w - gw;
+        max_y = desktop_h - gh;
+        if (max_x < 0) max_x = 0;
+        if (max_y < 0) max_y = 0;
+        if (surf->x > max_x) surf->x = max_x;
+        if (surf->y > max_y) surf->y = max_y;
         if (surface_is_fullscreen_direct(surf)) {
             /* Unredirected client owns the whole scanout: pin to origin. */
             surf->x = 0;
@@ -221,11 +362,11 @@ static void surface_commit(struct wl_client *client, struct wl_resource *resourc
         }
         surf->mapped = 1;
         first_map = 1;
-        fprintf(stderr, "wlcomp: mapped toplevel pid=%d size=%dx%d geom=%dx%d\n",
+        fprintf(stderr, "wlcomp: mapped toplevel pid=%d size=%dx%d geom=%dx%d pos=%d,%d cascade=%d\n",
                 surf->client_pid,
                 surf->committed_buf ? surf->committed_buf->width : 0,
                 surf->committed_buf ? surf->committed_buf->height : 0,
-                gw, gh);
+                gw, gh, surf->x, surf->y, cascade);
 
         /*
          * A newly mapped Wayland toplevel is a foreground activation.  Clear
@@ -268,7 +409,7 @@ static void surface_commit(struct wl_client *client, struct wl_resource *resourc
     else if (damage_surface_pending(surf)) {
         /* The pending Wayland damage was enough to repaint this commit. */
     } else if (had_pending_buffer && buffer_changed && surf->committed_buf) {
-        damage_surface(surf);
+        damage_surface_gpu_buffer_swap(surf);
     }
     if (surf->maximized && surf->xdg_toplevel && surf->committed_buf &&
         (first_map || buffer_size_changed || buffer_changed)) {
@@ -295,6 +436,17 @@ static void surface_commit(struct wl_client *client, struct wl_resource *resourc
         surf->demo_resize_h = surf->committed_buf ?
             surf->committed_buf->height : 0;
         wlcomp_emit_demo_interaction_matrix(surf, "buffer-size-change");
+    }
+    if (had_pending_buffer && buffer_changed &&
+        old_committed &&
+        (old_committed->gpu_compose_presented || old_buffer_released) &&
+        !surf->staged_buf &&
+        surface_commit_can_send_frame_callbacks(surf)) {
+        int delivered =
+            surface_send_frame_callbacks_now(surf, get_time_ms(), "commit");
+
+        if (delivered > 0)
+            wl_display_flush_clients(g_display);
     }
     if (surf->committed_buf && surf->committed_buf->is_d3d12_shared) {
         int32_t gx, gy, gw, gh;
@@ -366,6 +518,7 @@ static void surface_promote_deferred_buffers(void)
 {
     struct wlcomp_surface *surf;
     static int promote_logs;
+    static int stage_promote_logs;
 
     wl_list_for_each(surf, &g_surfaces, link) {
         struct wlcomp_buffer *buf = surf->deferred_buf;
@@ -389,13 +542,50 @@ static void surface_promote_deferred_buffers(void)
                 queue_buffer_release(old_committed);
             buffer_maybe_free(old_committed);
         }
-        damage_surface(surf);
+        damage_surface_gpu_buffer_swap(surf);
         if (promote_logs < 16) {
             fprintf(stderr,
                     "wlcomp: promoted deferred gpu buffer pid=%d res=%u acquire-ready\n",
                     surf->client_pid,
                     buf->plane_virtio_resource_id[0]);
             promote_logs++;
+        }
+    }
+    wl_list_for_each(surf, &g_surfaces, link) {
+        struct wlcomp_buffer *buf = surf->staged_buf;
+        struct wlcomp_buffer *old_committed;
+        int old_buffer_released;
+
+        if (!buf)
+            continue;
+        if (surf->committed_buf && !surf->committed_buf->gpu_compose_presented &&
+            !surf->buffer_released)
+            continue;
+        if (!buffer_ready_for_gl_compose_latch(buf))
+            continue;
+
+        old_committed = surf->committed_buf;
+        old_buffer_released = surf->buffer_released;
+        surf->staged_buf = NULL;
+        surf->committed_buf = buf;
+        surf->buffer_released = 0;
+        buf->gpu_compose_presented = 0;
+        frame_callback_list_append(&surf->frame_callbacks,
+                                   &surf->staged_frame_callbacks);
+        frame_callbacks_force_due();
+
+        if (old_committed && old_committed != buf) {
+            if (old_committed->resource && !old_buffer_released)
+                queue_buffer_release(old_committed);
+            buffer_maybe_free(old_committed);
+        }
+        damage_surface_gpu_buffer_swap(surf);
+        if (stage_promote_logs < 16) {
+            fprintf(stderr,
+                    "wlcomp: promoted staged gpu buffer pid=%d res=%u callbacks=%d\n",
+                    surf->client_pid, buf->plane_virtio_resource_id[0],
+                    surface_frame_callback_count(surf));
+            stage_promote_logs++;
         }
     }
 }
@@ -450,6 +640,7 @@ static void surface_destroy_handler(struct wl_resource *resource)
         struct wlcomp_buffer *pending_buf = surf->pending_buf;
         struct wlcomp_buffer *committed_buf = surf->committed_buf;
         struct wlcomp_buffer *deferred_buf = surf->deferred_buf;
+        struct wlcomp_buffer *staged_buf = surf->staged_buf;
         struct wlcomp_surface *child;
         struct wlcomp_frame_callback *cb;
         struct wlcomp_frame_callback *tmp;
@@ -460,7 +651,17 @@ static void surface_destroy_handler(struct wl_resource *resource)
                     surf->client_pid, surf->mapped, surf->title,
                     surf->app_id);
         damage_surface(surf);
+        wl_list_for_each_safe(cb, tmp, &surf->pending_frame_callbacks, link) {
+            wl_resource_destroy(cb->resource);
+            wl_list_remove(&cb->link);
+            free(cb);
+        }
         wl_list_for_each_safe(cb, tmp, &surf->frame_callbacks, link) {
+            wl_resource_destroy(cb->resource);
+            wl_list_remove(&cb->link);
+            free(cb);
+        }
+        wl_list_for_each_safe(cb, tmp, &surf->staged_frame_callbacks, link) {
             wl_resource_destroy(cb->resource);
             wl_list_remove(&cb->link);
             free(cb);
@@ -499,10 +700,13 @@ static void surface_destroy_handler(struct wl_resource *resource)
         free(surf);
 
         if (pending_buf && pending_buf != committed_buf &&
-            pending_buf != deferred_buf)
+            pending_buf != deferred_buf && pending_buf != staged_buf)
             buffer_maybe_free(pending_buf);
         if (deferred_buf && deferred_buf != committed_buf)
             buffer_maybe_free(deferred_buf);
+        if (staged_buf && staged_buf != committed_buf &&
+            staged_buf != deferred_buf)
+            buffer_maybe_free(staged_buf);
         buffer_maybe_free(committed_buf);
     }
 }
@@ -560,7 +764,9 @@ static void comp_create_surface(struct wl_client *client,
 
     surf->resource = res;
     surf->pending_acquire_fence_fd = -1;
+    wl_list_init(&surf->pending_frame_callbacks);
     wl_list_init(&surf->frame_callbacks);
+    wl_list_init(&surf->staged_frame_callbacks);
     wl_client_get_credentials(client, &client_pid, &client_uid, &client_gid);
     surf->client_pid = client_pid;
     wl_resource_set_implementation(res, &surface_impl, surf,

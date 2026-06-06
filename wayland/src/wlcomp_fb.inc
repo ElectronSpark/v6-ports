@@ -1,5 +1,6 @@
 /* Framebuffer state */
 static int      g_fb_fd   = -1;
+static int      g_hw_cursor = 0;   /* virtio-gpu hardware cursor plane active */
 static uint32_t g_fb_w, g_fb_h;
 static uint32_t g_fb_pitch;
 static uint32_t *g_fb_buf;  /* compositing buffer */
@@ -15,6 +16,8 @@ static uint64_t g_fb_bo_last_signaled_fence;
 static uint64_t g_fb_display_wait_sequence;
 static uint64_t g_fb_display_last_complete;
 static uint64_t g_fb_display_stall_start_ms;
+static uint64_t g_async_scanout_trace_us;
+static uint64_t g_async_scanout_trace_completions;
 struct damage_rect {
     int32_t x1, y1, x2, y2;
 };
@@ -22,6 +25,7 @@ static struct damage_rect g_damage[MAX_DAMAGE_RECTS];
 static int      g_damage_count;
 static struct damage_rect g_paint_clip;
 static int      g_paint_clip_enabled;
+static int      g_virgl_rect_scanout_this_frame;
 
 enum full_damage_reason {
     FULL_DAMAGE_OTHER,
@@ -95,6 +99,7 @@ static uint64_t g_buffer_release_trace_total;
 static uint64_t g_buffer_release_trace_gpu_immediate;
 static uint64_t g_buffer_release_trace_queued;
 static uint64_t g_buffer_release_trace_flushed;
+static uint64_t g_buffer_release_trace_latch_flushed;
 static uint64_t g_scanout_trace_submits;
 static uint64_t g_scanout_trace_rebinds;
 
@@ -232,6 +237,34 @@ static int damage_repair_interval_ms(void)
     }
     interval_ms = cmdline_int_value("wlcomp_repair_ms", interval_ms);
     return interval_ms;
+}
+
+/*
+ * When the desktop is idle (no animating GL client driving frame callbacks)
+ * the only damage is sparse and small -- typically the 1 Hz taskbar clock or
+ * an occasional pointer/hover update.  On the WSL d3d12 virtio-vga-gl host,
+ * those tiny partial scanout flushes are coalesced and the GTK window only
+ * visibly refreshes every couple of seconds.  Promote such idle presents to a
+ * full-surface flush so the host re-samples the whole scanout (the same shape
+ * the 3D demo produces with its continuous full page-flips), keeping the idle
+ * desktop responsive.  Fail-closed: wlcomp_idle_full_present=0 /
+ * XV6_WLCOMP_IDLE_FULL_PRESENT=0 restores the partial-rect behavior.
+ */
+static int wlcomp_idle_full_present_enabled(void)
+{
+    static int initialized;
+    static int enabled = 1;
+    const char *env;
+
+    if (initialized)
+        return enabled;
+    initialized = 1;
+    enabled = cmdline_int_value("wlcomp_idle_full_present", enabled) != 0;
+    env = getenv("XV6_WLCOMP_IDLE_FULL_PRESENT");
+    if (env && *env)
+        enabled = strcmp(env, "0") != 0 && strcmp(env, "no") != 0 &&
+                  strcmp(env, "false") != 0 && strcmp(env, "off") != 0;
+    return enabled;
 }
 
 static int damage_stats_interval_ms(void)
@@ -640,6 +673,294 @@ static void wlcomp_scanout_perf_note(uint64_t dt_us, uint32_t x, uint32_t y,
     next_log_ms = now + 1000;
 }
 
+struct wlcomp_async_scanout_job {
+    uint32_t handle;
+    uint32_t resource_id;
+    uint32_t width;
+    uint32_t height;
+    struct fb_gpu_page_flip flip;
+    uint64_t dt_us;
+    int ret;
+    int err;
+};
+
+static struct {
+    int initialized;
+    int available;
+    int job_pending;
+    int job_active;
+    int done_pending;
+    int failed_since_present;
+    uint32_t in_flight_handle;
+    uint32_t in_flight_resource_id;
+    pthread_t thread;
+    pthread_mutex_t lock;
+    pthread_cond_t cond;
+    struct wlcomp_async_scanout_job job;
+} g_async_scanout;
+
+static int wlcomp_async_scanout_submit_enabled(void)
+{
+    static int initialized;
+    static int enabled;
+    static int logged;
+    const char *env;
+
+    if (initialized)
+        return enabled;
+    initialized = 1;
+    enabled = cmdline_int_value("wlcomp_async_scanout_submit", 1) != 0;
+    env = getenv("XV6_WLCOMP_ASYNC_SCANOUT_SUBMIT");
+    if (env && *env)
+        enabled = strcmp(env, "0") != 0 && strcmp(env, "no") != 0 &&
+                  strcmp(env, "false") != 0 && strcmp(env, "off") != 0;
+    if (enabled && !logged) {
+        fprintf(stderr, "wlcomp: async scanout submit enabled\n");
+        logged = 1;
+    }
+    return enabled;
+}
+
+static int wlcomp_async_scanout_delay_us(void)
+{
+    static int initialized;
+    static int delay_us;
+    const char *env;
+
+    if (initialized)
+        return delay_us;
+    initialized = 1;
+    delay_us = cmdline_int_value("wlcomp_async_scanout_delay_us", 0);
+    env = getenv("XV6_WLCOMP_ASYNC_SCANOUT_DELAY_US");
+    if (env && *env)
+        delay_us = atoi(env);
+    if (delay_us < 0)
+        delay_us = 0;
+    if (delay_us > 20000)
+        delay_us = 20000;
+    if (delay_us > 0)
+        fprintf(stderr,
+                "wlcomp: async scanout submit delay_us=%d\n",
+                delay_us);
+    return delay_us;
+}
+
+static void *wlcomp_async_scanout_worker(void *arg)
+{
+    (void)arg;
+
+    for (;;) {
+        struct wlcomp_async_scanout_job job;
+        int delay_us;
+        uint64_t t0;
+
+        pthread_mutex_lock(&g_async_scanout.lock);
+        while (!g_async_scanout.job_pending)
+            pthread_cond_wait(&g_async_scanout.cond, &g_async_scanout.lock);
+        job = g_async_scanout.job;
+        g_async_scanout.job_pending = 0;
+        g_async_scanout.job_active = 1;
+        pthread_mutex_unlock(&g_async_scanout.lock);
+
+        delay_us = wlcomp_async_scanout_delay_us();
+        if (delay_us > 0)
+            usleep((useconds_t)delay_us);
+        errno = 0;
+        t0 = get_time_us();
+        job.ret = ioctl(g_fb_fd, FB_GPU_PAGE_FLIP, &job.flip);
+        job.err = job.ret == 0 ? 0 : errno;
+        job.dt_us = get_time_us() - t0;
+
+        pthread_mutex_lock(&g_async_scanout.lock);
+        g_async_scanout.job = job;
+        g_async_scanout.job_active = 0;
+        g_async_scanout.done_pending = 1;
+        pthread_cond_broadcast(&g_async_scanout.cond);
+        pthread_mutex_unlock(&g_async_scanout.lock);
+    }
+    return NULL;
+}
+
+static int wlcomp_async_scanout_ensure_started(void)
+{
+    int ret;
+
+    if (g_async_scanout.initialized)
+        return g_async_scanout.available;
+
+    memset(&g_async_scanout, 0, sizeof(g_async_scanout));
+    if (pthread_mutex_init(&g_async_scanout.lock, NULL) != 0)
+        return 0;
+    if (pthread_cond_init(&g_async_scanout.cond, NULL) != 0)
+        return 0;
+    ret = pthread_create(&g_async_scanout.thread, NULL,
+                         wlcomp_async_scanout_worker, NULL);
+    if (ret != 0) {
+        fprintf(stderr,
+                "wlcomp: async scanout submit worker unavailable ret=%d\n",
+                ret);
+        g_async_scanout.initialized = 1;
+        g_async_scanout.available = 0;
+        return 0;
+    }
+    pthread_detach(g_async_scanout.thread);
+    g_async_scanout.initialized = 1;
+    g_async_scanout.available = 1;
+    return 1;
+}
+
+static int wlcomp_async_scanout_has_pending_locked(void)
+{
+    return g_async_scanout.job_pending || g_async_scanout.job_active ||
+           g_async_scanout.done_pending;
+}
+
+static int wlcomp_async_scanout_drain(int wait)
+{
+    struct wlcomp_async_scanout_job job;
+    int have_done = 0;
+    static int done_logs;
+    static int error_logs;
+
+    if (!g_async_scanout.initialized || !g_async_scanout.available)
+        return 1;
+
+    pthread_mutex_lock(&g_async_scanout.lock);
+    while (wait && !g_async_scanout.done_pending &&
+           (g_async_scanout.job_pending || g_async_scanout.job_active))
+        pthread_cond_wait(&g_async_scanout.cond, &g_async_scanout.lock);
+    if (g_async_scanout.done_pending) {
+        job = g_async_scanout.job;
+        g_async_scanout.done_pending = 0;
+        g_async_scanout.in_flight_handle = 0;
+        g_async_scanout.in_flight_resource_id = 0;
+        have_done = 1;
+    }
+    if (!have_done && wlcomp_async_scanout_has_pending_locked()) {
+        pthread_mutex_unlock(&g_async_scanout.lock);
+        return 0;
+    }
+    pthread_mutex_unlock(&g_async_scanout.lock);
+
+    if (!have_done)
+        return 1;
+
+    wlcomp_scanout_perf_note(job.dt_us, 0, 0, job.width, job.height,
+                             job.ret, 1);
+    if (job.ret == 0) {
+        g_async_scanout.failed_since_present = 0;
+        g_async_scanout_trace_us += job.dt_us;
+        g_async_scanout_trace_completions++;
+        if (job.flip.flags & FB_GPU_PAGE_FLIP_F_SCANOUT_REBIND)
+            g_scanout_trace_rebinds++;
+        if (job.flip.fence > g_fb_bo_last_present_fence)
+            g_fb_bo_last_present_fence = job.flip.fence;
+        if (done_logs < 12) {
+            fprintf(stderr,
+                    "wlcomp: async virgl framebuffer page-flip complete handle=%u res=%u fence=%lu flags=0x%x dt_us=%lu\n",
+                    job.handle, job.resource_id,
+                    (unsigned long)job.flip.fence, job.flip.flags,
+                    (unsigned long)job.dt_us);
+            done_logs++;
+        }
+        return 1;
+    }
+
+    g_async_scanout.failed_since_present = 1;
+    if (error_logs < 8) {
+        fprintf(stderr,
+                "wlcomp: async virgl framebuffer page-flip failed errno=%d (%s) handle=%u res=%u dt_us=%lu\n",
+                job.err, strerror(job.err), job.handle, job.resource_id,
+                (unsigned long)job.dt_us);
+        error_logs++;
+    }
+    return 0;
+}
+
+static int wlcomp_async_scanout_present_pending(void)
+{
+    if (!g_async_scanout.initialized || !g_async_scanout.available)
+        return 0;
+    if (!wlcomp_async_scanout_drain(0))
+        return 1;
+    return g_async_scanout.failed_since_present;
+}
+
+static int wlcomp_async_scanout_present_in_flight(void)
+{
+    int pending;
+
+    if (!g_async_scanout.initialized || !g_async_scanout.available)
+        return 0;
+    (void)wlcomp_async_scanout_drain(0);
+    pthread_mutex_lock(&g_async_scanout.lock);
+    pending = g_async_scanout.job_pending || g_async_scanout.job_active ||
+              g_async_scanout.done_pending;
+    pthread_mutex_unlock(&g_async_scanout.lock);
+    return pending;
+}
+
+static int wlcomp_async_scanout_target_in_flight(uint32_t handle,
+                                                 uint32_t resource_id)
+{
+    int pending;
+    int in_flight;
+
+    if (!g_async_scanout.initialized || !g_async_scanout.available)
+        return 0;
+    (void)wlcomp_async_scanout_drain(0);
+    pthread_mutex_lock(&g_async_scanout.lock);
+    pending = g_async_scanout.job_pending || g_async_scanout.job_active ||
+              g_async_scanout.done_pending;
+    in_flight = pending &&
+                ((handle != 0 &&
+                  handle == g_async_scanout.in_flight_handle) ||
+                 (resource_id != 0 &&
+                  resource_id == g_async_scanout.in_flight_resource_id));
+    pthread_mutex_unlock(&g_async_scanout.lock);
+    return in_flight;
+}
+
+static int wlcomp_async_scanout_submit_page_flip(uint32_t handle,
+                                                 uint32_t resource_id,
+                                                 uint32_t width,
+                                                 uint32_t height)
+{
+    struct wlcomp_async_scanout_job job;
+
+    if (!wlcomp_async_scanout_submit_enabled() ||
+        !wlcomp_page_flip_present_enabled() ||
+        !g_fb_virgl_extra_target_ready)
+        return 0;
+    if (!wlcomp_async_scanout_ensure_started())
+        return 0;
+    if (!wlcomp_async_scanout_drain(0) &&
+        !wlcomp_async_scanout_drain(1))
+        return 0;
+
+    memset(&job, 0, sizeof(job));
+    job.handle = handle;
+    job.resource_id = resource_id;
+    job.width = width;
+    job.height = height;
+    job.flip.handle = handle;
+
+    pthread_mutex_lock(&g_async_scanout.lock);
+    if (wlcomp_async_scanout_has_pending_locked()) {
+        pthread_mutex_unlock(&g_async_scanout.lock);
+        return 0;
+    }
+    g_async_scanout.job = job;
+    g_async_scanout.job_pending = 1;
+    g_async_scanout.in_flight_handle = handle;
+    g_async_scanout.in_flight_resource_id = resource_id;
+    pthread_cond_signal(&g_async_scanout.cond);
+    pthread_mutex_unlock(&g_async_scanout.lock);
+
+    g_scanout_trace_submits++;
+    return 1;
+}
+
 static int wlcomp_virgl_framebuffer_flip_ready(void)
 {
     return g_fb_virgl_backed && g_fb_virgl_back_target_ready &&
@@ -687,6 +1008,15 @@ static int wlcomp_virgl_swap_render_target(void)
     static int flip_logs;
 
     if (!wlcomp_virgl_framebuffer_flip_ready())
+        return 0;
+    if (!g_fb_virgl_extra_target_ready &&
+        !wlcomp_async_scanout_drain(1))
+        return 0;
+    if (g_fb_virgl_extra_target_ready &&
+        wlcomp_async_scanout_target_in_flight(
+            g_fb_virgl_back_target.bo_handle,
+            g_fb_virgl_back_target.resource_id) &&
+        !wlcomp_async_scanout_drain(1))
         return 0;
     old_front.buf = g_fb_buf;
     old_front.pitch = g_fb_pitch;
@@ -1198,33 +1528,44 @@ static int present_virgl_scanout_rects(const struct damage_rect *scanout_rects,
             scanout_rects = &full_rect;
             scanout_rect_count = 1;
         }
-        if (wlcomp_page_flip_present_enabled()) {
+        if (wlcomp_page_flip_present_enabled() &&
+            !g_virgl_rect_scanout_this_frame) {
             struct fb_gpu_page_flip flip;
-            static uint32_t last_scanout_resource_id;
             static int page_flip_logs;
+            static int async_page_flip_logs;
             uint64_t t0;
             uint64_t dt;
             int ret;
 
+            if (wlcomp_async_scanout_submit_page_flip(
+                    g_fb_bo_handle, g_fb_virgl_resource_id,
+                    g_fb_w, g_fb_h)) {
+                if (async_page_flip_logs < 8) {
+                    fprintf(stderr,
+                            "wlcomp: virgl framebuffer page-flip queued async handle=%u res=%u\n",
+                            g_fb_bo_handle, g_fb_virgl_resource_id);
+                    async_page_flip_logs++;
+                }
+                return 1;
+            }
             memset(&flip, 0, sizeof(flip));
             flip.handle = g_fb_bo_handle;
-            if (g_fb_virgl_resource_id != last_scanout_resource_id) {
-                g_scanout_trace_rebinds++;
-                last_scanout_resource_id = g_fb_virgl_resource_id;
-            }
             g_scanout_trace_submits++;
             t0 = wlcomp_scanout_perf_enabled() ? get_time_us() : 0;
             ret = ioctl(g_fb_fd, FB_GPU_PAGE_FLIP, &flip);
             dt = t0 ? get_time_us() - t0 : 0;
             wlcomp_scanout_perf_note(dt, 0, 0, g_fb_w, g_fb_h, ret, 1);
             if (ret == 0) {
+                g_async_scanout.failed_since_present = 0;
+                if (flip.flags & FB_GPU_PAGE_FLIP_F_SCANOUT_REBIND)
+                    g_scanout_trace_rebinds++;
                 if (flip.fence > g_fb_bo_last_present_fence)
                     g_fb_bo_last_present_fence = flip.fence;
                 if (page_flip_logs < 8) {
                     fprintf(stderr,
-                            "wlcomp: virgl framebuffer page-flip handle=%u res=%u fence=%lu\n",
+                            "wlcomp: virgl framebuffer page-flip handle=%u res=%u fence=%lu flags=0x%x\n",
                             g_fb_bo_handle, g_fb_virgl_resource_id,
-                            (unsigned long)flip.fence);
+                            (unsigned long)flip.fence, flip.flags);
                     page_flip_logs++;
                 }
                 return 1;
@@ -1239,6 +1580,7 @@ static int present_virgl_scanout_rects(const struct damage_rect *scanout_rects,
             }
             return ok;
         }
+        g_virgl_rect_scanout_this_frame = 0;
         if (scanout_rect_count > 1 &&
             !cmdline_flag_enabled("wlcomp_virgl_multi_flush")) {
             static struct damage_rect union_rect;
@@ -1413,6 +1755,27 @@ static void framebuffer_account_present_frame(uint32_t now,
         g_damage_stats.present_full_frames++;
 }
 
+static int present_damage_account_only(uint32_t now)
+{
+    int rect_count = g_damage_count;
+    uint64_t present_pixels = 0;
+    int full_frame = 0;
+
+    for (int i = 0; i < g_damage_count; i++) {
+        struct damage_rect *r = &g_damage[i];
+
+        present_pixels +=
+            (uint64_t)(r->x2 - r->x1) * (uint32_t)(r->y2 - r->y1);
+        if (r->x1 == 0 && r->y1 == 0 &&
+            r->x2 == (int32_t)g_fb_w && r->y2 == (int32_t)g_fb_h)
+            full_frame = 1;
+    }
+    framebuffer_account_present_frame(now, present_pixels, rect_count,
+                                      full_frame);
+    g_damage_count = 0;
+    return 1;
+}
+
 static int present_damage_rects(int fb_w, uint32_t now,
                                 const struct damage_rect *scanout_rects,
                                 int scanout_rect_count,
@@ -1571,4 +1934,26 @@ static void damage_taskbar(void)
     if (g_fb_h >= TASKBAR_H)
         damage_rect(0, (int32_t)g_fb_h - TASKBAR_H,
                     (int32_t)g_fb_w, TASKBAR_H);
+}
+
+static void damage_taskbar_clock(void)
+{
+    int32_t w = 104;
+    int32_t h = TASKBAR_H - 8;
+    int32_t x;
+    int32_t y;
+
+    if (g_fb_h < TASKBAR_H || g_fb_w <= 0)
+        return;
+    if (h <= 0)
+        h = TASKBAR_H;
+    if (w > (int32_t)g_fb_w)
+        w = (int32_t)g_fb_w;
+    x = (int32_t)g_fb_w - w - 8;
+    if (x < 0)
+        x = 0;
+    y = (int32_t)g_fb_h - TASKBAR_H + 4;
+    if (y < 0)
+        y = 0;
+    damage_rect(x, y, w, h);
 }

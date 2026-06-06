@@ -33,6 +33,9 @@ host_gst_plugins=(
     libgstvolume.so
     libgstvpx.so
 )
+host_gst_gl_plugins=(
+    libgstopengl.so
+)
 host_gst_plugin_dirs=()
 host_gst_exec_dirs=()
 host_gst_bin_dirs=()
@@ -1357,6 +1360,8 @@ fi
 
 mkdir -p "${dst}/libexec/webkit2gtk-4.1"
 rm -f "${dst}/libexec/webkit2gtk-4.1/MiniBrowser.bak"
+rm -f "${dst}/libexec/webkit2gtk-4.1/"*.real \
+      "${dst}/libexec/webkit2gtk-4.1/"*.payload
 for exe in MiniBrowser WebKitNetworkProcess WebKitWebProcess jsc; do
     if [[ -x "${ref}/libexec/webkit2gtk-4.1/${exe}" ]]; then
         cp -a "${ref}/libexec/webkit2gtk-4.1/${exe}" \
@@ -1374,6 +1379,7 @@ if [[ -e "${ref}/libexec/webkit2gtk-4.1/.webkit_install_stamp" ]]; then
     cp -a "${ref}/libexec/webkit2gtk-4.1/.webkit_install_stamp" \
           "${dst}/libexec/webkit2gtk-4.1/"
 fi
+rm -rf "${dst}/lib/webkit2gtk-4.1"
 cp -a "${ref}/lib/webkit2gtk-4.1" "${dst}/lib/"
 
 if [[ -d "${ref}/include/webkitgtk-4.1" ]]; then
@@ -1415,6 +1421,15 @@ if [[ "${gst_plugin_source}" == "host" ]]; then
             echo "ports/webkit: warning: host GStreamer plugin ${plugin} not found" >&2
         fi
     done
+    if [[ "${WEBKIT_ENABLE_GST_GL:-0}" == "1" ]]; then
+        for plugin in "${host_gst_gl_plugins[@]}"; do
+            if plugin_path="$(host_gst_plugin_path "${plugin}")"; then
+                cp -a "${plugin_path}" "${dst}/lib/gstreamer-1.0/"
+            else
+                echo "ports/webkit: warning: WEBKIT_ENABLE_GST_GL=1 but host GStreamer GL plugin ${plugin} not found" >&2
+            fi
+        done
+    fi
 elif [[ -d "${gst_plugin_ref}/lib/gstreamer-1.0" ]]; then
     mkdir -p "${dst}/lib"
     mkdir -p "${dst}/lib/gstreamer-1.0"
@@ -1427,10 +1442,11 @@ if [[ -d "${gst_plugin_ref}/usr/lib/gstreamer-1.0" ]]; then
     mkdir -p "${dst}/lib/gstreamer-1.0"
     cp -a "${gst_plugin_ref}/usr/lib/gstreamer-1.0"/. "${dst}/lib/gstreamer-1.0/"
 fi
-# Keep the GStreamer-GL sink available for WebKitGTK video.  It is required for
-# the accelerated/zero-copy path; set WEBKIT_DISABLE_GST_GL=1 when bisecting a
-# media crash to force the older software-video fallback.
-if [[ "${WEBKIT_DISABLE_GST_GL:-0}" == "1" ]]; then
+# The GStreamer-GL sink is required for WebKit's zero-copy video path, but the
+# current xv6 WebKit runtime can segfault when the plugin is present.  Keep the
+# default image on the older stable video path; set WEBKIT_ENABLE_GST_GL=1 only
+# for focused media-pipeline debugging.
+if [[ "${WEBKIT_ENABLE_GST_GL:-0}" != "1" ]]; then
     rm -f "${dst}/lib/gstreamer-1.0/libgstopengl.so" \
           "${dst}/usr/lib/gstreamer-1.0/libgstopengl.so"
 fi
@@ -1496,6 +1512,11 @@ check_staged_gstreamer_runtime() {
     for plugin in "${host_gst_plugins[@]}"; do
         require_staged_path "lib/gstreamer-1.0/${plugin}" missing
     done
+    if [[ "${WEBKIT_ENABLE_GST_GL:-0}" == "1" ]]; then
+        for plugin in "${host_gst_gl_plugins[@]}"; do
+            require_staged_path "lib/gstreamer-1.0/${plugin}" missing
+        done
+    fi
 
     if ((${#missing[@]})); then
         printf 'ports/webkit: incomplete staged GStreamer runtime at %s\n' "${dst}" >&2

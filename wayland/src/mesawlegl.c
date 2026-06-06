@@ -108,8 +108,8 @@ struct app_state {
     int configured;
     int running;
     int frame;
-    int max_frames;
-    int resize_every;
+    int max_seconds;
+    int resize_seconds;
     int width;
     int height;
     int loop;
@@ -136,7 +136,8 @@ struct app_state {
     int overlay_vertex_count;
     int client_capture_enabled;
     int client_capture_done;
-    int client_capture_frame;
+    int client_capture_after_sec;
+    double client_capture_start_sec;
     double perf_start_sec;
     int perf_frames;
     double perf_render_us;
@@ -2037,7 +2038,9 @@ static int write_client_capture(struct app_state *app)
     size_t bytes;
 
     if (!app->client_capture_enabled || app->client_capture_done ||
-        app->frame < app->client_capture_frame)
+        app->client_capture_start_sec <= 0.0 ||
+        monotonic_seconds() - app->client_capture_start_sec <
+            (double)app->client_capture_after_sec)
         return 0;
     app->client_capture_done = 1;
     if (app->width <= 0 || app->height <= 0)
@@ -2093,8 +2096,9 @@ static int write_client_capture(struct app_state *app)
     free(pixels);
     free(row);
     fprintf(stderr,
-            "mesawlegl: captured %s frame=%d size=%dx%d read_format=%s\n",
-            path, app->frame, app->width, app->height,
+            "mesawlegl: captured %s elapsed_sec=%.3f size=%dx%d read_format=%s\n",
+            path, monotonic_seconds() - app->client_capture_start_sec,
+            app->width, app->height,
             app->read_format == GL_BGRA_EXT ? "bgra" : "rgba");
     return 0;
 }
@@ -2596,7 +2600,8 @@ static int parse_size_arg(const char *arg, int *width, int *height)
     return 0;
 }
 
-static int run_client(int loop, int frames, int resize_every, int api_smoke,
+static int run_client(int loop, int seconds, int resize_seconds,
+                      int api_smoke,
                       int sphere_demo, int software_demo, int initial_width,
                       int initial_height, int render_div,
                       int present_interval, int pace_us)
@@ -2606,6 +2611,7 @@ static int run_client(int loop, int frames, int resize_every, int api_smoke,
     double start_sec;
     double elapsed_sec;
     double next_frame_sec;
+    double next_resize_sec;
     int render_width;
     int render_height;
 
@@ -2614,8 +2620,8 @@ static int run_client(int loop, int frames, int resize_every, int api_smoke,
     app.egl_context = EGL_NO_CONTEXT;
     app.egl_surface = EGL_NO_SURFACE;
     app.running = 1;
-    app.max_frames = frames;
-    app.resize_every = resize_every;
+    app.max_seconds = seconds;
+    app.resize_seconds = resize_seconds;
     app.width = initial_width;
     app.height = initial_height;
     app.loop = loop;
@@ -2640,8 +2646,9 @@ static int run_client(int loop, int frames, int resize_every, int api_smoke,
     app.last_display_bind_completed_id = 0;
     app.client_capture_enabled = env_enabled("XV6_MESAWLEGL_CAPTURE");
     app.client_capture_done = 0;
-    app.client_capture_frame =
-        parse_positive_env(getenv("XV6_MESAWLEGL_CAPTURE_FRAME"), 30);
+    app.client_capture_after_sec =
+        parse_positive_env(getenv("XV6_MESAWLEGL_CAPTURE_SECONDS"), 1);
+    app.client_capture_start_sec = 0.0;
     snprintf(app.fps_text, sizeof(app.fps_text), "FPS --.-");
 
     if (init_wayland(&app) < 0) {
@@ -2686,13 +2693,17 @@ static int run_client(int loop, int frames, int resize_every, int api_smoke,
             loop, app.width, app.height, render_width, render_height,
             app.render_div, app.present_interval, app.pace_us);
     start_sec = monotonic_seconds();
+    app.client_capture_start_sec = start_sec;
     next_frame_sec = start_sec;
+    next_resize_sec = start_sec + (double)app.resize_seconds;
     for (app.frame = 0;
          rc == 0 && app.running &&
-         (app.max_frames <= 0 || app.frame < app.max_frames);
+         (app.max_seconds <= 0 ||
+          monotonic_seconds() - start_sec < (double)app.max_seconds);
          app.frame++) {
-        if (app.resize_every > 0 && app.frame > 0 &&
-            app.frame % app.resize_every == 0) {
+        if (app.resize_seconds > 0 &&
+            monotonic_seconds() >= next_resize_sec) {
+            next_resize_sec += (double)app.resize_seconds;
             if (app.width == WINDOW_W) {
                 app.width = 360;
                 app.height = 260;
@@ -2733,10 +2744,11 @@ static int run_client(int loop, int frames, int resize_every, int api_smoke,
 
         complete_len = snprintf(
             complete_buf, sizeof(complete_buf),
-            "mesawlegl_completion_matrix loop=%d frames=%d status=%d "
-            "render_div=%d present_interval=%d pace_us=%d\n",
-            loop, app.frame, rc, app.render_div, app.present_interval,
-            app.pace_us);
+            "mesawlegl_completion_matrix loop=%d frames=%d seconds=%d "
+            "elapsed=%.3f status=%d render_div=%d present_interval=%d "
+            "pace_us=%d\n",
+            loop, app.frame, app.max_seconds, elapsed_sec, rc,
+            app.render_div, app.present_interval, app.pace_us);
         if (complete_len > 0) {
             ssize_t written;
 
@@ -2749,8 +2761,8 @@ static int run_client(int loop, int frames, int resize_every, int api_smoke,
     }
     cleanup(&app);
     fprintf(stderr,
-            "mesawlegl[%d]: complete frames=%d status=%d elapsed=%.3fs fps=%.1f window=%dx%d render=%dx%d render_div=%d present_interval=%d pace_us=%d\n",
-            loop, app.frame, rc, elapsed_sec,
+            "mesawlegl[%d]: complete frames=%d seconds=%d status=%d elapsed=%.3fs fps=%.1f window=%dx%d render=%dx%d render_div=%d present_interval=%d pace_us=%d\n",
+            loop, app.frame, app.max_seconds, rc, elapsed_sec,
             elapsed_sec > 0.0 ? (double)app.frame / elapsed_sec : 0.0,
             app.width, app.height, render_width, render_height,
             app.render_div, app.present_interval, app.pace_us);
@@ -2759,9 +2771,9 @@ static int run_client(int loop, int frames, int resize_every, int api_smoke,
 
 int main(int argc, char **argv)
 {
-    int frames = 0;
+    int seconds = 0;
     int loops = 1;
-    int resize_every = 0;
+    int resize_seconds = 0;
     int api_smoke = 1;
     int sphere_demo = 0;
     int window_width = WINDOW_W;
@@ -2781,13 +2793,13 @@ int main(int argc, char **argv)
     software_demo = mesa_env_requests_software();
 
     for (int i = 1; i < argc; i++) {
-        if (strncmp(argv[i], "--frames=", 9) == 0) {
-            frames = parse_nonnegative_arg(argv[i], "--frames=", frames);
+        if (strncmp(argv[i], "--seconds=", 10) == 0) {
+            seconds = parse_nonnegative_arg(argv[i], "--seconds=", seconds);
         } else if (strncmp(argv[i], "--loops=", 8) == 0) {
             loops = parse_positive_arg(argv[i], "--loops=", loops);
-        } else if (strncmp(argv[i], "--resize-every=", 15) == 0) {
-            resize_every = parse_positive_arg(argv[i], "--resize-every=",
-                                              resize_every);
+        } else if (strncmp(argv[i], "--resize-seconds=", 17) == 0) {
+            resize_seconds = parse_positive_arg(argv[i], "--resize-seconds=",
+                                                resize_seconds);
         } else if (strncmp(argv[i], "--size=", 7) == 0) {
             if (parse_size_arg(argv[i], &window_width, &window_height) != 0) {
                 fprintf(stderr, "mesawlegl: invalid size '%s'\n", argv[i]);
@@ -2808,13 +2820,13 @@ int main(int argc, char **argv)
             api_smoke = 1;
             sphere_demo = 0;
         } else if (strcmp(argv[i], "--demo") == 0) {
-            resize_every = 0;
+            resize_seconds = 0;
             api_smoke = 0;
             sphere_demo = 1;
         } else if (strcmp(argv[i], "--help") == 0) {
             fprintf(stderr,
-                    "usage: %s [--frames=N] [--loops=N] [--resize-every=N] [--size=WxH] [--render-div=N] [--present-interval=N] [--pace-us=N] [--api-smoke|--simple|--demo]\n"
-                    "  --frames=0, or omitting --frames, runs until the window closes\n",
+                    "usage: %s [--seconds=N] [--loops=N] [--resize-seconds=N] [--size=WxH] [--render-div=N] [--present-interval=N] [--pace-us=N] [--api-smoke|--simple|--demo]\n"
+                    "  --seconds=N runs for N seconds; omitting --seconds runs until the window closes\n",
                     argv[0]);
             return 0;
         } else {
@@ -2824,7 +2836,7 @@ int main(int argc, char **argv)
     }
 
     for (int loop = 1; loop <= loops; loop++) {
-        rc = run_client(loop, frames, resize_every, api_smoke, sphere_demo,
+        rc = run_client(loop, seconds, resize_seconds, api_smoke, sphere_demo,
                         software_demo, window_width, window_height,
                         render_div, present_interval, pace_us);
         if (rc != 0)

@@ -57,6 +57,7 @@ struct wlcomp_gl_compose_target {
     uint32_t handle;
     uint32_t width;
     uint32_t height;
+    int warmup_done;
 };
 
 #define WLCOMP_GL_COMPOSE_TARGET_CACHE_SIZE 3
@@ -96,9 +97,18 @@ struct wlcomp_gl_compose_state {
     struct wlcomp_gl_compose_target target_cache[WLCOMP_GL_COMPOSE_TARGET_CACHE_SIZE];
     struct gbm_device *gbm;
     int drm_fd;
+    int frame_used_draw;
 };
 
 static struct wlcomp_gl_compose_state g_gl_compose;
+
+static int wlcomp_gl_compose_take_frame_used_draw(void)
+{
+    int used = g_gl_compose.frame_used_draw;
+
+    g_gl_compose.frame_used_draw = 0;
+    return used;
+}
 
 static int wlcomp_gl_compose_enabled(void)
 {
@@ -319,6 +329,29 @@ static int wlcomp_gl_compose_submit_fence_enabled(void)
     return enabled;
 }
 
+static int wlcomp_gl_compose_release_fence_enabled(void)
+{
+    static int initialized;
+    static int enabled;
+    const char *env;
+
+    if (initialized)
+        return enabled;
+    initialized = 1;
+    enabled = cmdline_int_value("wlcomp_gl_release_fence",
+                                wlcomp_gl_compose_submit_fence_enabled()) != 0;
+    env = getenv("XV6_WLCOMP_GL_RELEASE_FENCE");
+    if (env && *env)
+        enabled = strcmp(env, "0") != 0 &&
+                  strcmp(env, "no") != 0 &&
+                  strcmp(env, "false") != 0 &&
+                  strcmp(env, "off") != 0;
+    if (enabled)
+        fprintf(stderr,
+                "wlcomp: gl-compose release-fence enabled\n");
+    return enabled;
+}
+
 static int wlcomp_gl_compose_ensure_sync_funcs(void)
 {
     if (!g_gl_compose.fence_sync) {
@@ -348,7 +381,7 @@ static void wlcomp_gl_compose_mark_buffer_release_sync(struct wlcomp_buffer *buf
     GLsync sync;
     static int logs;
 
-    if (!buf || !wlcomp_gl_compose_submit_fence_enabled())
+    if (!buf || !wlcomp_gl_compose_release_fence_enabled())
         return;
     if (!wlcomp_gl_compose_ensure_sync_funcs())
         return;
@@ -422,19 +455,22 @@ static void wlcomp_gl_compose_wait_draw_fence(void)
 static void wlcomp_gl_compose_capture_rect(int x, int gl_y, int w, int h)
 {
     static int captured;
-    static int seen;
-    int target;
+    static uint64_t start_us;
+    int target_seconds;
+    uint64_t now_us;
     uint8_t *pixels;
     FILE *fp;
 
     if (captured || !cmdline_flag_enabled("wlcomp_gl_capture") ||
         x < 0 || gl_y < 0 || w <= 0 || h <= 0)
         return;
-    target = cmdline_int_value("wlcomp_gl_capture_frame", 1);
-    if (target <= 0)
-        target = 1;
-    seen++;
-    if (seen < target)
+    target_seconds = cmdline_int_value("wlcomp_gl_capture_seconds", 1);
+    if (target_seconds <= 0)
+        target_seconds = 1;
+    now_us = get_time_us();
+    if (start_us == 0)
+        start_us = now_us;
+    if (now_us - start_us < (uint64_t)target_seconds * 1000000ULL)
         return;
     captured = 1;
     pixels = malloc((size_t)w * (size_t)h * 4);
@@ -467,6 +503,81 @@ static void wlcomp_gl_compose_capture_rect(int x, int gl_y, int w, int h)
     fprintf(stderr,
             "wlcomp: gl-compose captured /capture-gl.ppm rect=%d,%d %dx%d\n",
             x, gl_y, w, h);
+}
+
+static int wlcomp_gl_compose_target_warmup_read_enabled(void)
+{
+    static int initialized;
+    static int enabled;
+    const char *env;
+
+    if (initialized)
+        return enabled;
+    initialized = 1;
+    enabled = cmdline_int_value("wlcomp_gl_target_warmup_read",
+                                wlcomp_async_scanout_submit_enabled() ? 1 : 0) != 0;
+    env = getenv("XV6_WLCOMP_GL_TARGET_WARMUP_READ");
+    if (env && *env)
+        enabled = strcmp(env, "0") != 0 &&
+                  strcmp(env, "no") != 0 &&
+                  strcmp(env, "false") != 0 &&
+                  strcmp(env, "off") != 0;
+    if (enabled)
+        fprintf(stderr,
+                "wlcomp: gl-compose target warmup read enabled\n");
+    return enabled;
+}
+
+static void wlcomp_gl_compose_warmup_target_read(int x, int gl_y,
+                                                 int w, int h)
+{
+    struct wlcomp_gl_compose_target *target = NULL;
+    uint32_t pixel = 0;
+    int sample_x;
+    int sample_y;
+    static int logs;
+
+    if (!wlcomp_gl_compose_target_warmup_read_enabled() ||
+        !wlcomp_async_scanout_submit_enabled() ||
+        x < 0 || gl_y < 0 || w <= 0 || h <= 0)
+        return;
+
+    for (int i = 0; i < WLCOMP_GL_COMPOSE_TARGET_CACHE_SIZE; i++) {
+        struct wlcomp_gl_compose_target *candidate =
+            &g_gl_compose.target_cache[i];
+
+        if (candidate->texture == g_gl_compose.target_texture &&
+            candidate->handle == g_gl_compose.target_handle) {
+            target = candidate;
+            break;
+        }
+    }
+    if (!target || target->warmup_done)
+        return;
+
+    sample_x = x + w / 2;
+    sample_y = gl_y + h / 2;
+    if (sample_x < 0)
+        sample_x = 0;
+    if (sample_y < 0)
+        sample_y = 0;
+    if (sample_x >= (int)g_fb_w)
+        sample_x = (int)g_fb_w - 1;
+    if (sample_y >= (int)g_fb_h)
+        sample_y = (int)g_fb_h - 1;
+    if (sample_x < 0 || sample_y < 0)
+        return;
+
+    glReadPixels(sample_x, sample_y, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE,
+                 &pixel);
+    target->warmup_done = 1;
+    if (logs < 8) {
+        fprintf(stderr,
+                "wlcomp: gl-compose target warmup read handle=%u tex=%u sample=%d,%d pixel=0x%08x\n",
+                target->handle, target->texture, sample_x, sample_y,
+                pixel);
+        logs++;
+    }
 }
 
 static EGLDisplay wlcomp_gl_get_display(void)
@@ -871,6 +982,7 @@ static void wlcomp_gl_compose_destroy_target_slot(int index)
     target->handle = 0;
     target->width = 0;
     target->height = 0;
+    target->warmup_done = 0;
 }
 
 static void wlcomp_gl_compose_destroy_target(void)
@@ -1020,6 +1132,7 @@ static int wlcomp_gl_compose_import_target(void)
     g_gl_compose.target_cache[target_slot].handle = g_fb_bo_handle;
     g_gl_compose.target_cache[target_slot].width = g_fb_w;
     g_gl_compose.target_cache[target_slot].height = g_fb_h;
+    g_gl_compose.target_cache[target_slot].warmup_done = 0;
     next_target_slot =
         (target_slot + 1) % WLCOMP_GL_COMPOSE_TARGET_CACHE_SIZE;
     if (target_logs < 8) {
@@ -1380,21 +1493,30 @@ static int wlcomp_gl_compose_present_buffer(struct wlcomp_buffer *buf,
                   (GLuint)buf->gl_texture);
     glUniform1i(tex_uniform, 0);
     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    g_gl_compose.frame_used_draw = 1;
     /*
      * Match the Linux compositor shape by default: queue the GL draw and let
      * the following virtio scanout flush preserve ordering.  Per-present
      * glFlush is kept as a diagnostic fallback for hosts that need an explicit
      * compositor submit before RESOURCE_FLUSH.
      */
-    if (wlcomp_gl_compose_finish_each_present())
+    if (wlcomp_gl_compose_finish_each_present()) {
         glFinish();
-    else if (wlcomp_gl_compose_flush_each_present() &&
-             !wlcomp_gl_compose_flush_after_scanout())
-        glFlush();
-    else if (wlcomp_gl_compose_submit_fence_enabled())
+    } else if (wlcomp_gl_compose_submit_fence_enabled() ||
+               wlcomp_gl_compose_release_fence_enabled()) {
         wlcomp_gl_compose_mark_buffer_release_sync(buf);
-    else
+        if (wlcomp_async_scanout_submit_enabled() ||
+            (wlcomp_gl_compose_flush_each_present() &&
+             !wlcomp_gl_compose_flush_after_scanout()))
+            glFlush();
+    } else if (wlcomp_gl_compose_flush_each_present() &&
+               !wlcomp_gl_compose_flush_after_scanout()) {
+        glFlush();
+    } else {
         wlcomp_gl_compose_wait_draw_fence();
+    }
+    wlcomp_gl_compose_warmup_target_read(dst_x0, gl_y0,
+                                         dst_x1 - dst_x0, gl_y1 - gl_y0);
     wlcomp_gl_compose_capture_rect(dst_x0, gl_y0,
                                    dst_x1 - dst_x0, gl_y1 - gl_y0);
 

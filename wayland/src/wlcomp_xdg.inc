@@ -84,6 +84,19 @@ static void toplevel_set_app_id(struct wl_client *c, struct wl_resource *r,
         surf->saved_x = ((int32_t)g_fb_w - w) / 2;
         surf->saved_y = ((int32_t)g_fb_h - TASKBAR_H - h) / 2;
     }
+    if (surf && app_id && strcmp(app_id, "MiniBrowser") == 0 &&
+        !surf->xdg_initial_configure_sent) {
+        int32_t w;
+        int32_t h;
+
+        webkit_initial_window_size(&w, &h);
+        surf->pending_configure_w = w;
+        surf->pending_configure_h = h;
+        surf->saved_w = w;
+        surf->saved_h = h;
+        surf->saved_x = ((int32_t)g_fb_w - w) / 2;
+        surf->saved_y = ((int32_t)g_fb_h - TASKBAR_H - h) / 2;
+    }
     fprintf(stderr, "wlcomp: client app_id: %s\n", app_id);
 }
 

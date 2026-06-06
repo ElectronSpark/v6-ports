@@ -25,6 +25,7 @@
 #include <dirent.h>
 #include <stdarg.h>
 #include <dlfcn.h>
+#include <pthread.h>
 
 #include <wayland/wayland-server-core.h>
 #include <wayland/wayland-server-protocol.h>
@@ -95,6 +96,8 @@ struct drm_virtgpu_getparam_compat {
 #define FB_GPU_BO_INFO       0x462E
 #define FB_GPU_BO_COPY       0x4636
 #define FB_GPU_PAGE_FLIP     0x4637
+#define FB_GPU_SET_CURSOR    0x4638
+#define FB_GPU_MOVE_CURSOR   0x4639
 #define FB_GPU_DISPLAY_WAIT_F_WAIT 0x1
 #define FB_GPU_VIRGL_FENCE_WAIT 0x1
 
@@ -106,6 +109,8 @@ struct drm_virtgpu_getparam_compat {
 #define FB_GPU_BO_PRESENT_F_VIRGL_COPY 0x1
 #define FB_GPU_BO_PRESENT_F_VIRGL_SCANOUT 0x2
 #define FB_GPU_BO_PRESENT_F_READBACK_FALLBACK 0x80000000u
+#define FB_GPU_PAGE_FLIP_F_SCANOUT_REBIND 0x1
+#define FB_GPU_PAGE_FLIP_F_SCANOUT_CACHED 0x2
 #define WLCOMP_VIRGL_FORMAT_B8G8R8A8_UNORM 1
 #define WLCOMP_VIRGL_BIND_RENDER_TARGET (1u << 1)
 #define WLCOMP_VIRGL_BIND_SAMPLER_VIEW  (1u << 3)
@@ -115,6 +120,8 @@ struct drm_virtgpu_getparam_compat {
 #define WLCOMP_VIRGL_BIND_LINEAR        (1u << 22)
 #define WLCOMP_PIPE_TEXTURE_2D 2
 #define MAX_DAMAGE_RECTS     32
+#define FB_GPU_CURSOR_MAX_DIM 64
+#define FB_GPU_CURSOR_F_VISIBLE 0x1
 
 struct fb_var_screeninfo {
     uint32_t xres, yres, bits_per_pixel, pitch;
@@ -152,6 +159,16 @@ struct fb_gpu_bo_copy {
 struct fb_gpu_page_flip {
     uint32_t handle, flags;
     uint64_t fence;
+};
+
+struct fb_gpu_cursor_image {
+    uint32_t width, height, hot_x, hot_y, flags, reserved;
+    uint64_t pixels;
+};
+
+struct fb_gpu_cursor_move {
+    int32_t  x, y;
+    uint32_t flags, reserved;
 };
 
 struct fb_gpu_display_wait {
@@ -522,21 +539,22 @@ int main(int argc, char **argv)
         int nready;
         int callbacks_pending;
         int wait_ms;
-        uint32_t wait_t0;
+        uint64_t wait_t0;
 
         wl_display_flush_clients(g_display);
         wl_event_loop_dispatch(loop, 0);
 
         callbacks_pending = any_frame_callbacks_pending();
         wait_ms = callbacks_pending ? callback_pending_epoll_timeout_ms() : 16;
-        if (callbacks_pending)
-            wait_ms = frame_callback_deadline_timeout_ms(get_time_ms(),
-                                                         wait_ms);
-        wait_t0 = frame_perf_enabled() ? get_time_ms() : 0;
+        wait_ms = frame_callback_idle_deadline_timeout_ms(get_time_ms(), wait_ms,
+                                                          callbacks_pending);
+        wait_t0 =
+            (frame_perf_enabled() || present_trace_enabled()) ?
+                get_time_us() : 0;
 
         nready = epoll_wait(epfd, events, 8, wait_ms);
-        if (frame_perf_enabled()) {
-            uint32_t wait_elapsed = get_time_ms() - wait_t0;
+        if (wait_t0 != 0) {
+            uint64_t wait_elapsed = get_time_us() - wait_t0;
 
             frame_perf_note_loop_wait(wait_ms, wait_elapsed,
                                       callbacks_pending, nready);

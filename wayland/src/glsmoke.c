@@ -62,12 +62,23 @@ struct app_state {
     int configured;
     int running;
     int frame;
-    int max_frames;
-    int resize_every;
+    int max_seconds;
+    uint64_t start_ns;
+    int resize_seconds;
+    uint64_t last_resize_ns;
     int width;
     int height;
     int loop;
 };
+
+static uint64_t now_ns(void)
+{
+    struct timespec ts;
+
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0)
+        return 0;
+    return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+}
 
 static struct vec2 rotate_point(float x, float y, float angle, float cx, float cy)
 {
@@ -146,12 +157,15 @@ static void frame_done(void *data, struct wl_callback *cb, uint32_t time)
         wl_callback_destroy(cb);
     app->frame_cb = NULL;
     app->frame++;
-    if (app->max_frames > 0 && app->frame >= app->max_frames) {
+    if (app->max_seconds > 0 && app->start_ns > 0 &&
+        now_ns() - app->start_ns >= (uint64_t)app->max_seconds * 1000000000ull) {
         app->running = 0;
         return;
     }
-    if (app->resize_every > 0 && app->frame > 0 &&
-        app->frame % app->resize_every == 0) {
+    if (app->resize_seconds > 0 && app->last_resize_ns > 0 &&
+        now_ns() - app->last_resize_ns >=
+            (uint64_t)app->resize_seconds * 1000000000ull) {
+        app->last_resize_ns = now_ns();
         if (app->width == GL_WINDOW_W) {
             app->width = 360;
             app->height = 260;
@@ -435,14 +449,14 @@ static int parse_positive_arg(const char *arg, const char *prefix,
 static void print_usage(const char *argv0)
 {
     fprintf(stderr,
-            "usage: %s [--frames=N] [--loops=N] [--resize-every=N]\n"
-            "  --frames=N  stop each EGL lifecycle after N frame callbacks\n"
+            "usage: %s [--seconds=N] [--loops=N] [--resize-seconds=N]\n"
+            "  --seconds=N  stop each EGL lifecycle after N seconds\n"
             "  --loops=N   repeat Wayland/EGL create-draw-destroy N times\n"
-            "  --resize-every=N  recreate the EGL surface every N frames\n",
+            "  --resize-seconds=N  recreate the EGL surface every N seconds\n",
             argv0);
 }
 
-static int run_loop(int loop, int frames, int resize_every)
+static int run_loop(int loop, int seconds, int resize_seconds)
 {
     struct app_state app;
     int rc = 0;
@@ -452,8 +466,8 @@ static int run_loop(int loop, int frames, int resize_every)
     app.egl_context = EGL_NO_CONTEXT;
     app.egl_surface = EGL_NO_SURFACE;
     app.running = 1;
-    app.max_frames = frames;
-    app.resize_every = resize_every;
+    app.max_seconds = seconds;
+    app.resize_seconds = resize_seconds;
     app.width = GL_WINDOW_W;
     app.height = GL_WINDOW_H;
     app.loop = loop;
@@ -463,6 +477,8 @@ static int run_loop(int loop, int frames, int resize_every)
         return 1;
     }
 
+    app.start_ns = now_ns();
+    app.last_resize_ns = app.start_ns;
     while (app.running && wl_display_dispatch(app.display) >= 0)
         ;
 
@@ -476,18 +492,18 @@ static int run_loop(int loop, int frames, int resize_every)
 
 int main(int argc, char **argv)
 {
-    int frames = 0;
+    int seconds = 0;
     int loops = 1;
-    int resize_every = 0;
+    int resize_seconds = 0;
 
     for (int i = 1; i < argc; i++) {
-        if (strncmp(argv[i], "--frames=", 9) == 0) {
-            frames = parse_positive_arg(argv[i], "--frames=", frames);
+        if (strncmp(argv[i], "--seconds=", 10) == 0) {
+            seconds = parse_positive_arg(argv[i], "--seconds=", seconds);
         } else if (strncmp(argv[i], "--loops=", 8) == 0) {
             loops = parse_positive_arg(argv[i], "--loops=", loops);
-        } else if (strncmp(argv[i], "--resize-every=", 15) == 0) {
-            resize_every = parse_positive_arg(argv[i], "--resize-every=",
-                                              resize_every);
+        } else if (strncmp(argv[i], "--resize-seconds=", 17) == 0) {
+            resize_seconds = parse_positive_arg(argv[i], "--resize-seconds=",
+                                                resize_seconds);
         } else if (strcmp(argv[i], "--help") == 0) {
             print_usage(argv[0]);
             return 0;
@@ -498,7 +514,7 @@ int main(int argc, char **argv)
     }
 
     for (int loop = 0; loop < loops; loop++) {
-        int rc = run_loop(loop, frames, resize_every);
+        int rc = run_loop(loop, seconds, resize_seconds);
 
         if (rc != 0)
             return rc;

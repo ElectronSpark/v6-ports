@@ -35,6 +35,46 @@ static void wlcomp_pointer_send_wheel(struct wl_resource *ptr, int dz)
                                       -dz);
 }
 
+static int pointer_press_should_start_drag_frame(int16_t mx, int16_t my)
+{
+    int32_t sx, sy;
+    struct wlcomp_surface *target = NULL;
+    int iwin_under = -1;
+
+    if (g_menu_open || my >= (int16_t)(g_fb_h - TASKBAR_H))
+        return 0;
+
+    if (g_iwin_focus >= 0) {
+        iwin_under = iwin_hit(mx, my);
+        if (iwin_under < 0)
+            target = surface_at(mx, my, &sx, &sy);
+    } else {
+        target = surface_at(mx, my, &sx, &sy);
+        if (!target)
+            iwin_under = iwin_hit(mx, my);
+    }
+
+    if (target && surface_has_window_frame(target)) {
+        return surface_demo_resize_edges(target, mx, my) != 0 ||
+               surface_demo_title_hit(target, mx, my);
+    }
+
+    if (iwin_under >= 0) {
+        iwin_t *w = &g_iwin[iwin_under];
+        const int resize_border = 18;
+
+        if (!w->active || w->minimized)
+            return 0;
+        if (my >= w->y && my < w->y + IWIN_TITLE_H)
+            return 1;
+        if ((mx >= w->x + w->w - resize_border && mx < w->x + w->w) ||
+            (my >= w->y + w->h - resize_border && my < w->y + w->h))
+            return 1;
+    }
+
+    return 0;
+}
+
 static void process_mouse(void)
 {
     /* Send deferred keyboard enter (set in surface_commit when a surface maps) */
@@ -61,7 +101,25 @@ static void process_mouse(void)
     int cursor_moved = 0;
     int events_processed = 0;
     int wheel_delta = 0;
-    const int max_mouse_events_per_frame = 64;
+    int drag_active = g_grab_surface != NULL && g_grab_mode != 0;
+    int max_mouse_events_per_frame = 64;
+    int have_left_press_pos = 0;
+    int16_t left_press_x = 0;
+    int16_t left_press_y = 0;
+
+    for (int i = 0; i < MAX_IWIN && !drag_active; i++) {
+        if (g_iwin[i].active &&
+            (g_iwin[i].dragging || g_iwin[i].resizing))
+            drag_active = 1;
+    }
+    if (drag_active) {
+        max_mouse_events_per_frame =
+            cmdline_int_value("wlcomp_drag_mouse_events_per_frame", 4);
+        if (max_mouse_events_per_frame < 1)
+            max_mouse_events_per_frame = 1;
+        if (max_mouse_events_per_frame > 64)
+            max_mouse_events_per_frame = 64;
+    }
 
     while (events_processed < max_mouse_events_per_frame &&
            read(g_mouse_fd, &ev, sizeof(ev)) == sizeof(ev)) {
@@ -82,17 +140,43 @@ static void process_mouse(void)
         g_buttons = ev.buttons;
         pressed_edges  |= (g_buttons & ~prev);   /* 0→1 transitions */
         released_edges |= (~g_buttons & prev);    /* 1→0 transitions */
-        if ((g_buttons & 1) && !(prev & 1))
+        if ((g_buttons & 1) && !(prev & 1)) {
             left_press_count++;
+            if (!have_left_press_pos) {
+                have_left_press_pos = 1;
+                left_press_x = g_cursor_x;
+                left_press_y = g_cursor_y;
+            }
+            if (!drag_active &&
+                pointer_press_should_start_drag_frame(left_press_x,
+                                                      left_press_y))
+                break;
+        }
         wheel_delta += ev.dz;
+    }
+    if (drag_active && events_processed > 0) {
+        g_drag_trace_events += (uint64_t)events_processed;
+        g_drag_trace_frames++;
     }
     cursor_moved = (g_cursor_x != old_cursor_x) || (g_cursor_y != old_cursor_y);
     if (cursor_moved) {
-        damage_cursor_at(old_cursor_x, old_cursor_y);
-        damage_cursor_at(g_cursor_x, g_cursor_y);
+        if (g_hw_cursor) {
+            /* Hardware cursor: move via the dedicated cursor queue, which is
+             * decoupled from the control/scanout queue.  No CPU redraw or
+             * recomposite is needed for pointer motion. */
+            struct fb_gpu_cursor_move mv;
+            memset(&mv, 0, sizeof(mv));
+            mv.x = g_cursor_x;
+            mv.y = g_cursor_y;
+            mv.flags = FB_GPU_CURSOR_F_VISIBLE;
+            (void)ioctl(g_fb_fd, FB_GPU_MOVE_CURSOR, &mv);
+        } else {
+            damage_cursor_at(old_cursor_x, old_cursor_y);
+            damage_cursor_at(g_cursor_x, g_cursor_y);
+        }
         damage_menu();
     }
-    if (pressed_edges || released_edges)
+    if ((pressed_edges || released_edges) && !g_hw_cursor)
         damage_cursor_at(g_cursor_x, g_cursor_y);
 
     if (wheel_delta != 0 && handle_iwin_wheel(g_cursor_x, g_cursor_y, wheel_delta)) {
@@ -203,41 +287,41 @@ static void process_mouse(void)
     int32_t sx, sy;
     struct wlcomp_surface *target = NULL;
     int iwin_under = -1;
+    int16_t hit_x = have_left_press_pos ? left_press_x : g_cursor_x;
+    int16_t hit_y = have_left_press_pos ? left_press_y : g_cursor_y;
 
     if (g_iwin_focus >= 0) {
         /* Internal windows on top: check iwin first */
-        iwin_under = iwin_hit(g_cursor_x, g_cursor_y);
+        iwin_under = iwin_hit(hit_x, hit_y);
         if (iwin_under < 0)
-            target = surface_at(g_cursor_x, g_cursor_y, &sx, &sy);
+            target = surface_at(hit_x, hit_y, &sx, &sy);
     } else {
         /* Wayland surfaces on top: check them first */
-        target = surface_at(g_cursor_x, g_cursor_y, &sx, &sy);
+        target = surface_at(hit_x, hit_y, &sx, &sy);
         if (!target)
-            iwin_under = iwin_hit(g_cursor_x, g_cursor_y);
+            iwin_under = iwin_hit(hit_x, hit_y);
     }
 
     if (pressed_edges & 1) {
         /* Left button was pressed (at least once) during this batch */
         int desktop_handled = 0;
         int taskbar_or_menu =
-            g_menu_open || g_cursor_y >= (int16_t)(g_fb_h - TASKBAR_H);
+            g_menu_open || hit_y >= (int16_t)(g_fb_h - TASKBAR_H);
 
         if (taskbar_or_menu) {
             g_iwin_focus = -1;
-            handle_desktop_click(g_cursor_x, g_cursor_y,
+            handle_desktop_click(hit_x, hit_y,
                                  (int)g_fb_w, (int)g_fb_h,
                                  left_press_count >= 2);
             desktop_handled = 1;
-        } else if (target && surface_minimize_hit(target, g_cursor_x,
-                                                  g_cursor_y)) {
+        } else if (target && surface_minimize_hit(target, hit_x, hit_y)) {
             surface_button_minimize(target);
             target = NULL;
             desktop_handled = 1;
-        } else if (target && surface_maximize_hit(target, g_cursor_x,
-                                                  g_cursor_y)) {
+        } else if (target && surface_maximize_hit(target, hit_x, hit_y)) {
             surface_button_toggle_maximize(target);
             desktop_handled = 1;
-        } else if (target && surface_close_hit(target, g_cursor_x, g_cursor_y)) {
+        } else if (target && surface_close_hit(target, hit_x, hit_y)) {
             if (surface_is_demo_window(target)) {
                 target->demo_close_requested = 1;
                 wlcomp_emit_demo_interaction_matrix(target, "close-request");
@@ -246,8 +330,7 @@ static void process_mouse(void)
             target = NULL;
             desktop_handled = 1;
         } else if (target && surface_has_window_frame(target)) {
-            uint32_t edges = surface_demo_resize_edges(target, g_cursor_x,
-                                                       g_cursor_y);
+            uint32_t edges = surface_demo_resize_edges(target, hit_x, hit_y);
 
             damage_surface(target);
             g_iwin_focus = -1;
@@ -259,8 +342,8 @@ static void process_mouse(void)
                 g_grab_surface = target;
                 g_grab_mode = 2;
                 g_grab_edges = edges;
-                g_grab_start_mx = g_cursor_x;
-                g_grab_start_my = g_cursor_y;
+                g_grab_start_mx = hit_x;
+                g_grab_start_my = hit_y;
                 g_grab_start_x = target->x;
                 g_grab_start_y = target->y;
                 g_grab_start_w = target->committed_buf ?
@@ -270,12 +353,11 @@ static void process_mouse(void)
                 if (surface_is_demo_window(target))
                     wlcomp_emit_demo_interaction_matrix(target, "resize-grab");
                 desktop_handled = 1;
-            } else if (surface_demo_title_hit(target, g_cursor_x,
-                                              g_cursor_y)) {
+            } else if (surface_demo_title_hit(target, hit_x, hit_y)) {
                 g_grab_surface = target;
                 g_grab_mode = 1;
-                g_grab_start_mx = g_cursor_x;
-                g_grab_start_my = g_cursor_y;
+                g_grab_start_mx = hit_x;
+                g_grab_start_my = hit_y;
                 g_grab_start_x = target->x;
                 g_grab_start_y = target->y;
                 desktop_handled = 1;
@@ -288,12 +370,12 @@ static void process_mouse(void)
             surface_raise_to_top(target);
             damage_surface(target);
         } else if (iwin_under >= 0 &&
-                   handle_iwin_click(g_cursor_x, g_cursor_y)) {
+                   handle_iwin_click(hit_x, hit_y)) {
             /* Internal window consumed the click */
         } else {
             /* No window under cursor — desktop icons / background */
             g_iwin_focus = -1;
-            handle_desktop_click(g_cursor_x, g_cursor_y,
+            handle_desktop_click(hit_x, hit_y,
                                  (int)g_fb_w, (int)g_fb_h,
                                  left_press_count >= 2);
             desktop_handled = 1;
@@ -512,6 +594,74 @@ static void process_keyboard(void)
  *  Initialization
  * ══════════════════════════════════════════════════════════════════════ */
 
+/*
+ * Build the default arrow into a 12x19 BGRA image and upload it to the
+ * virtio-gpu hardware cursor plane.  On success the compositor stops drawing
+ * the software cursor and reports motion via FB_GPU_MOVE_CURSOR, which rides
+ * the dedicated cursor queue and never serialises behind a present.  Any
+ * failure (no cursor queue / dumb framebuffer) leaves g_hw_cursor=0 and the
+ * software cursor remains the fallback.
+ */
+static void init_hw_cursor(void)
+{
+    static const uint8_t arrow[19][12] = {
+        {1,0,0,0,0,0,0,0,0,0,0,0},
+        {1,1,0,0,0,0,0,0,0,0,0,0},
+        {1,2,1,0,0,0,0,0,0,0,0,0},
+        {1,2,2,1,0,0,0,0,0,0,0,0},
+        {1,2,2,2,1,0,0,0,0,0,0,0},
+        {1,2,2,2,2,1,0,0,0,0,0,0},
+        {1,2,2,2,2,2,1,0,0,0,0,0},
+        {1,2,2,2,2,2,2,1,0,0,0,0},
+        {1,2,2,2,2,2,2,2,1,0,0,0},
+        {1,2,2,2,2,2,2,2,2,1,0,0},
+        {1,2,2,2,2,2,2,2,2,2,1,0},
+        {1,2,2,2,2,2,2,2,2,2,2,1},
+        {1,2,2,2,2,2,1,1,1,1,1,1},
+        {1,2,2,2,2,2,1,0,0,0,0,0},
+        {1,2,2,1,1,2,2,1,0,0,0,0},
+        {1,2,1,0,0,1,2,2,1,0,0,0},
+        {1,1,0,0,0,0,1,2,2,1,0,0},
+        {1,0,0,0,0,0,0,1,2,1,0,0},
+        {0,0,0,0,0,0,0,0,1,1,0,0},
+    };
+    static uint32_t img[12 * 19];
+    struct fb_gpu_cursor_image req;
+
+    if (g_fb_fd < 0)
+        return;
+
+    for (int y = 0; y < 19; y++) {
+        for (int x = 0; x < 12; x++) {
+            uint8_t v = arrow[y][x];
+            uint32_t px = 0;                   /* transparent */
+            if (v == 1) px = 0xFF000000;       /* black, opaque */
+            else if (v == 2) px = 0xFFFFFFFF;  /* white, opaque */
+            img[y * 12 + x] = px;
+        }
+    }
+
+    memset(&req, 0, sizeof(req));
+    req.width  = 12;
+    req.height = 19;
+    req.hot_x  = 0;
+    req.hot_y  = 0;
+    req.pixels = (uint64_t)(uintptr_t)img;
+    if (ioctl(g_fb_fd, FB_GPU_SET_CURSOR, &req) == 0) {
+        struct fb_gpu_cursor_move mv;
+
+        g_hw_cursor = 1;
+        memset(&mv, 0, sizeof(mv));
+        mv.x = g_cursor_x;
+        mv.y = g_cursor_y;
+        mv.flags = FB_GPU_CURSOR_F_VISIBLE;
+        (void)ioctl(g_fb_fd, FB_GPU_MOVE_CURSOR, &mv);
+        fprintf(stderr, "wlcomp: hardware cursor enabled\n");
+    } else {
+        g_hw_cursor = 0;
+    }
+}
+
 static int init_framebuffer(void)
 {
     g_fb_fd = open("/dev/fb0", O_RDWR);
@@ -539,6 +689,7 @@ static int init_framebuffer(void)
     damage_full_reason(FULL_DAMAGE_INIT);
 
     fprintf(stderr, "wlcomp: fb0 %ux%u pitch=%u\n", g_fb_w, g_fb_h, g_fb_pitch);
+    init_hw_cursor();
     return 0;
 }
 

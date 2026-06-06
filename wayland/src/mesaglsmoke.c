@@ -88,8 +88,9 @@ struct app_state {
     int configured;
     int running;
     int frame;
-    int max_frames;
-    int resize_every;
+    int max_seconds;
+    int resize_seconds;
+    uint64_t last_resize_ns;
     int width;
     int height;
     int pending_width;
@@ -545,18 +546,23 @@ static void draw_fps_overlay(struct app_state *app)
 static void frame_done(void *data, struct wl_callback *cb, uint32_t time)
 {
     struct app_state *app = data;
+    uint64_t now;
     (void)time;
 
     if (cb)
         wl_callback_destroy(cb);
     app->frame_cb = NULL;
     app->frame++;
-    if (app->max_frames > 0 && app->frame >= app->max_frames) {
+    now = monotonic_ns();
+    if (app->max_seconds > 0 && app->start_ns > 0 &&
+        now >= app->start_ns + (uint64_t)app->max_seconds * 1000000000ull) {
         app->running = 0;
         return;
     }
-    if (app->resize_every > 0 && app->frame > 0 &&
-        app->frame % app->resize_every == 0) {
+    if (app->resize_seconds > 0 && app->last_resize_ns > 0 &&
+        now - app->last_resize_ns >=
+            (uint64_t)app->resize_seconds * 1000000000ull) {
+        app->last_resize_ns = now;
         if (resize_surface_and_buffer(app) < 0) {
             app->running = 0;
             return;
@@ -816,9 +822,9 @@ static uint64_t monotonic_ns(void)
     return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
 }
 
-static int run_client(int loop, int frames, int resize_every, int sphere_demo,
-                      int width, int height, int sphere_quality,
-                      int fixed_size)
+static int run_client(int loop, int seconds, int resize_seconds,
+                      int sphere_demo, int width, int height,
+                      int sphere_quality, int fixed_size)
 {
     struct app_state app;
     int rc = 0;
@@ -833,8 +839,8 @@ static int run_client(int loop, int frames, int resize_every, int sphere_demo,
     app.buffer.fd = -1;
     app.buffer.fb_fd = -1;
     app.running = 1;
-    app.max_frames = frames;
-    app.resize_every = resize_every;
+    app.max_seconds = seconds;
+    app.resize_seconds = resize_seconds;
     app.width = width;
     app.height = height;
     app.loop = loop;
@@ -848,6 +854,7 @@ static int run_client(int loop, int frames, int resize_every, int sphere_demo,
     }
 
     app.start_ns = monotonic_ns();
+    app.last_resize_ns = app.start_ns;
     while (app.running && wl_display_dispatch(app.display) >= 0)
         ;
     if (app.running)
@@ -859,23 +866,23 @@ static int run_client(int loop, int frames, int resize_every, int sphere_demo,
     }
     cleanup(&app);
     fprintf(stderr,
-            "mesaglsmoke[%d]: complete frames=%d status=%d elapsed=%.3fs fps=%.1f\n",
-            loop, app.frame, rc, elapsed_sec, fps);
+            "mesaglsmoke[%d]: complete frames=%d seconds=%d status=%d elapsed=%.3fs fps=%.1f\n",
+            loop, app.frame, app.max_seconds, rc, elapsed_sec, fps);
     return rc;
 }
 
 int main(int argc, char **argv)
 {
-    int frames = 120;
+    int seconds = 2;
+    int seconds_set = 0;
     int loops = 1;
-    int resize_every = 0;
+    int resize_seconds = 0;
     int sphere_demo = 0;
     int width = WINDOW_W;
     int height = WINDOW_H;
     int sphere_quality = DEFAULT_SPHERE_QUALITY;
     int fixed_size = 0;
     int allow_resize = 0;
-    int frames_set = 0;
     int width_set = 0;
     int height_set = 0;
     int quality_set = 0;
@@ -886,14 +893,14 @@ int main(int argc, char **argv)
     setenv("LIBGL_DRIVERS_PATH", "/usr/lib/x86_64-linux-gnu/dri", 0);
 
     for (int i = 1; i < argc; i++) {
-        if (strncmp(argv[i], "--frames=", 9) == 0) {
-            frames = parse_nonnegative_arg(argv[i], "--frames=", frames);
-            frames_set = 1;
+        if (strncmp(argv[i], "--seconds=", 10) == 0) {
+            seconds = parse_nonnegative_arg(argv[i], "--seconds=", seconds);
+            seconds_set = 1;
         } else if (strncmp(argv[i], "--loops=", 8) == 0) {
             loops = parse_positive_arg(argv[i], "--loops=", loops);
-        } else if (strncmp(argv[i], "--resize-every=", 15) == 0) {
-            resize_every = parse_positive_arg(argv[i], "--resize-every=",
-                                              resize_every);
+        } else if (strncmp(argv[i], "--resize-seconds=", 17) == 0) {
+            resize_seconds = parse_positive_arg(argv[i], "--resize-seconds=",
+                                                resize_seconds);
         } else if (strncmp(argv[i], "--width=", 8) == 0) {
             width = parse_positive_arg(argv[i], "--width=", width);
             width_set = 1;
@@ -910,8 +917,8 @@ int main(int argc, char **argv)
             allow_resize = 1;
         } else if (strcmp(argv[i], "--demo") == 0) {
             sphere_demo = 1;
-            if (!frames_set)
-                frames = 0;
+            if (!seconds_set)
+                seconds = 0;
             fixed_size = 1;
             if (!width_set)
                 width = DEMO_W;
@@ -921,7 +928,8 @@ int main(int argc, char **argv)
                 sphere_quality = DEMO_SPHERE_QUALITY;
         } else if (strcmp(argv[i], "--help") == 0) {
             fprintf(stderr,
-                    "usage: %s [--frames=N] [--loops=N] [--resize-every=N] [--width=N] [--height=N] [--quality=N] [--allow-resize] [--demo]\n",
+                    "usage: %s [--seconds=N] [--loops=N] [--resize-seconds=N] [--width=N] [--height=N] [--quality=N] [--allow-resize] [--demo]\n"
+                    "  --seconds=N runs each smoke client for N seconds\n",
                     argv[0]);
             return 0;
         } else {
@@ -937,11 +945,11 @@ int main(int argc, char **argv)
         sphere_quality = 1;
     if (sphere_quality > 8)
         sphere_quality = 8;
-    if (resize_every > 0 || allow_resize)
+    if (resize_seconds > 0 || allow_resize)
         fixed_size = 0;
 
     for (int loop = 1; loop <= loops; loop++) {
-        rc = run_client(loop, frames, resize_every, sphere_demo, width,
+        rc = run_client(loop, seconds, resize_seconds, sphere_demo, width,
                         height, sphere_quality, fixed_size);
         if (rc != 0)
             break;

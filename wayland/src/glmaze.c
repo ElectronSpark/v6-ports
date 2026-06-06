@@ -1162,7 +1162,7 @@ int main(int argc, char **argv)
 {
     struct app app;
     const char *maze_path = "levels/maze.maz";
-    int max_frames = 0;
+    int max_seconds = 0;
     uint64_t last;
 
     memset(&app, 0, sizeof(app));
@@ -1178,12 +1178,12 @@ int main(int argc, char **argv)
     configure_gl_driver_env();
 
     for (int i = 1; i < argc; i++) {
-        if (strncmp(argv[i], "--frames=", 9) == 0)
-            max_frames = atoi(argv[i] + 9);
+        if (strncmp(argv[i], "--seconds=", 10) == 0)
+            max_seconds = atoi(argv[i] + 10);
         else if (strncmp(argv[i], "--maze=", 7) == 0)
             maze_path = argv[i] + 7;
         else {
-            fprintf(stderr, "usage: glmaze [--frames=N] [--maze=PATH]\n");
+            fprintf(stderr, "usage: glmaze [--seconds=N] [--maze=PATH]\n");
             return 2;
         }
     }
@@ -1222,7 +1222,8 @@ int main(int argc, char **argv)
             break;
         app.frames++;
         update_title(&app);
-        if (max_frames > 0 && app.frames >= max_frames)
+        if (max_seconds > 0 &&
+            now_ms() - app.start_ms >= (uint64_t)max_seconds * 1000ull)
             break;
         usleep(16000);
     }

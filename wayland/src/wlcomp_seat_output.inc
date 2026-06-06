@@ -150,14 +150,21 @@ static void pointer_set_cursor(struct wl_client *c, struct wl_resource *r,
                                int32_t hotspot_x, int32_t hotspot_y)
 {
     (void)c; (void)r; (void)serial;
-    damage_cursor_at(g_cursor_x, g_cursor_y);
+    if (!g_hw_cursor)
+        damage_cursor_at(g_cursor_x, g_cursor_y);
     if (surface) {
         struct wlcomp_surface *surf = surface_from_resource(surface);
         if (surf) {
+            if (g_cursor_surface && g_cursor_surface != surf)
+                g_cursor_surface->is_cursor = 0;
             surf->is_cursor = 1;
             g_cursor_surface = surf;
             g_cursor_hotspot_x = hotspot_x;
             g_cursor_hotspot_y = hotspot_y;
+            if (hw_cursor_client_images_enabled())
+                (void)hw_cursor_upload_surface(surf);
+            else
+                (void)hw_cursor_upload_default_arrow();
         }
     } else {
         /* NULL surface = use default cursor */
@@ -165,8 +172,10 @@ static void pointer_set_cursor(struct wl_client *c, struct wl_resource *r,
             g_cursor_surface->is_cursor = 0;
             g_cursor_surface = NULL;
         }
+        (void)hw_cursor_upload_default_arrow();
     }
-    damage_cursor_at(g_cursor_x, g_cursor_y);
+    if (!g_hw_cursor)
+        damage_cursor_at(g_cursor_x, g_cursor_y);
 }
 
 static void pointer_release(struct wl_client *c, struct wl_resource *r)
@@ -311,4 +320,3 @@ static void output_bind(struct wl_client *client, void *data,
     if (version >= 2)
         wl_output_send_done(res);
 }
-

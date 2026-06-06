@@ -19,7 +19,7 @@ static int buffer_is_referenced(struct wlcomp_buffer *buf)
 
     wl_list_for_each(surf, &g_surfaces, link) {
         if (surf->committed_buf == buf || surf->pending_buf == buf ||
-            surf->deferred_buf == buf)
+            surf->deferred_buf == buf || surf->staged_buf == buf)
             return 1;
     }
 
@@ -169,6 +169,9 @@ static int framebuffer_present_fence_ready(void)
     uint64_t completed = 0;
     uint32_t now;
     int timeout_ms;
+
+    if (wlcomp_async_scanout_present_pending())
+        return 0;
 
     if (g_fb_display_wait_sequence != 0) {
         if (framebuffer_display_completion_query(g_fb_display_wait_sequence, 1,
@@ -355,6 +358,44 @@ static void flush_buffer_releases_after_present(void)
         buffer_maybe_free(buf);
     }
     g_release_queue_count = out;
+}
+
+static int flush_buffer_releases_after_compose_latch(void)
+{
+    int out = 0;
+    int flushed = 0;
+
+    for (int i = 0; i < g_release_queue_count; i++) {
+        struct wlcomp_buffer *buf = g_release_queue[i];
+
+        if (!buf)
+            continue;
+        if (buf->is_d3d12_shared) {
+            g_release_queue[out++] = buf;
+            continue;
+        }
+        /*
+         * This early path is only for GPU-composed dma-bufs whose pixels were
+         * captured by the compositor GL draw.  CPU/shm releases still use the
+         * present path because their pixels can be re-read for damage repair.
+         */
+        if (!buf->is_gpu_bo || !buf->gl_release_sync) {
+            g_release_queue[out++] = buf;
+            continue;
+        }
+        if (!wlcomp_gl_compose_buffer_release_ready(buf)) {
+            g_release_queue[out++] = buf;
+            continue;
+        }
+        buffer_send_release_events(buf);
+        g_buffer_release_trace_flushed++;
+        g_buffer_release_trace_latch_flushed++;
+        buf->release_pending = 0;
+        buffer_maybe_free(buf);
+        flushed++;
+    }
+    g_release_queue_count = out;
+    return flushed;
 }
 
 static void surface_release_committed_buffer(struct wlcomp_surface *surf)
@@ -586,6 +627,278 @@ static void *buffer_data(struct wlcomp_buffer *buf)
         return NULL;
 
     return (char *)buf->pool->data + buf->offset;
+}
+
+static int hw_cursor_upload_default_arrow(void);
+
+static int hw_cursor_client_images_enabled(void)
+{
+    return cmdline_int_value("wlcomp_hw_cursor_client_images", 0) != 0;
+}
+
+static int hw_cursor_surface_is_webkit_client(struct wlcomp_surface *surf)
+{
+    struct wlcomp_surface *other;
+
+    if (!surf || surf->client_pid <= 0)
+        return 0;
+    wl_list_for_each(other, &g_surfaces, link) {
+        if (other->client_pid == surf->client_pid &&
+            surface_is_webkit_window(other))
+            return 1;
+    }
+    return 0;
+}
+
+static int hw_cursor_upload_surface(struct wlcomp_surface *surf)
+{
+    static int upload_logs;
+    struct wlcomp_buffer *buf;
+    uint32_t image[FB_GPU_CURSOR_MAX_DIM * FB_GPU_CURSOR_MAX_DIM];
+    struct fb_gpu_cursor_image req;
+    struct fb_gpu_cursor_move mv;
+    uint32_t *src;
+    int32_t hot_x;
+    int32_t hot_y;
+    int src_stride_px;
+    int transparent_pixels = 0;
+    int translucent_pixels = 0;
+    int opaque_pixels = 0;
+    int corner_alpha_sum = 0;
+    int alpha_min_x = FB_GPU_CURSOR_MAX_DIM;
+    int alpha_min_y = FB_GPU_CURSOR_MAX_DIM;
+    int alpha_max_x = -1;
+    int alpha_max_y = -1;
+
+    if (!g_hw_cursor || !surf || surf != g_cursor_surface ||
+        !surf->committed_buf || g_fb_fd < 0)
+        return 0;
+    if (!hw_cursor_client_images_enabled()) {
+        if (upload_logs < 8) {
+            fprintf(stderr,
+                    "wlcomp: hardware cursor client image ignored reason=client-images-disabled\n");
+            upload_logs++;
+        }
+        (void)hw_cursor_upload_default_arrow();
+        return 0;
+    }
+    buf = surf->committed_buf;
+    if (buf->width <= 0 || buf->height <= 0 ||
+        buf->width > FB_GPU_CURSOR_MAX_DIM ||
+        buf->height > FB_GPU_CURSOR_MAX_DIM) {
+        if (upload_logs < 8) {
+            fprintf(stderr,
+                    "wlcomp: hardware cursor client image ignored size=%dx%d reason=bad-size\n",
+                    buf->width, buf->height);
+            upload_logs++;
+        }
+        (void)hw_cursor_upload_default_arrow();
+        return 0;
+    }
+    if (hw_cursor_surface_is_webkit_client(surf) &&
+        buf->width == 24 && buf->height == 24) {
+        if (upload_logs < 8) {
+            fprintf(stderr,
+                    "wlcomp: hardware cursor client image ignored size=%dx%d hotspot=%d,%d reason=webkit-gtk-24x24-unsafe\n",
+                    buf->width, buf->height, g_cursor_hotspot_x,
+                    g_cursor_hotspot_y);
+            upload_logs++;
+        }
+        (void)hw_cursor_upload_default_arrow();
+        return 0;
+    }
+    if (buf->format != WL_SHM_FORMAT_ARGB8888 &&
+        buf->format != DRM_FORMAT_ARGB8888) {
+        if (upload_logs < 8) {
+            fprintf(stderr,
+                    "wlcomp: hardware cursor client image ignored size=%dx%d fmt=0x%x reason=no-alpha\n",
+                    buf->width, buf->height, buf->format);
+            upload_logs++;
+        }
+        (void)hw_cursor_upload_default_arrow();
+        return 0;
+    }
+
+    src = (uint32_t *)buffer_data(buf);
+    if (!src) {
+        if (upload_logs < 8) {
+            fprintf(stderr,
+                    "wlcomp: hardware cursor client image ignored size=%dx%d fmt=0x%x reason=no-readable-buffer\n",
+                    buf->width, buf->height, buf->format);
+            upload_logs++;
+        }
+        (void)hw_cursor_upload_default_arrow();
+        return 0;
+    }
+    src_stride_px = buf->stride > 0 ? buf->stride / 4 : buf->width;
+    if (src_stride_px < buf->width) {
+        if (upload_logs < 8) {
+            fprintf(stderr,
+                    "wlcomp: hardware cursor client image ignored size=%dx%d stride=%d reason=bad-stride\n",
+                    buf->width, buf->height, buf->stride);
+            upload_logs++;
+        }
+        (void)hw_cursor_upload_default_arrow();
+        return 0;
+    }
+
+    memset(image, 0, sizeof(image));
+    for (int y = 0; y < buf->height; y++) {
+        int src_y = buf->y_inverted ? (buf->height - 1 - y) : y;
+
+        for (int x = 0; x < buf->width; x++) {
+            uint32_t px = src[src_y * src_stride_px + x];
+            uint32_t alpha = px >> 24;
+
+            if (alpha == 0)
+                transparent_pixels++;
+            else if (alpha == 0xff)
+                opaque_pixels++;
+            else
+                translucent_pixels++;
+            if (alpha != 0) {
+                if (x < alpha_min_x) alpha_min_x = x;
+                if (y < alpha_min_y) alpha_min_y = y;
+                if (x > alpha_max_x) alpha_max_x = x;
+                if (y > alpha_max_y) alpha_max_y = y;
+            }
+            if ((x == 0 || x == buf->width - 1) &&
+                (y == 0 || y == buf->height - 1))
+                corner_alpha_sum += (int)alpha;
+            image[y * buf->width + x] = px;
+        }
+    }
+    /*
+     * Wayland cursor buffers are expected to carry an alpha mask.  WebKit/GTK
+     * can transiently provide a 24x24 all-opaque black-ish cursor buffer; if
+     * we upload that to the hardware plane, QEMU shows it as a large black
+     * square.  Reject rectangular-looking client cursors and keep the
+     * known-good default arrow instead of poisoning the cursor resource.
+     */
+    {
+        int total_pixels = buf->width * buf->height;
+        int visible_pixels = opaque_pixels + translucent_pixels;
+        int alpha_w = alpha_max_x >= alpha_min_x ?
+            alpha_max_x - alpha_min_x + 1 : 0;
+        int alpha_h = alpha_max_y >= alpha_min_y ?
+            alpha_max_y - alpha_min_y + 1 : 0;
+        int alpha_area = alpha_w * alpha_h;
+        int dense_rect = alpha_area > total_pixels / 3 &&
+            visible_pixels * 100 >= alpha_area * 45;
+
+        if ((transparent_pixels == 0 && translucent_pixels == 0 &&
+             opaque_pixels == total_pixels) ||
+            corner_alpha_sum != 0 ||
+            transparent_pixels < total_pixels / 8 ||
+            dense_rect ||
+            opaque_pixels > (total_pixels * 2) / 3) {
+        if (upload_logs < 8) {
+            fprintf(stderr,
+                    "wlcomp: hardware cursor client image ignored size=%dx%d hotspot=%d,%d alpha transparent=%d translucent=%d opaque=%d corners=%d bbox=%dx%d visible=%d reason=rectangular-alpha-mask\n",
+                    buf->width, buf->height, g_cursor_hotspot_x,
+                    g_cursor_hotspot_y, transparent_pixels,
+                    translucent_pixels, opaque_pixels, corner_alpha_sum,
+                    alpha_w, alpha_h, visible_pixels);
+            upload_logs++;
+        }
+        (void)hw_cursor_upload_default_arrow();
+        return 0;
+        }
+    }
+
+    hot_x = g_cursor_hotspot_x;
+    hot_y = g_cursor_hotspot_y;
+    if (hot_x < 0) hot_x = 0;
+    if (hot_y < 0) hot_y = 0;
+    if (hot_x >= buf->width) hot_x = buf->width - 1;
+    if (hot_y >= buf->height) hot_y = buf->height - 1;
+
+    memset(&req, 0, sizeof(req));
+    req.width = (uint32_t)buf->width;
+    req.height = (uint32_t)buf->height;
+    req.hot_x = (uint32_t)hot_x;
+    req.hot_y = (uint32_t)hot_y;
+    req.pixels = (uint64_t)(uintptr_t)image;
+    if (ioctl(g_fb_fd, FB_GPU_SET_CURSOR, &req) != 0) {
+        if (upload_logs < 8) {
+            fprintf(stderr,
+                    "wlcomp: hardware cursor client upload failed errno=%d (%s) size=%dx%d fmt=0x%x\n",
+                    errno, strerror(errno), buf->width, buf->height,
+                    buf->format);
+            upload_logs++;
+        }
+        return 0;
+    }
+
+    memset(&mv, 0, sizeof(mv));
+    mv.x = g_cursor_x;
+    mv.y = g_cursor_y;
+    mv.flags = FB_GPU_CURSOR_F_VISIBLE;
+    (void)ioctl(g_fb_fd, FB_GPU_MOVE_CURSOR, &mv);
+    if (upload_logs < 8) {
+        fprintf(stderr,
+                "wlcomp: hardware cursor client image uploaded size=%dx%d hotspot=%d,%d\n",
+                buf->width, buf->height, hot_x, hot_y);
+        upload_logs++;
+    }
+    return 1;
+}
+
+static int hw_cursor_upload_default_arrow(void)
+{
+    static const uint8_t arrow[19][12] = {
+        {1,0,0,0,0,0,0,0,0,0,0,0},
+        {1,1,0,0,0,0,0,0,0,0,0,0},
+        {1,2,1,0,0,0,0,0,0,0,0,0},
+        {1,2,2,1,0,0,0,0,0,0,0,0},
+        {1,2,2,2,1,0,0,0,0,0,0,0},
+        {1,2,2,2,2,1,0,0,0,0,0,0},
+        {1,2,2,2,2,2,1,0,0,0,0,0},
+        {1,2,2,2,2,2,2,1,0,0,0,0},
+        {1,2,2,2,2,2,2,2,1,0,0,0},
+        {1,2,2,2,2,2,2,2,2,1,0,0},
+        {1,2,2,2,2,2,2,2,2,2,1,0},
+        {1,2,2,2,2,2,2,2,2,2,2,1},
+        {1,2,2,2,2,2,1,1,1,1,1,1},
+        {1,2,2,2,2,2,1,0,0,0,0,0},
+        {1,2,2,1,1,2,2,1,0,0,0,0},
+        {1,2,1,0,0,1,2,2,1,0,0,0},
+        {1,1,0,0,0,0,1,2,2,1,0,0},
+        {1,0,0,0,0,0,0,1,2,1,0,0},
+        {0,0,0,0,0,0,0,0,1,1,0,0},
+    };
+    uint32_t img[12 * 19];
+    struct fb_gpu_cursor_image req;
+    struct fb_gpu_cursor_move mv;
+
+    if (!g_hw_cursor || g_fb_fd < 0)
+        return 0;
+    for (int y = 0; y < 19; y++) {
+        for (int x = 0; x < 12; x++) {
+            uint8_t v = arrow[y][x];
+            uint32_t px = 0;
+
+            if (v == 1)
+                px = 0xFF000000u;
+            else if (v == 2)
+                px = 0xFFFFFFFFu;
+            img[y * 12 + x] = px;
+        }
+    }
+
+    memset(&req, 0, sizeof(req));
+    req.width = 12;
+    req.height = 19;
+    req.pixels = (uint64_t)(uintptr_t)img;
+    if (ioctl(g_fb_fd, FB_GPU_SET_CURSOR, &req) != 0)
+        return 0;
+
+    memset(&mv, 0, sizeof(mv));
+    mv.x = g_cursor_x;
+    mv.y = g_cursor_y;
+    mv.flags = FB_GPU_CURSOR_F_VISIBLE;
+    (void)ioctl(g_fb_fd, FB_GPU_MOVE_CURSOR, &mv);
+    return 1;
 }
 
 static void *buffer_plane_data(struct wlcomp_buffer *buf, uint32_t plane)
@@ -893,7 +1206,8 @@ static void gpu_compose_shadow_sync_buffer(struct wlcomp_buffer *buf,
 static int gpu_compose_present_buffer(struct wlcomp_buffer *buf,
                                       int32_t draw_x, int32_t draw_y,
                                       int32_t row0, int32_t row1,
-                                      int32_t col0, int32_t col1)
+                                      int32_t col0, int32_t col1,
+                                      int force_virgl_copy)
 {
     struct fb_gpu_bo_present cmd;
     uint32_t handle;
@@ -906,7 +1220,9 @@ static int gpu_compose_present_buffer(struct wlcomp_buffer *buf,
     static uint64_t present_total_us;
     static uint64_t present_frames;
     int perf_log = cmdline_flag_enabled("wlcomp_gpu_perf");
-    int virgl_copy = gpu_compose_virgl_copy_enabled();
+    int virgl_copy = gpu_compose_virgl_copy_enabled() ||
+        (force_virgl_copy && g_fb_virgl_backed &&
+         !cmdline_flag_enabled("wlcomp_no_webkit_virgl_copy"));
     int virgl_copy_delay_us =
         cmdline_int_value("wlcomp_gpu_copy_delay_us", 0);
 
@@ -1077,6 +1393,15 @@ static int gpu_compose_can_present_surface(struct wlcomp_surface *surf,
     int32_t gh;
 
     if (!surf || !buf || !surf->has_window_geometry)
+        return 1;
+
+    /*
+     * The GL compose path draws explicit source and destination rectangles, so
+     * it can handle xdg window geometry where the client buffer is larger than
+     * the visible content area.  WebKit/MiniBrowser commonly submits this shape.
+     */
+    if (g_fb_virgl_backed && wlcomp_gl_compose_enabled() &&
+        buf->is_gpu_bo && !buf->y_inverted)
         return 1;
 
     surface_window_geometry(surf, &gx, &gy, &gw, &gh);

@@ -227,6 +227,7 @@ struct gpu_compose_pending {
     int32_t row1;
     int32_t col0;
     int32_t col1;
+    int force_virgl_copy;
 };
 
 #define MAX_GPU_COMPOSE_PENDING 16
@@ -370,6 +371,67 @@ static int prefilter_gpu_damage_enabled(void)
     return enabled;
 }
 
+static int webkit_inplace_present_enabled(void)
+{
+    static int initialized;
+    static int enabled;
+    const char *env;
+
+    if (initialized)
+        return enabled;
+    initialized = 1;
+    enabled = cmdline_int_value("wlcomp_webkit_inplace_present", 1) != 0;
+    env = getenv("XV6_WLCOMP_WEBKIT_INPLACE_PRESENT");
+    if (env && *env)
+        enabled = strcmp(env, "0") != 0 && strcmp(env, "no") != 0 &&
+                  strcmp(env, "false") != 0 && strcmp(env, "off") != 0;
+    return enabled;
+}
+
+static int webkit_rect_scanout_enabled(void)
+{
+    static int initialized;
+    static int enabled;
+    const char *env;
+
+    if (initialized)
+        return enabled;
+    initialized = 1;
+    enabled = cmdline_int_value("wlcomp_webkit_rect_scanout", 0) != 0;
+    env = getenv("XV6_WLCOMP_WEBKIT_RECT_SCANOUT");
+    if (env && *env)
+        enabled = strcmp(env, "0") != 0 && strcmp(env, "no") != 0 &&
+                  strcmp(env, "false") != 0 && strcmp(env, "off") != 0;
+    return enabled;
+}
+
+static int webkit_only_gpu_frame_ready(void)
+{
+    struct wlcomp_surface *surf;
+    int seen_webkit_gpu = 0;
+
+    if (!webkit_inplace_present_enabled() || !g_fb_virgl_backed ||
+        !wlcomp_page_flip_present_enabled())
+        return 0;
+
+    wl_list_for_each(surf, &g_surfaces, link) {
+        struct wlcomp_buffer *buf;
+
+        if (!surface_tree_visible(surf) || !surf->committed_buf ||
+            surf->is_cursor)
+            continue;
+        buf = surf->committed_buf;
+        if (!buf->is_gpu_bo || !gpu_compose_can_present_surface(surf, buf))
+            continue;
+        if (!surface_is_webkit_window(surf))
+            return 0;
+        if (!buffer_ready_for_gl_compose_latch(buf))
+            continue;
+        seen_webkit_gpu = 1;
+    }
+    return seen_webkit_gpu;
+}
+
 static int startup_full_damage_ms(void)
 {
     static int initialized;
@@ -399,6 +461,11 @@ struct present_trace_accum {
     uint64_t frames;
     uint64_t cpu_upload_us;
     uint64_t cpu_upload_rects;
+    uint64_t cpu_upload_pixels;
+    uint64_t cpu_upload_clock_rects;
+    uint64_t cpu_upload_full_rects;
+    uint64_t cpu_upload_max_pixels;
+    struct damage_rect cpu_upload_max_rect;
     uint64_t gl_compose_us;
     uint64_t gl_compose_bufs;
     uint64_t scanout_us;
@@ -409,6 +476,37 @@ struct present_trace_accum {
 };
 
 static struct present_trace_accum g_present_trace;
+static uint64_t g_present_trace_client_wait_us;
+static uint64_t g_present_trace_outside_frame_us;
+static uint64_t g_present_trace_last_frame_end_us;
+
+static void present_trace_note_cpu_rects(const struct damage_rect *rects,
+                                         int count)
+{
+    if (!present_trace_enabled() || !rects || count <= 0)
+        return;
+    for (int i = 0; i < count; i++) {
+        const struct damage_rect *r = &rects[i];
+        uint64_t pixels;
+        int w = r->x2 - r->x1;
+        int h = r->y2 - r->y1;
+
+        if (w <= 0 || h <= 0)
+            continue;
+        pixels = (uint64_t)(uint32_t)w * (uint32_t)h;
+        g_present_trace.cpu_upload_pixels += pixels;
+        if (pixels > g_present_trace.cpu_upload_max_pixels) {
+            g_present_trace.cpu_upload_max_pixels = pixels;
+            g_present_trace.cpu_upload_max_rect = *r;
+        }
+        if (r->x1 == 0 && r->y1 == 0 &&
+            r->x2 == (int32_t)g_fb_w && r->y2 == (int32_t)g_fb_h)
+            g_present_trace.cpu_upload_full_rects++;
+        if (r->y1 >= (int32_t)g_fb_h - TASKBAR_H &&
+            r->x1 >= (int32_t)g_fb_w - 160)
+            g_present_trace.cpu_upload_clock_rects++;
+    }
+}
 
 static void present_trace_maybe_log(uint32_t now)
 {
@@ -417,16 +515,40 @@ static void present_trace_maybe_log(uint32_t now)
     static uint64_t prev_release_gpu_immediate;
     static uint64_t prev_release_queued;
     static uint64_t prev_release_flushed;
+    static uint64_t prev_release_latch_flushed;
     static uint64_t prev_scanout_submits;
     static uint64_t prev_scanout_rebinds;
+    static uint64_t prev_async_scanout_trace_us;
+    static uint64_t prev_async_scanout_trace_completions;
+    static uint64_t prev_full_damage[FULL_DAMAGE_COUNT];
+    static uint64_t prev_loop_wait_us;
+    static uint64_t prev_client_wait_us;
+    static uint64_t prev_present_client_wait_us;
+    static uint64_t prev_outside_frame_us;
+    static uint64_t prev_drag_events;
+    static uint64_t prev_drag_frames;
     struct present_trace_accum *a = &g_present_trace;
     uint64_t frames;
+    uint64_t loop_wait_total_us = 0;
+    uint64_t client_wait_total_us = 0;
+    uint64_t loop_wait_us;
+    uint64_t client_wait_us;
+    uint64_t present_client_wait_us;
+    uint64_t outside_frame_us;
+    uint64_t outside_unaccounted_us;
     uint64_t release_total;
     uint64_t release_gpu_immediate;
     uint64_t release_queued;
     uint64_t release_flushed;
+    uint64_t release_latch_flushed;
     uint64_t scanout_submits;
     uint64_t scanout_rebinds;
+    uint64_t async_scanout_us;
+    uint64_t async_scanout_completions;
+    uint64_t scanout_accounted_us;
+    uint64_t full_damage_delta[FULL_DAMAGE_COUNT];
+    uint64_t drag_events;
+    uint64_t drag_frames;
     int interval_ms;
 
     if (!present_trace_enabled())
@@ -444,27 +566,79 @@ static void present_trace_maybe_log(uint32_t now)
         g_buffer_release_trace_gpu_immediate - prev_release_gpu_immediate;
     release_queued = g_buffer_release_trace_queued - prev_release_queued;
     release_flushed = g_buffer_release_trace_flushed - prev_release_flushed;
+    release_latch_flushed =
+        g_buffer_release_trace_latch_flushed - prev_release_latch_flushed;
     scanout_submits = g_scanout_trace_submits - prev_scanout_submits;
     scanout_rebinds = g_scanout_trace_rebinds - prev_scanout_rebinds;
+    async_scanout_us =
+        g_async_scanout_trace_us - prev_async_scanout_trace_us;
+    async_scanout_completions =
+        g_async_scanout_trace_completions -
+        prev_async_scanout_trace_completions;
+    scanout_accounted_us = a->scanout_us + async_scanout_us;
+    for (int i = 0; i < FULL_DAMAGE_COUNT; i++)
+        full_damage_delta[i] =
+            g_damage_stats.full_damage[i] - prev_full_damage[i];
+    drag_events = g_drag_trace_events - prev_drag_events;
+    drag_frames = g_drag_trace_frames - prev_drag_frames;
+    frame_perf_wait_totals(&loop_wait_total_us, &client_wait_total_us);
+    loop_wait_us = loop_wait_total_us - prev_loop_wait_us;
+    client_wait_us = client_wait_total_us - prev_client_wait_us;
+    present_client_wait_us =
+        g_present_trace_client_wait_us - prev_present_client_wait_us;
+    outside_frame_us = g_present_trace_outside_frame_us -
+                       prev_outside_frame_us;
+    outside_unaccounted_us = outside_frame_us > loop_wait_us ?
+                             outside_frame_us - loop_wait_us : 0;
+    client_wait_us += present_client_wait_us;
     fprintf(stderr,
             "wlcomp: present-trace frames=%lu frame_avg_us=%lu "
+            "loop_wait_avg_us=%lu client_wait_avg_us=%lu "
+            "outside_frame_avg_us=%lu present_wait_avg_us=%lu "
             "cpu_upload_avg_us=%lu cpu_rects/frame=%lu cpu_rects_total=%lu "
+            "cpu_pixels_total=%lu cpu_max_rect=%d,%d-%d,%d "
+            "cpu_clock_rects=%lu cpu_full_rects=%lu "
+            "full_damage other=%lu init=%lu repair=%lu acquire=%lu "
+            "desktop=%lu menu=%lu resize=%lu client=%lu iwin=%lu "
             "gl_compose_avg_us=%lu gl_bufs/frame=%lu gl_bufs_total=%lu "
             "scanout_avg_us=%lu scanout_rects/frame=%lu "
             "scanout_rects_x100/frame=%lu scanout_rects_total=%lu "
             "path_gl_preflush=%lu path_cpu_only=%lu "
             "scanout_submits=%lu scanout_rebinds=%lu "
+            "async_scanout_avg_us=%lu async_scanout_completions=%lu "
             "release_total=%lu release_gpu_immediate=%lu "
-            "release_queued=%lu release_flushed=%lu release_pending=%d\n",
+            "release_queued=%lu release_flushed=%lu "
+            "release_latch_flushed=%lu release_pending=%d "
+            "drag_events/frame=%lu drag_frames=%lu\n",
             (unsigned long)a->frames,
             (unsigned long)(a->frame_us / frames),
+            (unsigned long)(loop_wait_us / frames),
+            (unsigned long)(client_wait_us / frames),
+            (unsigned long)(outside_unaccounted_us / frames),
+            (unsigned long)(present_client_wait_us / frames),
             (unsigned long)(a->cpu_upload_us / frames),
             (unsigned long)(a->cpu_upload_rects / frames),
             (unsigned long)a->cpu_upload_rects,
+            (unsigned long)a->cpu_upload_pixels,
+            a->cpu_upload_max_rect.x1,
+            a->cpu_upload_max_rect.y1,
+            a->cpu_upload_max_rect.x2,
+            a->cpu_upload_max_rect.y2,
+            (unsigned long)a->cpu_upload_clock_rects,
+            (unsigned long)a->cpu_upload_full_rects,
+            (unsigned long)full_damage_delta[FULL_DAMAGE_OTHER],
+            (unsigned long)full_damage_delta[FULL_DAMAGE_INIT],
+            (unsigned long)full_damage_delta[FULL_DAMAGE_REPAIR],
+            (unsigned long)full_damage_delta[FULL_DAMAGE_ACQUIRE],
+            (unsigned long)full_damage_delta[FULL_DAMAGE_DESKTOP],
+            (unsigned long)full_damage_delta[FULL_DAMAGE_MENU],
+            (unsigned long)full_damage_delta[FULL_DAMAGE_RESIZE],
+            (unsigned long)full_damage_delta[FULL_DAMAGE_CLIENT],
+            (unsigned long)full_damage_delta[FULL_DAMAGE_IWIN],
             (unsigned long)(a->gl_compose_us / frames),
             (unsigned long)(a->gl_compose_bufs / frames),
             (unsigned long)a->gl_compose_bufs,
-            (unsigned long)(a->scanout_us / frames),
+            (unsigned long)(scanout_accounted_us / frames),
             (unsigned long)(a->scanout_rects / frames),
             (unsigned long)((a->scanout_rects * 100) / frames),
             (unsigned long)a->scanout_rects,
@@ -472,17 +646,35 @@ static void present_trace_maybe_log(uint32_t now)
             (unsigned long)a->cpu_only_frames,
             (unsigned long)scanout_submits,
             (unsigned long)scanout_rebinds,
+            (unsigned long)(async_scanout_completions ?
+                async_scanout_us / async_scanout_completions : 0),
+            (unsigned long)async_scanout_completions,
             (unsigned long)release_total,
             (unsigned long)release_gpu_immediate,
             (unsigned long)release_queued,
             (unsigned long)release_flushed,
-            g_release_queue_count);
+            (unsigned long)release_latch_flushed,
+            g_release_queue_count,
+            (unsigned long)(drag_events / frames),
+            (unsigned long)drag_frames);
     prev_release_total = g_buffer_release_trace_total;
     prev_release_gpu_immediate = g_buffer_release_trace_gpu_immediate;
     prev_release_queued = g_buffer_release_trace_queued;
     prev_release_flushed = g_buffer_release_trace_flushed;
+    prev_release_latch_flushed = g_buffer_release_trace_latch_flushed;
     prev_scanout_submits = g_scanout_trace_submits;
     prev_scanout_rebinds = g_scanout_trace_rebinds;
+    prev_async_scanout_trace_us = g_async_scanout_trace_us;
+    prev_async_scanout_trace_completions =
+        g_async_scanout_trace_completions;
+    for (int i = 0; i < FULL_DAMAGE_COUNT; i++)
+        prev_full_damage[i] = g_damage_stats.full_damage[i];
+    prev_loop_wait_us = loop_wait_total_us;
+    prev_client_wait_us = client_wait_total_us;
+    prev_present_client_wait_us = g_present_trace_client_wait_us;
+    prev_outside_frame_us = g_present_trace_outside_frame_us;
+    prev_drag_events = g_drag_trace_events;
+    prev_drag_frames = g_drag_trace_frames;
     memset(a, 0, sizeof(*a));
     next_log_ms = now + (uint32_t)interval_ms;
 }
@@ -490,13 +682,170 @@ static struct gpu_compose_pending g_gpu_compose_pending[MAX_GPU_COMPOSE_PENDING]
 static int g_gpu_compose_pending_count;
 static struct damage_rect g_virgl_flip_prev_copy_rects[MAX_DAMAGE_RECTS];
 static int g_virgl_flip_prev_copy_rect_count;
+static struct damage_rect g_virgl_flip_chrome_sync_rects[MAX_DAMAGE_RECTS];
+static int g_virgl_flip_chrome_sync_rect_count;
+static int g_virgl_flip_chrome_sync_remaining;
+static int g_virgl_flip_chrome_sync_replaying;
 static int g_virgl_flip_gpu_warm_remaining;
+static struct wlcomp_virgl_fb_target g_gpu_chrome_target;
+static int g_gpu_chrome_target_ready;
+static struct wlcomp_buffer g_gpu_chrome_buffer;
+static int g_gpu_chrome_paint_skip_gpu_surfaces;
 
 static void gpu_compose_rect_append(struct damage_rect *rects, int *count,
                                     const struct damage_rect *r);
+static int gpu_compose_pending_add(struct wlcomp_buffer *buf,
+                                   int32_t draw_x, int32_t draw_y,
+                                   int32_t row0, int32_t row1,
+                                   int32_t col0, int32_t col1,
+                                   int force_virgl_copy);
+static int gpu_compose_pending_prepend(struct wlcomp_buffer *buf,
+                                       int32_t draw_x, int32_t draw_y,
+                                       int32_t row0, int32_t row1,
+                                       int32_t col0, int32_t col1,
+                                       int force_virgl_copy);
+static int gpu_compose_pending_has_buffer(struct wlcomp_buffer *buf);
 
 static void gpu_compose_filter_present_damage(void);
 static int gpu_compose_damage_prefilter(void);
+
+static int gpu_chrome_compose_enabled(void)
+{
+    static int initialized;
+    static int enabled;
+    const char *env;
+
+    if (initialized)
+        return enabled;
+    initialized = 1;
+    enabled = cmdline_int_value("wlcomp_gpu_chrome_compose", 0) != 0;
+    env = getenv("XV6_WLCOMP_GPU_CHROME_COMPOSE");
+    if (env && *env)
+        enabled = strcmp(env, "0") != 0 && strcmp(env, "no") != 0 &&
+                  strcmp(env, "false") != 0 && strcmp(env, "off") != 0;
+    return enabled;
+}
+
+static int gpu_chrome_compose_frame_candidate(void)
+{
+    if (!gpu_chrome_compose_enabled() || !gpu_compose_enabled() ||
+        !g_fb_virgl_backed || !wlcomp_gl_compose_enabled() ||
+        g_damage_count <= 0)
+        return 0;
+
+    return 1;
+}
+
+static int gpu_chrome_compose_ensure_target(void)
+{
+    if (!gpu_chrome_compose_frame_candidate())
+        return 0;
+    if (g_gpu_chrome_target_ready &&
+        g_gpu_chrome_target.bo_handle != 0 &&
+        g_gpu_chrome_target.resource_id != 0 &&
+        g_gpu_chrome_target.pitch != 0)
+        return 1;
+
+    if (g_fb_virgl_ctx_id == 0 ||
+        alloc_virgl_framebuffer_target(g_fb_virgl_ctx_id, "chrome",
+                                       &g_gpu_chrome_target) != 0)
+        return 0;
+
+    memset(&g_gpu_chrome_buffer, 0, sizeof(g_gpu_chrome_buffer));
+    for (int i = 0; i < 4; i++)
+        g_gpu_chrome_buffer.plane_dmabuf_fd[i] = -1;
+    g_gpu_chrome_buffer.is_gpu_bo = 1;
+    g_gpu_chrome_buffer.gpu_handle = g_gpu_chrome_target.bo_handle;
+    g_gpu_chrome_buffer.plane_gpu_handle[0] = g_gpu_chrome_target.bo_handle;
+    g_gpu_chrome_buffer.plane_virtio_resource_id[0] =
+        g_gpu_chrome_target.resource_id;
+    g_gpu_chrome_buffer.width = (int32_t)g_fb_w;
+    g_gpu_chrome_buffer.height = (int32_t)g_fb_h;
+    g_gpu_chrome_buffer.stride = (int32_t)g_gpu_chrome_target.pitch;
+    g_gpu_chrome_buffer.plane_stride[0] =
+        (int32_t)g_gpu_chrome_target.pitch;
+    g_gpu_chrome_buffer.plane_offset[0] = 0;
+    g_gpu_chrome_buffer.plane_count = 1;
+    g_gpu_chrome_buffer.format = DRM_FORMAT_XRGB8888;
+    g_gpu_chrome_buffer.y_inverted = 0;
+    g_gpu_chrome_target_ready = 1;
+    if (!wlcomp_gl_compose_probe_buffer(&g_gpu_chrome_buffer)) {
+        g_gpu_chrome_target_ready = 0;
+        return 0;
+    }
+    fprintf(stderr,
+            "wlcomp: gpu chrome compose source ready res=%u handle=%u size=%ux%u pitch=%u\n",
+            g_gpu_chrome_target.resource_id, g_gpu_chrome_target.bo_handle,
+            g_fb_w, g_fb_h, g_gpu_chrome_target.pitch);
+    return 1;
+}
+
+static int gpu_chrome_compose_add_damage(const struct damage_rect *rects,
+                                         int count)
+{
+    int added = 0;
+
+    if (!g_gpu_chrome_target_ready)
+        return 0;
+    for (int i = 0; i < count; i++) {
+        const struct damage_rect *r = &rects[i];
+
+        if (r->x1 >= r->x2 || r->y1 >= r->y2)
+            continue;
+        if (gpu_compose_pending_add(&g_gpu_chrome_buffer, 0, 0,
+                                    r->y1, r->y2, r->x1, r->x2, 0))
+            added = 1;
+    }
+    return added;
+}
+
+static int gpu_chrome_compose_add_full_base(void)
+{
+    if (!g_gpu_chrome_target_ready)
+        return 0;
+    return gpu_compose_pending_prepend(&g_gpu_chrome_buffer, 0, 0,
+                                       0, (int32_t)g_fb_h,
+                                       0, (int32_t)g_fb_w, 0);
+}
+
+static int gpu_chrome_compose_transfer_damage(const struct damage_rect *rects,
+                                              int count)
+{
+    static int transfer_error_logs;
+
+    if (!g_gpu_chrome_target_ready)
+        return 0;
+    for (int i = 0; i < count; i++) {
+        const struct damage_rect *r = &rects[i];
+        struct fb_gpu_virgl_transfer transfer;
+
+        if (r->x1 >= r->x2 || r->y1 >= r->y2)
+            continue;
+        memset(&transfer, 0, sizeof(transfer));
+        transfer.resource_id = g_gpu_chrome_target.resource_id;
+        transfer.x = (uint32_t)r->x1;
+        transfer.y = (uint32_t)r->y1;
+        transfer.w = (uint32_t)(r->x2 - r->x1);
+        transfer.h = (uint32_t)(r->y2 - r->y1);
+        transfer.d = 1;
+        transfer.offset = (uint64_t)r->y1 * g_gpu_chrome_target.pitch +
+                          (uint64_t)r->x1 * 4;
+        transfer.stride = g_gpu_chrome_target.pitch;
+        transfer.layer_stride = g_gpu_chrome_target.pitch * (uint64_t)g_fb_h;
+        if (ioctl(g_fb_fd, FB_GPU_VIRGL_TRANSFER_TO_HOST, &transfer) != 0) {
+            if (transfer_error_logs < 8) {
+                fprintf(stderr,
+                        "wlcomp: gpu chrome source upload failed errno=%d (%s) res=%u rect=%u,%u %ux%u\n",
+                        errno, strerror(errno),
+                        g_gpu_chrome_target.resource_id,
+                        transfer.x, transfer.y, transfer.w, transfer.h);
+                transfer_error_logs++;
+            }
+            return 0;
+        }
+    }
+    return 1;
+}
 
 static int wlcomp_virgl_fb_damage_flip_enabled(void)
 {
@@ -613,6 +962,78 @@ static void virgl_flip_schedule_gpu_warmup(void)
         g_virgl_flip_gpu_warm_remaining = count;
 }
 
+static void virgl_flip_schedule_chrome_sync(const struct damage_rect *rects,
+                                            int count)
+{
+    int out_count = 0;
+    int targets;
+    static int sync_logs;
+
+    if (!wlcomp_virgl_fb_damage_flip_enabled() || !g_fb_virgl_backed ||
+        !g_fb_virgl_back_target_ready || !rects || count <= 0)
+        return;
+    targets = virgl_flip_target_count();
+    if (targets <= 1)
+        return;
+
+    for (int i = 0; i < count && out_count < MAX_DAMAGE_RECTS; i++) {
+        struct damage_rect r = rects[i];
+
+        if (r.x1 < 0) r.x1 = 0;
+        if (r.y1 < 0) r.y1 = 0;
+        if (r.x2 > (int32_t)g_fb_w) r.x2 = (int32_t)g_fb_w;
+        if (r.y2 > (int32_t)g_fb_h) r.y2 = (int32_t)g_fb_h;
+        if (r.x1 >= r.x2 || r.y1 >= r.y2)
+            continue;
+        g_virgl_flip_chrome_sync_rects[out_count++] = r;
+    }
+    if (out_count <= 0)
+        return;
+
+    g_virgl_flip_chrome_sync_rect_count = out_count;
+    g_virgl_flip_chrome_sync_remaining = targets - 1;
+    if (sync_logs < 12) {
+        fprintf(stderr,
+                "wlcomp: virgl framebuffer chrome damage sync queued rects=%d remaining=%d targets=%d\n",
+                out_count, g_virgl_flip_chrome_sync_remaining, targets);
+        sync_logs++;
+    }
+}
+
+static void virgl_damage_flip_chrome_sync_warmup(void)
+{
+    static int sync_logs;
+
+    g_virgl_flip_chrome_sync_replaying = 0;
+    if (!wlcomp_virgl_fb_damage_flip_enabled() || !g_fb_virgl_backed ||
+        !g_fb_virgl_back_target_ready) {
+        g_virgl_flip_chrome_sync_rect_count = 0;
+        g_virgl_flip_chrome_sync_remaining = 0;
+        return;
+    }
+    if (g_virgl_flip_chrome_sync_remaining <= 0 ||
+        g_virgl_flip_chrome_sync_rect_count <= 0)
+        return;
+
+    for (int i = 0; i < g_virgl_flip_chrome_sync_rect_count; i++) {
+        struct damage_rect *r = &g_virgl_flip_chrome_sync_rects[i];
+
+        damage_rect(r->x1, r->y1, r->x2 - r->x1, r->y2 - r->y1);
+    }
+    g_virgl_flip_chrome_sync_replaying = 1;
+    g_virgl_flip_chrome_sync_remaining--;
+    if (sync_logs < 12) {
+        fprintf(stderr,
+                "wlcomp: virgl framebuffer chrome damage sync replay rects=%d remaining=%d targets=%d\n",
+                g_virgl_flip_chrome_sync_rect_count,
+                g_virgl_flip_chrome_sync_remaining,
+                virgl_flip_target_count());
+        sync_logs++;
+    }
+    if (g_virgl_flip_chrome_sync_remaining <= 0)
+        g_virgl_flip_chrome_sync_rect_count = 0;
+}
+
 static void virgl_damage_flip_gpu_window_warmup(void)
 {
     static int seen_gpu_window;
@@ -675,7 +1096,8 @@ static void gpu_compose_pending_reset(void)
 static int gpu_compose_pending_add(struct wlcomp_buffer *buf,
                                    int32_t draw_x, int32_t draw_y,
                                    int32_t row0, int32_t row1,
-                                   int32_t col0, int32_t col1)
+                                   int32_t col0, int32_t col1,
+                                   int force_virgl_copy)
 {
     struct gpu_compose_pending *item;
 
@@ -690,6 +1112,45 @@ static int gpu_compose_pending_add(struct wlcomp_buffer *buf,
     item->row1 = row1;
     item->col0 = col0;
     item->col1 = col1;
+    item->force_virgl_copy = force_virgl_copy;
+    return 1;
+}
+
+static int gpu_compose_pending_has_buffer(struct wlcomp_buffer *buf)
+{
+    if (!buf)
+        return 0;
+    for (int i = 0; i < g_gpu_compose_pending_count; i++) {
+        if (g_gpu_compose_pending[i].buf == buf)
+            return 1;
+    }
+    return 0;
+}
+
+static int gpu_compose_pending_prepend(struct wlcomp_buffer *buf,
+                                       int32_t draw_x, int32_t draw_y,
+                                       int32_t row0, int32_t row1,
+                                       int32_t col0, int32_t col1,
+                                       int force_virgl_copy)
+{
+    struct gpu_compose_pending *item;
+
+    if (!gpu_compose_enabled() ||
+        g_gpu_compose_pending_count >= MAX_GPU_COMPOSE_PENDING)
+        return 0;
+    memmove(&g_gpu_compose_pending[1], &g_gpu_compose_pending[0],
+            (size_t)g_gpu_compose_pending_count *
+            sizeof(g_gpu_compose_pending[0]));
+    g_gpu_compose_pending_count++;
+    item = &g_gpu_compose_pending[0];
+    item->buf = buf;
+    item->draw_x = draw_x;
+    item->draw_y = draw_y;
+    item->row0 = row0;
+    item->row1 = row1;
+    item->col0 = col0;
+    item->col1 = col1;
+    item->force_virgl_copy = force_virgl_copy;
     return 1;
 }
 
@@ -766,11 +1227,59 @@ static int gpu_compose_pending_add_damage(struct wlcomp_surface *surf,
                                      hit.y1 - draw_y,
                                      hit.y2 - draw_y,
                                      hit.x1 - draw_x,
-                                     hit.x2 - draw_x))
+                                     hit.x2 - draw_x,
+                                     surface_is_webkit_window(surf)))
             break;
         added = 1;
     }
     return added;
+}
+
+static int gpu_compose_pending_add_full_surface(struct wlcomp_surface *surf,
+                                                struct wlcomp_buffer *buf)
+{
+    int32_t gx, gy, gw, gh;
+    int32_t ax, ay;
+    int32_t draw_x, draw_y;
+    int32_t row0 = 0, row1;
+    int32_t col0 = 0, col1;
+
+    if (!gpu_compose_can_present_surface(surf, buf) ||
+        gpu_compose_pending_has_buffer(buf))
+        return 0;
+
+    surface_window_geometry(surf, &gx, &gy, &gw, &gh);
+    surface_absolute_position(surf, &ax, &ay);
+    draw_x = ax - gx;
+    draw_y = ay - gy;
+    row1 = buf->height;
+    col1 = buf->width;
+    if (surf->has_window_geometry) {
+        row0 = gy < 0 ? 0 : gy;
+        col0 = gx < 0 ? 0 : gx;
+        row1 = gy + gh;
+        col1 = gx + gw;
+        if (row1 > buf->height) row1 = buf->height;
+        if (col1 > buf->width) col1 = buf->width;
+        if (row0 > row1) row0 = row1;
+        if (col0 > col1) col0 = col1;
+    }
+    if (row0 < 0) row0 = 0;
+    if (col0 < 0) col0 = 0;
+    if (row1 > buf->height) row1 = buf->height;
+    if (col1 > buf->width) col1 = buf->width;
+    if (row0 < -draw_y) row0 = -draw_y;
+    if (col0 < -draw_x) col0 = -draw_x;
+    if (row1 > (int32_t)g_fb_h - draw_y)
+        row1 = (int32_t)g_fb_h - draw_y;
+    if (col1 > (int32_t)g_fb_w - draw_x)
+        col1 = (int32_t)g_fb_w - draw_x;
+    if (row0 >= row1 || col0 >= col1)
+        return 0;
+
+    return gpu_compose_pending_add(buf, draw_x, draw_y, row0, row1,
+                                   col0, col1,
+                                   surface_is_webkit_window(surf));
 }
 
 static int gpu_compose_damage_prefilter(void)
@@ -781,6 +1290,15 @@ static int gpu_compose_damage_prefilter(void)
 
     if (!prefilter_gpu_damage_enabled() || !gpu_compose_enabled() ||
         g_damage_count <= 0)
+        return 0;
+
+    /*
+     * During interactive move/resize, damage_surface() marks both the old and
+     * new window extents.  Some of those rects are background/chrome repair,
+     * not replaceable client contents; filtering them under a GL client leaves
+     * stale desktop pixels while dragging.
+     */
+    if (g_grab_surface && g_grab_mode)
         return 0;
 
     wl_list_for_each(surf, &g_surfaces, link) {
@@ -796,7 +1314,8 @@ static int gpu_compose_damage_prefilter(void)
             continue;
         if (!buffer_ready_for_gl_compose_latch(buf))
             continue;
-        if (wlcomp_gl_compose_enabled() &&
+        if (!surface_is_webkit_window(surf) &&
+            wlcomp_gl_compose_enabled() &&
             !wlcomp_gl_compose_probe_buffer(buf)) {
             if (present_trace_enabled() && import_skip_logs < 16) {
                 fprintf(stderr,
@@ -811,8 +1330,30 @@ static int gpu_compose_damage_prefilter(void)
         if (gpu_compose_pending_add_damage(surf, buf))
             added = 1;
     }
-    if (added)
+    if (added) {
         gpu_compose_filter_present_damage();
+    } else {
+        wl_list_for_each(surf, &g_surfaces, link) {
+            struct wlcomp_buffer *buf;
+
+            if (!surface_tree_visible(surf) || !surf->committed_buf ||
+                surf->is_cursor)
+                continue;
+            buf = surf->committed_buf;
+            if (buf->is_d3d12_shared)
+                continue;
+            if (!gpu_compose_can_present_surface(surf, buf))
+                continue;
+            if (!buffer_ready_for_gl_compose_latch(buf))
+                continue;
+            if (!surface_is_webkit_window(surf) &&
+                wlcomp_gl_compose_enabled() &&
+                !wlcomp_gl_compose_probe_buffer(buf))
+                continue;
+            if (gpu_compose_pending_add_full_surface(surf, buf))
+                added = 1;
+        }
+    }
     return added;
 }
 
@@ -826,7 +1367,8 @@ static int gpu_compose_pending_flush(void)
         if (gpu_compose_present_buffer(item->buf, item->draw_x,
                                        item->draw_y, item->row0,
                                        item->row1, item->col0,
-                                       item->col1))
+                                       item->col1,
+                                       item->force_virgl_copy))
             presented++;
     }
     /*
@@ -835,7 +1377,8 @@ static int gpu_compose_pending_flush(void)
      * so Mesa can recycle its previous dma-buf while the scanout present is
      * still in flight.
      */
-    if (presented > 0 && wlcomp_gl_compose_submit_fence_enabled())
+    if (presented > 0 && wlcomp_gl_compose_take_frame_used_draw() &&
+        wlcomp_gl_compose_submit_fence_enabled())
         wlcomp_gl_compose_flush_submitted();
     gpu_compose_pending_reset();
     return presented;
@@ -1141,9 +1684,13 @@ static void paint_scene(int fb_w, int fb_h, int *acquire_blocked)
             continue;
         }
 
+        if (gpu_compose_pending_has_buffer(buf))
+            continue;
+
         if (gpu_compose_can_present_surface(surf, buf) &&
             gpu_compose_pending_add(buf, draw_x, draw_y,
-                                    row0, row1, col0, col1))
+                                    row0, row1, col0, col1,
+                                    surface_is_webkit_window(surf)))
             continue;
 
         src_bytes = buffer_data(buf);
@@ -1223,11 +1770,31 @@ static void paint_scene(int fb_w, int fb_h, int *acquire_blocked)
     draw_default_cursor();
 }
 
+static int acquire_blocked_needs_full_damage(void)
+{
+    struct wlcomp_surface *surf;
+
+    wl_list_for_each(surf, &g_surfaces, link) {
+        struct wlcomp_buffer *buf;
+
+        if (!surface_tree_visible(surf) || !surf->committed_buf ||
+            surf->is_cursor)
+            continue;
+        buf = surf->committed_buf;
+        if (buffer_acquire_ready(buf) ||
+            buffer_ready_for_gl_compose_latch(buf))
+            continue;
+        if (!buf->is_gpu_bo || buf->is_d3d12_shared)
+            return 1;
+    }
+    return 0;
+}
+
 static void release_cpu_copied_buffers_after_paint(void)
 {
     struct wlcomp_surface *surf;
     static int gpu_compose_release_logs;
-    int gl_release_sync = wlcomp_gl_compose_submit_fence_enabled();
+    int gl_release_sync = wlcomp_gl_compose_release_fence_enabled();
 
     wl_list_for_each(surf, &g_surfaces, link) {
         struct wlcomp_buffer *buf = surf->committed_buf;
@@ -1277,13 +1844,14 @@ static void release_cpu_copied_buffers_after_paint(void)
                     exact_gpu_window, gl_release_sync);
             gpu_compose_release_logs++;
         }
-        if (gl_release_sync) {
-            queue_buffer_release(buf);
-        } else {
-            buffer_send_release_events(buf);
-            buf->release_pending = 0;
-            g_buffer_release_trace_gpu_immediate++;
-        }
+        /*
+         * Without a GL release sync, still order the client-visible release
+         * behind the framebuffer present fence.  Immediate release lets Mesa
+         * recycle a dma-buf while the compositor draw is only queued, which
+         * can produce a valid-looking trace with a blank client window.
+         */
+        (void)gl_release_sync;
+        queue_buffer_release(buf);
         surf->buffer_released = 1;
         buf->gpu_compose_presented = 0;
         if (!buf->release_pending)
@@ -1291,22 +1859,21 @@ static void release_cpu_copied_buffers_after_paint(void)
     }
 }
 
-static void release_gpu_composed_buffers_before_scanout(void)
+static void release_gpu_composed_buffers_after_scanout_submit(void)
 {
     static int early_release_logs;
-    uint64_t before;
+    int released;
 
     if (!pipeline_gpu_release_enabled())
         return;
-    before = g_buffer_release_trace_gpu_immediate;
     release_cpu_copied_buffers_after_paint();
-    if (g_buffer_release_trace_gpu_immediate == before)
+    released = flush_buffer_releases_after_compose_latch();
+    if (released <= 0)
         return;
     if (early_release_logs < 8) {
         fprintf(stderr,
-                "wlcomp: pipelined gpu buffer release before scanout released=%lu\n",
-                (unsigned long)(g_buffer_release_trace_gpu_immediate -
-                                before));
+                "wlcomp: pipelined gpu buffer release after scanout submit released=%d\n",
+                released);
         early_release_logs++;
     }
     wl_display_flush_clients(g_display);
@@ -1362,7 +1929,15 @@ static void composite_and_flip(void)
     static uint32_t next_startup_full_ms;
     uint32_t now = get_time_ms();
     int repair_ms = damage_repair_interval_ms();
+    int had_damage_before_chrome_sync;
+    int chrome_sync_only_frame;
 
+    if (wlcomp_async_scanout_drain(0) &&
+        !wlcomp_async_scanout_present_in_flight() &&
+        g_release_queue_count > 0) {
+        flush_buffer_releases_after_present();
+        wl_display_flush_clients(g_display);
+    }
     damage_stats_maybe_log(now);
     fps_probe_maybe_write(now);
 
@@ -1386,7 +1961,7 @@ static void composite_and_flip(void)
     }
 
     if (now >= next_clock_damage_ms) {
-        damage_taskbar();
+        damage_taskbar_clock();
         next_clock_damage_ms = now + 1000;
     }
 
@@ -1411,11 +1986,34 @@ static void composite_and_flip(void)
         next_startup_full_ms = now + 250;
     }
     virgl_damage_flip_gpu_window_warmup();
+    had_damage_before_chrome_sync = damage_has_any();
+    virgl_damage_flip_chrome_sync_warmup();
+    chrome_sync_only_frame =
+        !had_damage_before_chrome_sync &&
+        g_virgl_flip_chrome_sync_replaying;
 
     if (!damage_has_any()) {
         damage_all_frame_callbacks(now);
         return;
     }
+
+    /*
+     * Idle desktop responsiveness: when no client window is mapped (the bare
+     * desktop, e.g. the 3D demo not running), the only damage is sparse and
+     * small -- the 1 Hz taskbar clock or an occasional pointer update.  On the
+     * WSL d3d12 virtio-vga-gl host those tiny partial scanout flushes are
+     * coalesced and the window only refreshes every few seconds.  Promote such
+     * idle presents to a full-surface flush so the host re-samples the whole
+     * scanout.  Restrict this to the no-toplevel case: when a client window
+     * (WebKit, a terminal, the GL demo, ...) is mapped, its own per-frame
+     * damage drives presentation, and forcing a full-surface CPU upload here
+     * would needlessly re-upload the entire (possibly large) window every
+     * frame -- so the active-client path is left untouched.
+     */
+    if (wlcomp_idle_full_present_enabled() &&
+        !any_frame_callbacks_pending() &&
+        surface_existing_mapped_toplevels() == 0)
+        damage_full_reason(FULL_DAMAGE_REPAIR);
 
     /*
      * Experimental Tier-1 path from the Alpine parity plan.  When explicitly
@@ -1428,7 +2026,7 @@ static void composite_and_flip(void)
      * regions.  The older copy-before-flip diagnostic remains available but is
      * unsafe on this host when FB_GPU_BO_COPY reports virgl context errors.
      */
-    if (wlcomp_virgl_swap_render_target()) {
+    if (!webkit_only_gpu_frame_ready() && wlcomp_virgl_swap_render_target()) {
         int copied_for_flip = 0;
 
         if (wlcomp_virgl_fb_damage_flip_enabled()) {
@@ -1472,7 +2070,7 @@ static void composite_and_flip(void)
             g_full_repaint_pending = 0;
     }
 
-    if (cursor_damage_on_move_enabled()) {
+    if (!g_hw_cursor && cursor_damage_on_move_enabled()) {
         static int16_t last_cursor_x;
         static int16_t last_cursor_y;
         static int last_cursor_valid;
@@ -1484,35 +2082,46 @@ static void composite_and_flip(void)
             last_cursor_y = g_cursor_y;
             last_cursor_valid = 1;
         }
-    } else {
+    } else if (!g_hw_cursor) {
         damage_cursor_at(g_cursor_x, g_cursor_y);
     }
     surface_promote_deferred_buffers();
     tune_damage_for_present();
     int acquire_blocked = 0;
     int paint_count;
-    int early_callbacks_done = 0;
     struct damage_rect paint_rects[MAX_DAMAGE_RECTS];
     struct wlcomp_surface *surf;
+    int gpu_chrome_composed = 0;
+    int gpu_chrome_full_base = 0;
+    int cursor_damage_frame = g_cursor_damage_pending;
+    uint32_t *saved_fb_buf = NULL;
+    uint32_t saved_fb_pitch = 0;
 
     gpu_compose_pending_reset();
     gpu_compose_damage_prefilter();
+    gpu_chrome_full_base =
+        g_gpu_compose_pending_count > 0 && g_damage_count > 0;
     paint_count = g_damage_count;
     for (int i = 0; i < paint_count; i++)
         paint_rects[i] = g_damage[i];
 
-    /*
-     * Once gpu_compose_damage_prefilter() has copied the committed buffer
-     * pointers into g_gpu_compose_pending, this frame's client content is
-     * latched.  Wake GPU clients before the CPU chrome paint so their next
-     * render overlaps both chrome upload and scanout present.  CPU-only frames
-     * use the existing after-paint callback path below.
-     */
-    if (g_gpu_compose_pending_count > 0 &&
-        pipeline_frame_callbacks_enabled()) {
-        damage_all_frame_callbacks(now);
-        wl_display_flush_clients(g_display);
-        early_callbacks_done = 1;
+    if (!cursor_damage_frame && gpu_chrome_compose_ensure_target()) {
+        if (gpu_chrome_full_base) {
+            paint_count = 1;
+            paint_rects[0] = (struct damage_rect){
+                0, 0, (int32_t)g_fb_w, (int32_t)g_fb_h
+            };
+            gpu_chrome_composed = gpu_chrome_compose_add_full_base();
+        } else {
+            gpu_chrome_composed =
+                gpu_chrome_compose_add_damage(paint_rects, paint_count);
+        }
+        if (gpu_chrome_composed) {
+            saved_fb_buf = g_fb_buf;
+            saved_fb_pitch = g_fb_pitch;
+            g_fb_buf = g_gpu_chrome_target.buf;
+            g_fb_pitch = g_gpu_chrome_target.pitch;
+        }
     }
 
     for (int i = 0; i < paint_count; i++) {
@@ -1524,26 +2133,35 @@ static void composite_and_flip(void)
         draw_clip.x2 = g_paint_clip.x2;
         draw_clip.y2 = g_paint_clip.y2;
         wlcomp_draw_set_clip(&draw_clip);
+        g_gpu_chrome_paint_skip_gpu_surfaces =
+            gpu_chrome_composed && gpu_chrome_full_base;
         paint_scene(fb_w, fb_h, &acquire_blocked);
+        g_gpu_chrome_paint_skip_gpu_surfaces = 0;
+    }
+    if (gpu_chrome_composed) {
+        g_fb_buf = saved_fb_buf;
+        g_fb_pitch = saved_fb_pitch;
+        if (!gpu_chrome_compose_transfer_damage(paint_rects, paint_count)) {
+            gpu_compose_pending_reset();
+            gpu_chrome_composed = 0;
+            for (int i = 0; i < paint_count; i++) {
+                struct wlcomp_draw_clip draw_clip;
+
+                g_paint_clip = paint_rects[i];
+                g_paint_clip_enabled = 1;
+                draw_clip.x1 = g_paint_clip.x1;
+                draw_clip.y1 = g_paint_clip.y1;
+                draw_clip.x2 = g_paint_clip.x2;
+                draw_clip.y2 = g_paint_clip.y2;
+                wlcomp_draw_set_clip(&draw_clip);
+                paint_scene(fb_w, fb_h, &acquire_blocked);
+            }
+        }
     }
     g_paint_clip_enabled = 0;
     wlcomp_draw_clear_clip();
 
     gpu_compose_filter_present_damage();
-    /*
-     * The client buffers for this frame are now latched into the GL compose
-     * pending list and the CPU damage has been filtered.  Release the clients
-     * to render their next frame *before* the (potentially multi-millisecond)
-     * scanout present, then flush so the wakeup reaches them immediately.
-     * This overlaps the next client render with our present.  Buffer releases
-     * stay gated on present completion below, so a client only recycles its
-     * storage once it is safe.  d3d12-shared single-buffer clients are skipped
-     * by damage_all_frame_callbacks() until their present completes.
-     */
-    if (!early_callbacks_done && pipeline_frame_callbacks_enabled()) {
-        damage_all_frame_callbacks(now);
-        wl_display_flush_clients(g_display);
-    }
     /*
      * The virgl framebuffer path presents the whole render target after
      * uploading CPU-damaged regions.  Draw imported GPU surfaces into that
@@ -1559,6 +2177,11 @@ static void composite_and_flip(void)
     int traced_cpu_rects = 0;
     int traced_gl_bufs = 0;
     int traced_scanout_rects = 0;
+
+    if (frame_t0 != 0 && g_present_trace_last_frame_end_us != 0 &&
+        frame_t0 > g_present_trace_last_frame_end_us)
+        g_present_trace_outside_frame_us +=
+            frame_t0 - g_present_trace_last_frame_end_us;
 
     if (gpu_compose_preflushed) {
         int gpu_presented;
@@ -1584,6 +2207,10 @@ static void composite_and_flip(void)
                 gpu_presented = gpu_compose_pending_flush();
                 if (trace_present)
                     g_present_trace.gl_compose_us += get_time_us() - t0;
+            }
+            if (gpu_presented && pipeline_frame_callbacks_enabled()) {
+                damage_all_frame_callbacks(now);
+                wl_display_flush_clients(g_display);
             }
             display_present_ok = gpu_presented;
             /*
@@ -1626,11 +2253,16 @@ static void composite_and_flip(void)
         scanout_rect_count =
             gpu_compose_pending_append_rects(scanout_rects,
                                              scanout_rect_count);
-        traced_cpu_rects = g_damage_count;
+        traced_cpu_rects = gpu_chrome_composed ? 0 : g_damage_count;
         {
             uint64_t t0 = trace_present ? get_time_us() : 0;
-            display_present_ok = present_damage_rects(
-                fb_w, now, paint_rects, paint_count, 1);
+            if (gpu_chrome_composed)
+                display_present_ok = present_damage_account_only(now);
+            else {
+                present_trace_note_cpu_rects(g_damage, g_damage_count);
+                display_present_ok = present_damage_rects(
+                    fb_w, now, paint_rects, paint_count, 1);
+            }
             if (trace_present)
                 g_present_trace.cpu_upload_us += get_time_us() - t0;
         }
@@ -1640,11 +2272,15 @@ static void composite_and_flip(void)
             if (trace_present)
                 g_present_trace.gl_compose_us += get_time_us() - t0;
         }
-        if (gpu_presented)
-            release_gpu_composed_buffers_before_scanout();
+        if (gpu_presented && pipeline_frame_callbacks_enabled()) {
+            damage_all_frame_callbacks(now);
+            wl_display_flush_clients(g_display);
+        }
         if (gpu_presented) {
             uint64_t t0 = trace_present ? get_time_us() : 0;
             traced_scanout_rects = scanout_rect_count;
+            g_virgl_rect_scanout_this_frame =
+                webkit_rect_scanout_enabled() && webkit_only_gpu_frame_ready();
             display_present_ok =
                 present_virgl_scanout_rects(scanout_rects,
                                             scanout_rect_count);
@@ -1657,11 +2293,14 @@ static void composite_and_flip(void)
                                                scanout_rect_count);
             if (trace_present)
                 g_present_trace.scanout_us += get_time_us() - t0;
+            if (display_present_ok)
+                release_gpu_composed_buffers_after_scanout_submit();
         }
         }
     } else {
         uint64_t t0 = trace_present ? get_time_us() : 0;
         traced_cpu_rects = g_damage_count;
+        present_trace_note_cpu_rects(g_damage, g_damage_count);
         display_present_ok = present_damage_rects(
             fb_w, now, paint_rects, paint_count, 0);
         if (display_present_ok)
@@ -1689,15 +2328,23 @@ static void composite_and_flip(void)
             g_present_trace.cpu_only_frames++;
         present_trace_maybe_log(now);
     }
+    if (display_present_ok && gpu_chrome_composed && !chrome_sync_only_frame)
+        virgl_flip_schedule_chrome_sync(paint_rects, paint_count);
+    g_cursor_damage_pending = 0;
     /* Once the frame is copied into fb0 and the present fence has signaled,
      * release committed buffers so clients can recycle their storage.  The
      * buffer_released flag keeps replacement commits from sending duplicate
      * releases for the same wl_buffer. */
+    uint64_t present_ready_t0 =
+        trace_present && display_present_ok ? get_time_us() : 0;
     int present_ready = display_present_ok && framebuffer_present_fence_ready();
     int callbacks_pending_before_present = frame_callbacks_pending_count();
     int callbacks_due = callbacks_pending_before_present > 0 ?
         frame_callbacks_due(now) : 0;
     int callbacks_delivered_after_present = 0;
+
+    if (present_ready_t0 != 0)
+        g_present_trace_client_wait_us += get_time_us() - present_ready_t0;
 
     if (present_ready)
         xv6_d3d12_complete_pending_presents_after_display();
@@ -1707,7 +2354,8 @@ static void composite_and_flip(void)
     if (acquire_blocked) {
         g_damage_stats.acquire_blocked_frames++;
         virgl_flip_schedule_gpu_warmup();
-        damage_full_reason(FULL_DAMAGE_ACQUIRE);
+        if (acquire_blocked_needs_full_damage())
+            damage_full_reason(FULL_DAMAGE_ACQUIRE);
     }
 
     wl_list_for_each(surf, &g_surfaces, link) {
@@ -1735,7 +2383,10 @@ static void composite_and_flip(void)
     frame_perf_note_after_present(now, callbacks_pending_before_present,
                                   callbacks_delivered_after_present,
                                   callbacks_due);
-    if (!present_ready)
+    if (trace_present)
+        g_present_trace_last_frame_end_us = get_time_us();
+    if (!present_ready && !wlcomp_async_scanout_present_in_flight() &&
+        (!g_fb_virgl_backed || acquire_blocked_needs_full_damage()))
         damage_full_reason(FULL_DAMAGE_ACQUIRE);
 
 }

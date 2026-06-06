@@ -56,10 +56,10 @@ static int pass_through_arg(const char *arg)
            strcmp(arg, "--sync-frontbuffer") == 0 ||
            strcmp(arg, "--no-front-flush") == 0 ||
            strcmp(arg, "--direct-backbuffer") == 0 ||
-           strncmp(arg, "--frames=", 9) == 0 ||
+           strncmp(arg, "--seconds=", 10) == 0 ||
            strncmp(arg, "--loops=", 8) == 0 ||
            strncmp(arg, "--size=", 7) == 0 ||
-           strncmp(arg, "--resize-every=", 15) == 0 ||
+           strncmp(arg, "--resize-seconds=", 17) == 0 ||
            strncmp(arg, "--pace-us=", 10) == 0 ||
            strncmp(arg, "--present-interval=", 19) == 0 ||
            strncmp(arg, "--render-div=", 13) == 0;

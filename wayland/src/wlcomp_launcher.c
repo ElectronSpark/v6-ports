@@ -1049,6 +1049,11 @@ void wlcomp_launcher_launch_args(const char *path, const char *name,
         char webkit_gpu_run_id_env[96];
         char webkit_gpu_validate_run_id_env[112];
         char webkit_wlcomp_d3d12_run_id_env[112];
+        char webkit_gst_disable_gl_sink_env[40];
+        char webkit_gst_dmabuf_sink_disabled_env[44];
+        char webkit_gst_use_videoconvert_env[48];
+        char webkit_dmabuf_renderer_disable_gbm_env[48];
+        char webkit_force_dmabuf_renderer_env[36];
         char mesa_perf_log_env[32];
         char mesa_wayland_color_buffers_env[48];
         int mesa_color_buffers =
@@ -1064,6 +1069,26 @@ void wlcomp_launcher_launch_args(const char *path, const char *name,
         snprintf(webkit_wlcomp_d3d12_run_id_env,
                  sizeof(webkit_wlcomp_d3d12_run_id_env),
                  "XV6_WLCOMP_D3D12_RUN_ID=%s", webkit_gpu_run_id_value);
+        snprintf(webkit_gst_disable_gl_sink_env,
+                 sizeof(webkit_gst_disable_gl_sink_env),
+                 "WEBKIT_GST_DISABLE_GL_SINK=%d",
+                 launcher_cmdline_flag_enabled("webkit_gst_gl") ? 0 : 1);
+        snprintf(webkit_gst_dmabuf_sink_disabled_env,
+                 sizeof(webkit_gst_dmabuf_sink_disabled_env),
+                 "WEBKIT_GST_DMABUF_SINK_DISABLED=%d",
+                 launcher_cmdline_flag_enabled("webkit_gst_dmabuf_sink") ? 0 : 1);
+        snprintf(webkit_gst_use_videoconvert_env,
+                 sizeof(webkit_gst_use_videoconvert_env),
+                 "WEBKIT_GST_USE_VIDEOCONVERT_SCALE=%d",
+                 launcher_cmdline_flag_enabled("webkit_gst_gl") ? 0 : 1);
+        snprintf(webkit_dmabuf_renderer_disable_gbm_env,
+                 sizeof(webkit_dmabuf_renderer_disable_gbm_env),
+                 "WEBKIT_DMABUF_RENDERER_DISABLE_GBM=%d",
+                 launcher_cmdline_flag_enabled("webkit_gbm") ? 0 : 1);
+        snprintf(webkit_force_dmabuf_renderer_env,
+                 sizeof(webkit_force_dmabuf_renderer_env),
+                 "WEBKIT_FORCE_DMABUF_RENDERER=%d",
+                 launcher_cmdline_flag_enabled("webkit_dmabuf") ? 1 : 0);
         snprintf(mesa_perf_log_env, sizeof(mesa_perf_log_env),
                  "XV6_MESA_PERF_LOG=%d",
                  launcher_cmdline_int_value("glsmoke_mesa_perf", 0) != 0);
@@ -1123,9 +1148,9 @@ void wlcomp_launcher_launch_args(const char *path, const char *name,
             "WEBKIT_INJECTED_BUNDLE_PATH=/lib/webkit2gtk-4.1/injected-bundle",
             "WEBKIT_DISABLE_NETWORK_CACHE=1",
             "WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS=1",
-            "WEBKIT_GST_DISABLE_GL_SINK=1",
-            "WEBKIT_GST_DMABUF_SINK_DISABLED=1",
-            "WEBKIT_GST_USE_VIDEOCONVERT_SCALE=1",
+            webkit_gst_disable_gl_sink_env,
+            webkit_gst_dmabuf_sink_disabled_env,
+            webkit_gst_use_videoconvert_env,
             "WEBKIT_GST_MAX_AVC1_RESOLUTION=720P",
             "WEBKIT_DISABLE_COMPOSITING_MODE=1",
             "WEBKIT_XV6_DISABLE_COMPOSITING_UPDATE=1",
@@ -1172,6 +1197,12 @@ void wlcomp_launcher_launch_args(const char *path, const char *name,
             "WEBKIT_INJECTED_BUNDLE_PATH=/lib/webkit2gtk-4.1/injected-bundle",
             "WEBKIT_DISABLE_NETWORK_CACHE=1",
             "WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS=1",
+            webkit_gst_disable_gl_sink_env,
+            webkit_gst_dmabuf_sink_disabled_env,
+            webkit_gst_use_videoconvert_env,
+            "WEBKIT_GST_MAX_AVC1_RESOLUTION=720P",
+            webkit_dmabuf_renderer_disable_gbm_env,
+            webkit_force_dmabuf_renderer_env,
             "WEBKIT_XV6_GPU_CONTRACT=virgl-opengl-submit",
             "WEBKIT_XV6_REQUIRE_GPU_CONTRACT=1",
             "WEBKIT_XV6_FORCE_COMPOSITING_MODE=1",
@@ -1216,7 +1247,7 @@ void wlcomp_launcher_launch_args(const char *path, const char *name,
             "WEBKIT_INJECTED_BUNDLE_PATH=/lib/webkit2gtk-4.1/injected-bundle",
             "WEBKIT_DISABLE_NETWORK_CACHE=1",
             "WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS=1",
-            "WEBKIT_GST_DMABUF_SINK_DISABLED=1",
+            webkit_gst_dmabuf_sink_disabled_env,
             "WEBKIT_XV6_GPU_CONTRACT=d3d12-shared-surface",
             "WEBKIT_XV6_REQUIRE_GPU_CONTRACT=1",
             "WEBKIT_XV6_FORCE_COMPOSITING_MODE=1",
@@ -1271,9 +1302,9 @@ void wlcomp_launcher_launch_args(const char *path, const char *name,
             "WEBKIT_INJECTED_BUNDLE_PATH=/lib/webkit2gtk-4.1/injected-bundle",
             "WEBKIT_DISABLE_NETWORK_CACHE=1",
             "WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS=1",
-            "WEBKIT_GST_DISABLE_GL_SINK=1",
-            "WEBKIT_GST_DMABUF_SINK_DISABLED=1",
-            "WEBKIT_GST_USE_VIDEOCONVERT_SCALE=1",
+            webkit_gst_disable_gl_sink_env,
+            webkit_gst_dmabuf_sink_disabled_env,
+            webkit_gst_use_videoconvert_env,
             "WEBKIT_GST_MAX_AVC1_RESOLUTION=720P",
             "LIBGL_ALWAYS_SOFTWARE=1",
             "EGL_PLATFORM=wayland",

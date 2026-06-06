@@ -924,10 +924,36 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
         char *webkit_gdk_gl_env =
             webkit_disable_gdk_gl_by_cmdline() ? "GDK_GL=disable" :
                                                  "GDK_GL=gles";
+        char webkit_gst_disable_gl_sink_env[40];
+        char webkit_gst_dmabuf_sink_disabled_env[44];
+        char webkit_gst_use_videoconvert_env[48];
+        char webkit_dmabuf_renderer_disable_gbm_env[48];
+        char webkit_force_dmabuf_renderer_env[36];
         char mesa_wayland_color_buffers_env[48] =
             "XV6_MESA_WAYLAND_COLOR_BUFFERS=0";
         char mesa_perf_log_env[32] = "XV6_MESA_PERF_LOG=0";
         char mesa_wayland_throttle_env[40] = "XV6_MESA_WAYLAND_THROTTLE=1";
+
+        snprintf(webkit_gst_disable_gl_sink_env,
+                 sizeof(webkit_gst_disable_gl_sink_env),
+                 "WEBKIT_GST_DISABLE_GL_SINK=%d",
+                 webkit_gst_gl_enabled_by_cmdline() ? 0 : 1);
+        snprintf(webkit_gst_dmabuf_sink_disabled_env,
+                 sizeof(webkit_gst_dmabuf_sink_disabled_env),
+                 "WEBKIT_GST_DMABUF_SINK_DISABLED=%d",
+                 webkit_gst_dmabuf_sink_enabled_by_cmdline() ? 0 : 1);
+        snprintf(webkit_gst_use_videoconvert_env,
+                 sizeof(webkit_gst_use_videoconvert_env),
+                 "WEBKIT_GST_USE_VIDEOCONVERT_SCALE=%d",
+                 webkit_gst_gl_enabled_by_cmdline() ? 0 : 1);
+        snprintf(webkit_dmabuf_renderer_disable_gbm_env,
+                 sizeof(webkit_dmabuf_renderer_disable_gbm_env),
+                 "WEBKIT_DMABUF_RENDERER_DISABLE_GBM=%d",
+                 webkit_gbm_enabled_by_cmdline() ? 0 : 1);
+        snprintf(webkit_force_dmabuf_renderer_env,
+                 sizeof(webkit_force_dmabuf_renderer_env),
+                 "WEBKIT_FORCE_DMABUF_RENDERER=%d",
+                 webkit_dmabuf_enabled_by_cmdline() ? 1 : 0);
         if (is_mesa_gl) {
             char mesa_cmdline_buf[512];
 
@@ -1168,9 +1194,9 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             "WEBKIT_INJECTED_BUNDLE_PATH=/lib/webkit2gtk-4.1/injected-bundle",
             "WEBKIT_DISABLE_NETWORK_CACHE=1",
             "WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS=1",
-            "WEBKIT_GST_DISABLE_GL_SINK=1",
-            "WEBKIT_GST_DMABUF_SINK_DISABLED=1",
-            "WEBKIT_GST_USE_VIDEOCONVERT_SCALE=1",
+            webkit_gst_disable_gl_sink_env,
+            webkit_gst_dmabuf_sink_disabled_env,
+            webkit_gst_use_videoconvert_env,
             "WEBKIT_GST_MAX_AVC1_RESOLUTION=720P",
             "WEBKIT_DISABLE_COMPOSITING_MODE=1",
             "WEBKIT_XV6_DISABLE_COMPOSITING_UPDATE=1",
@@ -1218,7 +1244,8 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             "WEBKIT_INJECTED_BUNDLE_PATH=/lib/webkit2gtk-4.1/injected-bundle",
             "WEBKIT_DISABLE_NETWORK_CACHE=1",
             "WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS=1",
-            "WEBKIT_DMABUF_RENDERER_DISABLE_GBM=1",
+            webkit_dmabuf_renderer_disable_gbm_env,
+            webkit_force_dmabuf_renderer_env,
             "WEBKIT_XV6_GPU_CONTRACT=virgl-opengl-submit",
             "WEBKIT_XV6_REQUIRE_GPU_CONTRACT=1",
             "WEBKIT_XV6_FORCE_COMPOSITING_MODE=1",
@@ -1264,7 +1291,8 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             "WEBKIT_INJECTED_BUNDLE_PATH=/lib/webkit2gtk-4.1/injected-bundle",
             "WEBKIT_DISABLE_NETWORK_CACHE=1",
             "WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS=1",
-            "WEBKIT_GST_DMABUF_SINK_DISABLED=1",
+            webkit_gst_dmabuf_sink_disabled_env,
+            webkit_force_dmabuf_renderer_env,
             "WEBKIT_XV6_GPU_CONTRACT=d3d12-shared-surface",
             "WEBKIT_XV6_REQUIRE_GPU_CONTRACT=1",
             "WEBKIT_XV6_FORCE_COMPOSITING_MODE=1",
@@ -1320,9 +1348,9 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             "WEBKIT_INJECTED_BUNDLE_PATH=/lib/webkit2gtk-4.1/injected-bundle",
             "WEBKIT_DISABLE_NETWORK_CACHE=1",
             "WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS=1",
-            "WEBKIT_GST_DISABLE_GL_SINK=1",
-            "WEBKIT_GST_DMABUF_SINK_DISABLED=1",
-            "WEBKIT_GST_USE_VIDEOCONVERT_SCALE=1",
+            webkit_gst_disable_gl_sink_env,
+            webkit_gst_dmabuf_sink_disabled_env,
+            webkit_gst_use_videoconvert_env,
             "WEBKIT_GST_MAX_AVC1_RESOLUTION=720P",
             "LIBGL_ALWAYS_SOFTWARE=1",
             "EGL_PLATFORM=wayland",

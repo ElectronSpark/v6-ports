@@ -606,6 +606,9 @@ static void draw_menu(uint32_t *fb, int fb_w, int fb_h)
 
 static void draw_default_cursor(void)
 {
+    if (g_hw_cursor)
+        return;  /* hardware cursor plane handles drawing */
+
     static const uint8_t arrow[19][12] = {
         {1,0,0,0,0,0,0,0,0,0,0,0},
         {1,1,0,0,0,0,0,0,0,0,0,0},

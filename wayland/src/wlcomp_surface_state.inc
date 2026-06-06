@@ -143,12 +143,15 @@ struct wlcomp_surface {
     int     has_pending_buffer;
     struct wlcomp_buffer *committed_buf;
     struct wlcomp_buffer *deferred_buf;
+    struct wlcomp_buffer *staged_buf;
     int     buffer_released;  /* 1 = release sent, don't re-release */
     struct wl_resource *sync_resource;
     int     pending_acquire_fence_fd;
     int     has_pending_acquire_fence;
     struct wl_resource *pending_release;
+    struct wl_list pending_frame_callbacks;
     struct wl_list frame_callbacks;
+    struct wl_list staged_frame_callbacks;
     int32_t x, y;
     int     mapped;
     int     minimized;
@@ -196,6 +199,20 @@ static int g_iwin_focus = -1;   /* index of focused internal window */
 
 static void surface_set_keyboard_focus(struct wlcomp_surface *surf);
 
+static int surface_existing_mapped_toplevels(void)
+{
+    struct wlcomp_surface *s;
+    int count = 0;
+
+    wl_list_for_each(s, &g_surfaces, link) {
+        if (s->mapped && s->xdg_toplevel && !s->is_subsurface &&
+            !s->minimized && !s->fullscreen_direct)
+            count++;
+    }
+
+    return count;
+}
+
 static int xv6_wlcomp_trace_enabled(void)
 {
     static int enabled = -1;
@@ -229,6 +246,29 @@ static void surface_log_limited(struct wlcomp_surface *surf,
             surf->committed_buf != NULL);
 }
 
+static void webkit_initial_window_size(int32_t *w, int32_t *h)
+{
+    int32_t max_w = (int32_t)g_fb_w - 32;
+    int32_t max_h = (int32_t)g_fb_h - TASKBAR_H - 32;
+
+    if (!w || !h)
+        return;
+    *w = cmdline_int_value("webkit_window_w", 854);
+    *h = cmdline_int_value("webkit_window_h", 480);
+    if (*w < 640)
+        *w = 640;
+    if (*h < 360)
+        *h = 360;
+    if (max_w < 640)
+        max_w = (int32_t)g_fb_w;
+    if (max_h < 360)
+        max_h = (int32_t)g_fb_h - TASKBAR_H;
+    if (*w > max_w)
+        *w = max_w;
+    if (*h > max_h)
+        *h = max_h;
+}
+
 static void xdg_surface_send_initial_configure_if_needed(struct wlcomp_surface *surf)
 {
     struct wl_array states;
@@ -243,6 +283,10 @@ static void xdg_surface_send_initial_configure_if_needed(struct wlcomp_surface *
         (int32_t)g_fb_w * 4 / 5;
     def_h = surf->pending_configure_h > 0 ? surf->pending_configure_h :
         ((int32_t)g_fb_h - TASKBAR_H) * 4 / 5;
+    if ((strcmp(surf->app_id, "MiniBrowser") == 0 ||
+         strcmp(surf->app_id, "webkitgpusmoke") == 0) &&
+        surf->pending_configure_w <= 0 && surf->pending_configure_h <= 0)
+        webkit_initial_window_size(&def_w, &def_h);
     if (def_w < 400) def_w = (int32_t)g_fb_w;
     if (def_h < 300) def_h = (int32_t)g_fb_h - TASKBAR_H;
 
@@ -264,6 +308,7 @@ static void xdg_surface_send_initial_configure_if_needed(struct wlcomp_surface *
 /* Client cursor state */
 static struct wlcomp_surface *g_cursor_surface;   /* client-provided cursor */
 static int32_t g_cursor_hotspot_x, g_cursor_hotspot_y;
+static int g_cursor_damage_pending;
 
 /* Interactive move/resize state for Wayland surfaces */
 static struct wlcomp_surface *g_grab_surface;  /* surface being moved/resized */
@@ -273,6 +318,8 @@ static int32_t g_grab_start_mx, g_grab_start_my;  /* cursor pos at grab start */
 static int32_t g_grab_start_x, g_grab_start_y;    /* surface pos at grab start */
 
 static int32_t g_grab_start_w, g_grab_start_h;    /* surface size at grab start */
+static uint64_t g_drag_trace_events;
+static uint64_t g_drag_trace_frames;
 
 #define WAYLAND_CLOSE_SZ 18
 #define WAYLAND_MINIMIZE_SZ WAYLAND_CLOSE_SZ
@@ -542,6 +589,19 @@ static int frame_callback_interval_ms(void)
 }
 
 static uint32_t g_next_frame_callback_ms;
+static uint32_t g_frame_callback_active_until_ms;
+
+static int frame_callback_deadline_ms_after_activity(void)
+{
+    int interval_ms = frame_callback_interval_ms();
+    int active_ms = interval_ms * 4;
+
+    if (active_ms < 32)
+        active_ms = 32;
+    if (active_ms > 250)
+        active_ms = 250;
+    return active_ms;
+}
 
 static int frame_callbacks_due(uint32_t now)
 {
@@ -556,10 +616,15 @@ static int frame_callbacks_due(uint32_t now)
     return 0;
 }
 
+static void frame_callbacks_force_due(void)
+{
+    g_next_frame_callback_ms = 0;
+}
+
 static int frame_callback_deadline_wait_enabled(void)
 {
     static int initialized;
-    static int enabled;
+    static int enabled = 1;
     const char *env;
 
     if (initialized)
@@ -582,10 +647,51 @@ static int frame_callback_deadline_timeout_ms(uint32_t now, int fallback_ms)
     if (frame_callback_interval_ms() <= 0)
         return 0;
     if (g_next_frame_callback_ms == 0 || now >= g_next_frame_callback_ms)
-        return 0;
+        return 1;
     delta = g_next_frame_callback_ms - now;
     if (delta > 16)
         return 16;
+    if (delta == 0)
+        return 1;
+    return (int)delta;
+}
+
+static int frame_callback_recently_active(uint32_t now)
+{
+    if (g_frame_callback_active_until_ms == 0)
+        return 0;
+    return (int32_t)(g_frame_callback_active_until_ms - now) > 0;
+}
+
+static int frame_callback_idle_deadline_timeout_ms(uint32_t now,
+                                                   int fallback_ms,
+                                                   int callbacks_pending)
+{
+    uint32_t delta;
+    int interval_ms;
+
+    if (!frame_callback_deadline_wait_enabled())
+        return fallback_ms;
+    if (callbacks_pending)
+        return frame_callback_deadline_timeout_ms(now, fallback_ms);
+    if (!frame_callback_recently_active(now) ||
+        surface_existing_mapped_toplevels() <= 0)
+        return fallback_ms;
+
+    interval_ms = frame_callback_interval_ms();
+    if (interval_ms <= 0)
+        return 0;
+    if (g_next_frame_callback_ms == 0 ||
+        (int32_t)(now - g_next_frame_callback_ms) >= 0) {
+        g_next_frame_callback_ms = now + (uint32_t)interval_ms;
+        return 1;
+    }
+
+    delta = g_next_frame_callback_ms - now;
+    if (delta > (uint32_t)fallback_ms)
+        return fallback_ms;
+    if (delta == 0)
+        return 1;
     return (int)delta;
 }
 
@@ -606,16 +712,42 @@ static int frame_perf_enabled(void)
     return enabled;
 }
 
-static int surface_frame_callback_count(struct wlcomp_surface *surf)
+static uint64_t g_frame_perf_loop_wait_total_us;
+
+static void frame_perf_wait_totals(uint64_t *loop_wait_us,
+                                   uint64_t *client_wait_us)
+{
+    if (loop_wait_us)
+        *loop_wait_us = g_frame_perf_loop_wait_total_us;
+    if (client_wait_us)
+        *client_wait_us = 0;
+}
+
+static int frame_callback_list_count(struct wl_list *list)
 {
     struct wlcomp_frame_callback *cb;
     int count = 0;
 
-    if (!surf)
+    if (!list)
         return 0;
-    wl_list_for_each(cb, &surf->frame_callbacks, link)
+    wl_list_for_each(cb, list, link)
         count++;
     return count;
+}
+
+static void frame_callback_list_append(struct wl_list *dst, struct wl_list *src)
+{
+    if (!dst || !src || wl_list_empty(src))
+        return;
+    wl_list_insert_list(dst->prev, src);
+    wl_list_init(src);
+}
+
+static int surface_frame_callback_count(struct wlcomp_surface *surf)
+{
+    if (!surf)
+        return 0;
+    return frame_callback_list_count(&surf->frame_callbacks);
 }
 
 static int frame_callbacks_pending_count(void)
@@ -660,6 +792,8 @@ static void frame_perf_note(uint32_t now, const char *stage, int pending_before,
     delivered_total += (uint64_t)delivered;
     blocked_total += (uint64_t)blocked;
     if (delivered > 0) {
+        g_frame_callback_active_until_ms =
+            now + (uint32_t)frame_callback_deadline_ms_after_activity();
         if (last_delivery_ms != 0) {
             interval_ms = now - last_delivery_ms;
             delivery_interval_total_ms += interval_ms;
@@ -707,7 +841,7 @@ static void frame_perf_note(uint32_t now, const char *stage, int pending_before,
     delivery_interval_max_ms = 0;
 }
 
-static void frame_perf_note_loop_wait(int requested_ms, uint32_t elapsed_ms,
+static void frame_perf_note_loop_wait(int requested_ms, uint64_t elapsed_us,
                                       int pending_before, int nready)
 {
     static uint32_t last_log_ms;
@@ -716,13 +850,15 @@ static void frame_perf_note_loop_wait(int requested_ms, uint32_t elapsed_ms,
     static uint64_t ready_samples;
     static uint64_t timeout_samples;
     static uint64_t requested_total_ms;
-    static uint64_t elapsed_total_ms;
+    static uint64_t elapsed_total_us;
     static uint32_t elapsed_max_ms;
     uint32_t now;
+    uint32_t elapsed_ms = (uint32_t)(elapsed_us / 1000);
+
+    g_frame_perf_loop_wait_total_us += elapsed_us;
 
     if (!frame_perf_enabled())
         return;
-
     samples++;
     if (pending_before)
         pending_samples++;
@@ -731,7 +867,7 @@ static void frame_perf_note_loop_wait(int requested_ms, uint32_t elapsed_ms,
     else if (nready == 0)
         timeout_samples++;
     requested_total_ms += (uint64_t)requested_ms;
-    elapsed_total_ms += (uint64_t)elapsed_ms;
+    elapsed_total_us += elapsed_us;
     if (elapsed_ms > elapsed_max_ms)
         elapsed_max_ms = elapsed_ms;
 
@@ -749,7 +885,7 @@ static void frame_perf_note_loop_wait(int requested_ms, uint32_t elapsed_ms,
             (unsigned long)samples, (unsigned long)pending_samples,
             (unsigned long)ready_samples, (unsigned long)timeout_samples,
             samples ? (unsigned long)(requested_total_ms / samples) : 0,
-            samples ? (unsigned long)(elapsed_total_ms / samples) : 0,
+            samples ? (unsigned long)((elapsed_total_us / samples) / 1000) : 0,
             elapsed_max_ms, requested_ms, elapsed_ms, pending_before, nready);
 
     last_log_ms = now;
@@ -758,7 +894,7 @@ static void frame_perf_note_loop_wait(int requested_ms, uint32_t elapsed_ms,
     ready_samples = 0;
     timeout_samples = 0;
     requested_total_ms = 0;
-    elapsed_total_ms = 0;
+    elapsed_total_us = 0;
     elapsed_max_ms = 0;
 }
 
@@ -1011,10 +1147,89 @@ static void damage_surface(const struct wlcomp_surface *s)
     }
 }
 
+static int damage_surface_client_content(const struct wlcomp_surface *s)
+{
+    int32_t gx, gy, gw, gh;
+    int32_t ax, ay;
+    int32_t draw_x, draw_y;
+    int32_t row0 = 0, row1;
+    int32_t col0 = 0, col1;
+
+    if (!s || !surface_tree_visible(s) || !s->committed_buf)
+        return 0;
+
+    surface_window_geometry(s, &gx, &gy, &gw, &gh);
+    surface_absolute_position(s, &ax, &ay);
+    draw_x = ax - gx;
+    draw_y = ay - gy;
+    row1 = s->committed_buf->height;
+    col1 = s->committed_buf->width;
+    if (s->has_window_geometry) {
+        row0 = gy < 0 ? 0 : gy;
+        col0 = gx < 0 ? 0 : gx;
+        row1 = gy + gh;
+        col1 = gx + gw;
+        if (row1 > s->committed_buf->height)
+            row1 = s->committed_buf->height;
+        if (col1 > s->committed_buf->width)
+            col1 = s->committed_buf->width;
+        if (row0 > row1)
+            row0 = row1;
+        if (col0 > col1)
+            col0 = col1;
+    }
+    if (row0 < 0)
+        row0 = 0;
+    if (col0 < 0)
+        col0 = 0;
+    if (row1 > s->committed_buf->height)
+        row1 = s->committed_buf->height;
+    if (col1 > s->committed_buf->width)
+        col1 = s->committed_buf->width;
+    if (row0 < -draw_y)
+        row0 = -draw_y;
+    if (col0 < -draw_x)
+        col0 = -draw_x;
+    if (row1 > (int32_t)g_fb_h - draw_y)
+        row1 = (int32_t)g_fb_h - draw_y;
+    if (col1 > (int32_t)g_fb_w - draw_x)
+        col1 = (int32_t)g_fb_w - draw_x;
+    if (row0 >= row1 || col0 >= col1)
+        return 0;
+
+    damage_rect(draw_x + col0, draw_y + row0, col1 - col0, row1 - row0);
+    return 1;
+}
+
+static void damage_surface_gpu_buffer_swap(const struct wlcomp_surface *s)
+{
+    if (!s || !s->committed_buf || !s->committed_buf->is_gpu_bo ||
+        s->committed_buf->is_d3d12_shared ||
+        !damage_surface_client_content(s))
+        damage_surface(s);
+}
+
 static void surface_pending_damage_clear(struct wlcomp_surface *surf)
 {
     if (surf)
         surf->pending_damage_count = 0;
+}
+
+static int webkit_damage_trace_enabled(void)
+{
+    static int initialized;
+    static int enabled;
+    const char *env;
+
+    if (initialized)
+        return enabled;
+    initialized = 1;
+    enabled = cmdline_int_value("wlcomp_trace_webkit_damage", 0) != 0;
+    env = getenv("XV6_WLCOMP_TRACE_WEBKIT_DAMAGE");
+    if (env && *env)
+        enabled = strcmp(env, "0") != 0 && strcmp(env, "no") != 0 &&
+                  strcmp(env, "false") != 0 && strcmp(env, "off") != 0;
+    return enabled;
 }
 
 static void surface_pending_damage_add(struct wlcomp_surface *surf,
@@ -1024,6 +1239,7 @@ static void surface_pending_damage_add(struct wlcomp_surface *surf,
     struct damage_rect r;
     int64_t x2;
     int64_t y2;
+    static int webkit_damage_logs;
 
     if (!surf || w <= 0 || h <= 0)
         return;
@@ -1042,6 +1258,19 @@ static void surface_pending_damage_add(struct wlcomp_surface *surf,
     r.y1 = y;
     r.x2 = (int32_t)x2;
     r.y2 = (int32_t)y2;
+
+    if (webkit_damage_trace_enabled() && surface_is_webkit_window(surf) &&
+        webkit_damage_logs < 160) {
+        fprintf(stderr,
+                "wlcomp: webkit-damage add pid=%d title='%s' app_id='%s' "
+                "rect=%d,%d %dx%d pending_before=%d mapped=%d geom=%d,%d %dx%d\n",
+                surf->client_pid, surf->title, surf->app_id,
+                r.x1, r.y1, r.x2 - r.x1, r.y2 - r.y1,
+                surf->pending_damage_count, surf->mapped,
+                surf->window_x, surf->window_y, surf->window_w,
+                surf->window_h);
+        webkit_damage_logs++;
+    }
 
     for (int i = 0; i < surf->pending_damage_count; i++) {
         if (rects_touch_or_overlap(&surf->pending_damage[i], &r)) {
@@ -1078,6 +1307,7 @@ static int damage_surface_pending(struct wlcomp_surface *surf)
     int32_t ax, ay;
     int32_t draw_x, draw_y;
     int damaged = 0;
+    static int webkit_damage_commit_logs;
 
     if (!surf || surf->pending_damage_count <= 0 ||
         !surface_tree_visible(surf) || !surf->committed_buf)
@@ -1087,6 +1317,16 @@ static int damage_surface_pending(struct wlcomp_surface *surf)
     if (surf->has_window_geometry &&
         (gw != surf->committed_buf->width ||
          gh != surf->committed_buf->height)) {
+        if (webkit_damage_trace_enabled() && surface_is_webkit_window(surf) &&
+            webkit_damage_commit_logs < 160) {
+            fprintf(stderr,
+                    "wlcomp: webkit-damage expand-full pid=%d title='%s' "
+                    "app_id='%s' pending=%d geom=%d,%d %dx%d buf=%dx%d\n",
+                    surf->client_pid, surf->title, surf->app_id,
+                    surf->pending_damage_count, gx, gy, gw, gh,
+                    surf->committed_buf->width, surf->committed_buf->height);
+            webkit_damage_commit_logs++;
+        }
         damage_surface_self(surf);
         return 1;
     }
@@ -1111,6 +1351,19 @@ static int damage_surface_pending(struct wlcomp_surface *surf)
         if (x1 >= x2 || y1 >= y2)
             continue;
 
+        if (webkit_damage_trace_enabled() && surface_is_webkit_window(surf) &&
+            webkit_damage_commit_logs < 160) {
+            fprintf(stderr,
+                    "wlcomp: webkit-damage commit pid=%d title='%s' "
+                    "app_id='%s' src=%d,%d %dx%d dst=%d,%d %dx%d "
+                    "geom=%d,%d %dx%d buf=%dx%d pending=%d\n",
+                    surf->client_pid, surf->title, surf->app_id,
+                    x1, y1, x2 - x1, y2 - y1,
+                    draw_x + x1, draw_y + y1, x2 - x1, y2 - y1,
+                    gx, gy, gw, gh, surf->committed_buf->width,
+                    surf->committed_buf->height, surf->pending_damage_count);
+            webkit_damage_commit_logs++;
+        }
         damage_rect(draw_x + x1, draw_y + y1, x2 - x1, y2 - y1);
         damaged = 1;
     }
@@ -1137,6 +1390,7 @@ static void damage_cursor_at(int32_t cx, int32_t cy)
     int32_t x, y, w, h;
 
     cursor_bounds_at(cx, cy, &x, &y, &w, &h);
+    g_cursor_damage_pending = 1;
     damage_rect(x - 1, y - 1, w + 2, h + 2);
 }
 

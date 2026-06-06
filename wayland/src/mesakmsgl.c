@@ -469,7 +469,7 @@ static void page_flip_handler(int fd, unsigned frame, unsigned sec,
 }
 
 static int present_loop(struct kms_state *kms, struct egl_state *egl,
-                        struct gl_state *gls, int max_frames)
+                        struct gl_state *gls, int max_seconds)
 {
     drmEventContext evctx;
     struct gbm_bo *previous_bo = NULL;
@@ -538,7 +538,7 @@ static int present_loop(struct kms_state *kms, struct egl_state *egl,
             fps_start = now_sec();
             fps_frames = 0;
         }
-        if (max_frames > 0 && frames >= max_frames)
+        if (max_seconds > 0 && now_sec() - start >= (double)max_seconds)
             break;
     }
 
@@ -570,17 +570,18 @@ int main(int argc, char **argv)
     struct egl_state egl;
     struct gl_state gls;
     const char *device = "/dev/dri/card0";
-    int max_frames = 0;
+    int max_seconds = 0;
     int rc = 1;
 
     for (int i = 1; i < argc; i++) {
         if (strncmp(argv[i], "--device=", 9) == 0) {
             device = argv[i] + 9;
-        } else if (strncmp(argv[i], "--frames=", 9) == 0) {
-            max_frames = atoi(argv[i] + 9);
+        } else if (strncmp(argv[i], "--seconds=", 10) == 0) {
+            max_seconds = atoi(argv[i] + 10);
         } else {
             fprintf(stderr,
-                    "usage: mesakmsgl [--device=/dev/dri/card0] [--frames=N]\n");
+                    "usage: mesakmsgl [--device=/dev/dri/card0] [--seconds=N]\n"
+                    "  --seconds=N runs for N seconds\n");
             return 2;
         }
     }
@@ -602,7 +603,7 @@ int main(int argc, char **argv)
         init_gl(&gls) != 0)
         goto out;
 
-    rc = present_loop(&kms, &egl, &gls, max_frames) == 0 ? 0 : 1;
+    rc = present_loop(&kms, &egl, &gls, max_seconds) == 0 ? 0 : 1;
 
 out:
     if (kms.old_crtc) {

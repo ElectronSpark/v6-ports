@@ -116,12 +116,12 @@ int main(void)
 {
     char *gbmtest[] = { "gbmtest", NULL };
     char *dmabufsmoke[] = { "dmabufsmoke", NULL };
-    char *mesawlegl4[] = { "mesawlegl", "--frames=4", "--loops=1",
-                           "--resize-every=2", NULL };
-    char *mesawlegl6[] = { "mesawlegl", "--frames=6", "--loops=1",
-                           "--resize-every=3", NULL };
-    char *mesaglsmoke[] = { "mesaglsmoke", "--frames=6", "--loops=1",
-                            "--resize-every=3", NULL };
+    char *mesawlegl4[] = { "mesawlegl", "--seconds=1", "--loops=1",
+                           "--resize-seconds=1", NULL };
+    char *mesawlegl6[] = { "mesawlegl", "--seconds=1", "--loops=1",
+                           "--resize-seconds=1", NULL };
+    char *mesaglsmoke[] = { "mesaglsmoke", "--seconds=1", "--loops=1",
+                            "--resize-seconds=1", NULL };
     char *virgltest[] = { "virgltest", NULL };
     char *virgl_copy[] = { "virgltest", "--copy-region", NULL };
     char *virgl_copy_scanout[] = {
