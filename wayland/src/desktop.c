@@ -161,6 +161,7 @@ static int webkit_js_smoke_enabled_by_cmdline(void);
 static int webkit_youtube_boot_smoke_enabled_by_cmdline(void);
 static int webkit_youtube_waterfall_smoke_enabled_by_cmdline(void);
 static int webkit_youtube_compat_disabled_by_cmdline(void);
+static int webkit_youtube_probe_seconds_from_cmdline(void);
 static int webkit_logging_enabled_by_cmdline(void);
 static int webkit_request_idle_disabled_by_cmdline(void);
 static int webkit_feature_gate_smoke_enabled_by_cmdline(void);
@@ -169,11 +170,14 @@ static int webkit_compat_gate_smoke_enabled_by_cmdline(void);
 static int webkit_js_disabled_by_cmdline(void);
 static int webkit_disable_gdk_gl_by_cmdline(void);
 static int webkit_dmabuf_enabled_by_cmdline(void);
+static int webkit_gst_gl_enabled_by_cmdline(void);
+static int webkit_gst_dmabuf_sink_enabled_by_cmdline(void);
+static int webkit_gbm_enabled_by_cmdline(void);
 static int webkit_reopen_count_from_cmdline(void);
 static int webkit_timeout_ms_from_cmdline(int fallback);
 static int gpu_validate_enabled_by_cmdline(void);
 static int glmaze_enabled_by_cmdline(void);
-static void glmaze_args_from_cmdline(char *frames_arg, size_t frames_size);
+static void glmaze_args_from_cmdline(char *seconds_arg, size_t seconds_size);
 static int desktop_disabled_by_cmdline(void);
 static int desktop_exit_after_smoke_by_cmdline(void);
 static int cmdline_int_value(const char *cmdline, const char *key,
@@ -187,6 +191,7 @@ static void http_smoke_self_probe(const char *path);
 static void webkit_print_runtime_probe(void);
 static void webkit_dump_gst_debug_evidence(void);
 static void webkit_print_log_evidence(const char *reason);
+static void maybe_capture_youtube_playback_ppm(const char *media);
 static void write_webkit_gpu_policy_file(const char *name, int requested_accel,
                                          int effective_accel,
                                          int opengl_submit_available,
@@ -2024,6 +2029,7 @@ static void webkit_dump_gst_debug_evidence(void)
 static void webkit_print_runtime_probe(void)
 {
     char title[1024];
+    char media[2048];
     char count[32];
     struct stat log_st;
     long log_size = -1;
@@ -2032,14 +2038,18 @@ static void webkit_print_runtime_probe(void)
     static int excerpt_printed;
 
     webkit_read_line("/tmp/webkit-title", title, sizeof(title));
+    webkit_read_line("/tmp/webkit-media-probe", media, sizeof(media));
     webkit_read_line("/tmp/http-smoke-count", count, sizeof(count));
     if (stat("/tmp/webkit_log.txt", &log_st) == 0)
         log_size = (long)log_st.st_size;
     fprintf(stderr,
-            "[desktop] WebKit probe title='%s' http_requests=%s log_bytes=%ld\n",
+            "[desktop] WebKit probe title='%s' media='%s' "
+            "http_requests=%s log_bytes=%ld\n",
             title[0] ? title : "(none)",
+            media[0] ? media : "(none)",
             count[0] ? count : "(none)",
             log_size);
+    maybe_capture_youtube_playback_ppm(media);
     webkit_dump_gst_debug_evidence();
     if (log_size >= 0 && log_size == last_log_size)
         stable_log_samples++;
@@ -2071,12 +2081,92 @@ static void webkit_print_runtime_probe(void)
     }
 }
 
+static int youtube_media_time_seconds(const char *media)
+{
+    const char *p;
+
+    if (!media || !strstr(media, "timeupdate"))
+        return -1;
+    p = strstr(media, " t=");
+    if (!p)
+        p = strstr(media, " max=");
+    if (!p)
+        return -1;
+    p += p[1] == 't' ? 3 : 5;
+    return atoi(p);
+}
+
+static void run_youtube_fbstat_capture(int seconds)
+{
+    char path[64];
+    char seconds_buf[16];
+    pid_t pid;
+    int status;
+
+    snprintf(path, sizeof(path), "/youtube-current-%ds.ppm", seconds);
+    snprintf(seconds_buf, sizeof(seconds_buf), "%d", seconds);
+    fprintf(stderr, "[desktop] YouTube fbstat capture seconds=%s path=%s\n",
+            seconds_buf, path);
+    pid = fork();
+    if (pid == 0) {
+        char *argv[] = {
+            "fbstat",
+            "ppm-current",
+            path,
+            NULL,
+        };
+        char *envp[] = {
+            "HOME=/",
+            "PATH=/bin:/usr/bin",
+            NULL,
+        };
+
+        execve("/bin/fbstat", argv, envp);
+        fprintf(stderr, "fbstat: execve failed errno=%d (%s)\n", errno,
+                errno ? strerror(errno) : "no errno from kernel");
+        _exit(127);
+    }
+    if (pid < 0) {
+        fprintf(stderr,
+                "[desktop] YouTube fbstat fork failed errno=%d (%s)\n",
+                errno, errno ? strerror(errno) : "no errno from kernel");
+        return;
+    }
+    while (waitpid(pid, &status, 0) < 0) {
+        if (errno != EINTR) {
+            fprintf(stderr,
+                    "[desktop] YouTube fbstat wait failed errno=%d (%s)\n",
+                    errno, errno ? strerror(errno) : "no errno from kernel");
+            return;
+        }
+    }
+    fprintf(stderr,
+            "[desktop] YouTube fbstat capture seconds=%s exit status=%d\n",
+            seconds_buf, WIFEXITED(status) ? WEXITSTATUS(status) : status);
+}
+
+static void maybe_capture_youtube_playback_ppm(const char *media)
+{
+    static int captures;
+    static int last_capture_seconds = -1;
+    int seconds = youtube_media_time_seconds(media);
+
+    if (seconds < 1 || captures >= 3 || seconds <= last_capture_seconds)
+        return;
+    captures++;
+    last_capture_seconds = seconds;
+    run_youtube_fbstat_capture(seconds);
+}
+
 static int webkit_log_line_is_evidence(const char *line)
 {
     return strstr(line, "webkitgpusmoke: gpu-contract") ||
            strstr(line, "webkitgpusmoke: title=xv6 WebKit WebGL") ||
            strstr(line, "webkitgpusmoke: complete") ||
-           strstr(line, "webkitgpusmoke: GPU contract validation failed");
+           strstr(line, "webkitgpusmoke: GPU contract validation failed") ||
+           strstr(line, "virgl-xv6:") ||
+           strstr(line, "xv6-webkit-wrapper:") ||
+           strstr(line, "xv6-webkit-skia:");
 }
 
 static void webkit_print_log_evidence(const char *reason)
@@ -2369,8 +2459,23 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
         char webkit_gpu_run_id_env[96];
         char webkit_gpu_validate_run_id_env[112];
         char webkit_wlcomp_d3d12_run_id_env[112];
+        char webkit_gst_disable_gl_sink_env[40];
+        char webkit_gst_dmabuf_sink_disabled_env[44];
+        char webkit_gst_use_videoconvert_env[48];
+        char webkit_gst_debug_env[256] = "GST_DEBUG=1";
+        char webkit_gst_feature_rank_env[96] = "GST_PLUGIN_FEATURE_RANK=";
+        char webkit_youtube_probe_seconds_env[48];
+        char webkit_dmabuf_renderer_disable_gbm_env[48];
+        char webkit_force_dmabuf_renderer_env[36];
+        char webkit_virgl_force_loss_env[64] =
+            "XV6_VIRGL_FORCE_CONTEXT_LOSS_AFTER_SECONDS=0";
+        char webkit_virgl_sync_submit_env[32] = "XV6_VIRGL_SYNC_SUBMIT=1";
+        char webkit_require_gpu_contract_env[40] =
+            "WEBKIT_XV6_REQUIRE_GPU_CONTRACT=1";
+        char webkit_force_compositing_mode_env[40] =
+            "WEBKIT_XV6_FORCE_COMPOSITING_MODE=1";
         char mesa_capture_env[] = "XV6_MESAWLEGL_CAPTURE=0";
-        char mesa_capture_frame_env[48];
+        char mesa_capture_seconds_env[48];
         char mesa_wayland_color_buffers_env[48] =
             "XV6_MESA_WAYLAND_COLOR_BUFFERS=0";
         char mesa_perf_log_env[32] = "XV6_MESA_PERF_LOG=0";
@@ -2381,7 +2486,7 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
         char mesa_present_arg[32];
         char mesa_render_arg[32];
         int mesa_capture = 0;
-        int mesa_capture_frame = 30;
+        int mesa_capture_seconds = 1;
 
         mesa_size_arg[0] = '\0';
         mesa_present_arg[0] = '\0';
@@ -2397,15 +2502,54 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
         snprintf(webkit_wlcomp_d3d12_run_id_env,
                  sizeof(webkit_wlcomp_d3d12_run_id_env),
                  "XV6_WLCOMP_D3D12_RUN_ID=%s", webkit_gpu_run_id_value);
+        snprintf(webkit_gst_disable_gl_sink_env,
+                 sizeof(webkit_gst_disable_gl_sink_env),
+                 "WEBKIT_GST_DISABLE_GL_SINK=%d",
+                 webkit_gst_gl_enabled_by_cmdline() ? 0 : 1);
+        snprintf(webkit_gst_dmabuf_sink_disabled_env,
+                 sizeof(webkit_gst_dmabuf_sink_disabled_env),
+                 "WEBKIT_GST_DMABUF_SINK_DISABLED=%d",
+                 webkit_gst_dmabuf_sink_enabled_by_cmdline() ? 0 : 1);
+        snprintf(webkit_gst_use_videoconvert_env,
+                 sizeof(webkit_gst_use_videoconvert_env),
+                 "WEBKIT_GST_USE_VIDEOCONVERT_SCALE=%d",
+                 webkit_gst_gl_enabled_by_cmdline() ? 0 : 1);
+        if (minibrowser_youtube_compat) {
+            snprintf(webkit_gst_debug_env, sizeof(webkit_gst_debug_env),
+                     "GST_DEBUG=2,*decodebin*:5,*demux*:5,*vp9*:5,"
+                     "*matroska*:5,*typefind*:5,*vpx*:5,*opus*:5,"
+                     "*isomp4*:5,*qtdemux*:5,*adaptivedemux*:5");
+            snprintf(webkit_gst_feature_rank_env,
+                     sizeof(webkit_gst_feature_rank_env),
+                     "GST_PLUGIN_FEATURE_RANK=vp9dec:0,avdec_vp9:0,avdec_av1:0");
+            snprintf(webkit_require_gpu_contract_env,
+                     sizeof(webkit_require_gpu_contract_env),
+                     "WEBKIT_XV6_REQUIRE_GPU_CONTRACT=0");
+            snprintf(webkit_force_compositing_mode_env,
+                     sizeof(webkit_force_compositing_mode_env),
+                     "WEBKIT_XV6_FORCE_COMPOSITING_MODE=0");
+        }
+        snprintf(webkit_youtube_probe_seconds_env,
+                 sizeof(webkit_youtube_probe_seconds_env),
+                 "XV6_WEBKIT_YOUTUBE_PROBE_SECONDS=%d",
+                 webkit_youtube_probe_seconds_from_cmdline());
+        snprintf(webkit_dmabuf_renderer_disable_gbm_env,
+                 sizeof(webkit_dmabuf_renderer_disable_gbm_env),
+                 "WEBKIT_DMABUF_RENDERER_DISABLE_GBM=%d",
+                 webkit_gbm_enabled_by_cmdline() ? 0 : 1);
+        snprintf(webkit_force_dmabuf_renderer_env,
+                 sizeof(webkit_force_dmabuf_renderer_env),
+                 "WEBKIT_FORCE_DMABUF_RENDERER=%d",
+                 webkit_dmabuf_enabled_by_cmdline() ? 1 : 0);
         if (is_mesa_gl &&
             read_cmdline(mesa_cmdline_buf, sizeof(mesa_cmdline_buf)) == 0) {
             mesa_capture =
                 cmdline_int_value(mesa_cmdline_buf, "glsmoke_capture", 0);
-            mesa_capture_frame =
-                cmdline_int_value(mesa_cmdline_buf, "glsmoke_capture_frame",
-                                  mesa_capture_frame);
-            if (mesa_capture_frame <= 0)
-                mesa_capture_frame = 30;
+            mesa_capture_seconds =
+                cmdline_int_value(mesa_cmdline_buf, "glsmoke_capture_seconds",
+                                  mesa_capture_seconds);
+            if (mesa_capture_seconds <= 0)
+                mesa_capture_seconds = 1;
             {
                 int mesa_color_buffers =
                     cmdline_int_value(mesa_cmdline_buf,
@@ -2496,10 +2640,32 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
                 }
             }
         }
+        if (is_webkit &&
+            read_cmdline(mesa_cmdline_buf, sizeof(mesa_cmdline_buf)) == 0) {
+            int force_loss_after_seconds =
+                cmdline_int_value(mesa_cmdline_buf,
+                                  "webkit_virgl_force_context_loss_after_seconds",
+                                  0);
+            if (force_loss_after_seconds < 0)
+                force_loss_after_seconds = 0;
+            snprintf(webkit_virgl_force_loss_env,
+                     sizeof(webkit_virgl_force_loss_env),
+                     "XV6_VIRGL_FORCE_CONTEXT_LOSS_AFTER_SECONDS=%d",
+                     force_loss_after_seconds);
+            if (force_loss_after_seconds > 0)
+                fprintf(stderr,
+                        "[desktop] WebKit virgl force context loss after %d seconds\n",
+                        force_loss_after_seconds);
+            snprintf(webkit_virgl_sync_submit_env,
+                     sizeof(webkit_virgl_sync_submit_env),
+                     "XV6_VIRGL_SYNC_SUBMIT=%d",
+                     cmdline_int_value(mesa_cmdline_buf,
+                                      "webkit_virgl_sync_submit", 1) != 0);
+        }
         snprintf(mesa_capture_env, sizeof(mesa_capture_env),
                  "XV6_MESAWLEGL_CAPTURE=%d", mesa_capture ? 1 : 0);
-        snprintf(mesa_capture_frame_env, sizeof(mesa_capture_frame_env),
-                 "XV6_MESAWLEGL_CAPTURE_FRAME=%d", mesa_capture_frame);
+        snprintf(mesa_capture_seconds_env, sizeof(mesa_capture_seconds_env),
+                 "XV6_MESAWLEGL_CAPTURE_SECONDS=%d", mesa_capture_seconds);
         if (is_mesa_gl) {
             fprintf(stderr,
                     "[desktop] Mesa env perf=%s throttle=%s color_buffers=%s\n",
@@ -2713,7 +2879,12 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             "GST_REGISTRY=/tmp/gstreamer-registry.bin",
             "GST_REGISTRY_REUSE_PLUGIN_SCANNER=1",
             gst_registry_update_env,
+            webkit_gst_debug_env,
+            webkit_gst_feature_rank_env,
+            "GST_DEBUG_FILE=/tmp/gst-debug.log",
+            "GST_DEBUG_NO_COLOR=1",
             "XV6_GUI_SESSION=1",
+            webkit_youtube_probe_seconds_env,
             webkit_gpu_run_id_env,
             webkit_gpu_validate_run_id_env,
             webkit_wlcomp_d3d12_run_id_env,
@@ -2722,9 +2893,9 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             "WEBKIT_INJECTED_BUNDLE_PATH=/lib/webkit2gtk-4.1/injected-bundle",
             "WEBKIT_DISABLE_NETWORK_CACHE=1",
             "WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS=1",
-            "WEBKIT_GST_DISABLE_GL_SINK=1",
-            "WEBKIT_GST_DMABUF_SINK_DISABLED=1",
-            "WEBKIT_GST_USE_VIDEOCONVERT_SCALE=1",
+            webkit_gst_disable_gl_sink_env,
+            webkit_gst_dmabuf_sink_disabled_env,
+            webkit_gst_use_videoconvert_env,
             "WEBKIT_GST_MAX_AVC1_RESOLUTION=720P",
             "WEBKIT_DISABLE_COMPOSITING_MODE=1",
             "WEBKIT_XV6_DISABLE_COMPOSITING_UPDATE=1",
@@ -2737,12 +2908,6 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             "WEBKIT_XV6_SKIP_RULE_FEATURES=1",
             "WEBKIT_XV6_SKIP_INITIAL_EMPTY_RENDER=1",
             "SOUP_FORCE_HTTP1=1",
-            /* Keep GStreamer logging at ERROR level only: enough to capture a
-             * genuine pipeline failure (scanned by webkit_dump_gst_debug_evidence)
-             * without the per-frame WARN/INFO flood that slows software decode. */
-            "GST_DEBUG=1",
-            "GST_DEBUG_FILE=/tmp/gst-debug.log",
-            "GST_DEBUG_NO_COLOR=1",
             NULL
         };
         char *envp_minibrowser_accel[] = {
@@ -2772,7 +2937,12 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             "GST_REGISTRY=/tmp/gstreamer-registry.bin",
             "GST_REGISTRY_REUSE_PLUGIN_SCANNER=1",
             gst_registry_update_env,
+            webkit_gst_debug_env,
+            webkit_gst_feature_rank_env,
+            "GST_DEBUG_FILE=/tmp/gst-debug.log",
+            "GST_DEBUG_NO_COLOR=1",
             "XV6_GUI_SESSION=1",
+            webkit_youtube_probe_seconds_env,
             webkit_gpu_run_id_env,
             webkit_gpu_validate_run_id_env,
             webkit_wlcomp_d3d12_run_id_env,
@@ -2781,14 +2951,22 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             "WEBKIT_INJECTED_BUNDLE_PATH=/lib/webkit2gtk-4.1/injected-bundle",
             "WEBKIT_DISABLE_NETWORK_CACHE=1",
             "WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS=1",
-            "WEBKIT_DMABUF_RENDERER_DISABLE_GBM=1",
+            webkit_gst_disable_gl_sink_env,
+            webkit_gst_dmabuf_sink_disabled_env,
+            webkit_gst_use_videoconvert_env,
+            "WEBKIT_GST_MAX_AVC1_RESOLUTION=720P",
+            webkit_dmabuf_renderer_disable_gbm_env,
+            webkit_force_dmabuf_renderer_env,
             "WEBKIT_XV6_GPU_CONTRACT=virgl-opengl-submit",
-            "WEBKIT_XV6_REQUIRE_GPU_CONTRACT=1",
-            "WEBKIT_XV6_FORCE_COMPOSITING_MODE=1",
+            webkit_require_gpu_contract_env,
+            webkit_force_compositing_mode_env,
             "LIBGL_ALWAYS_SOFTWARE=0",
             "LIBGL_DRIVERS_PATH=/lib/dri",
             "GALLIUM_DRIVER=virgl",
             "EGL_PLATFORM=wayland",
+            webkit_virgl_force_loss_env,
+            webkit_virgl_sync_submit_env,
+            "XV6_WEBKIT_SKIA_NULL_MEMBER_RECOVER=1",
             "ANGLE_DEFAULT_PLATFORM=gl",
             "SOUP_FORCE_HTTP1=1",
             "EPOXY_XV6_ALLOW_MISSING=1",
@@ -2836,7 +3014,12 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             "GST_REGISTRY=/tmp/gstreamer-registry.bin",
             "GST_REGISTRY_REUSE_PLUGIN_SCANNER=1",
             gst_registry_update_env,
+            webkit_gst_debug_env,
+            webkit_gst_feature_rank_env,
+            "GST_DEBUG_FILE=/tmp/gst-debug.log",
+            "GST_DEBUG_NO_COLOR=1",
             "XV6_GUI_SESSION=1",
+            webkit_youtube_probe_seconds_env,
             webkit_gpu_run_id_env,
             webkit_gpu_validate_run_id_env,
             webkit_wlcomp_d3d12_run_id_env,
@@ -2885,7 +3068,12 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             "GST_REGISTRY=/tmp/gstreamer-registry.bin",
             "GST_REGISTRY_REUSE_PLUGIN_SCANNER=1",
             gst_registry_update_env,
+            webkit_gst_debug_env,
+            webkit_gst_feature_rank_env,
+            "GST_DEBUG_FILE=/tmp/gst-debug.log",
+            "GST_DEBUG_NO_COLOR=1",
             "XV6_GUI_SESSION=1",
+            webkit_youtube_probe_seconds_env,
             webkit_gpu_run_id_env,
             webkit_gpu_validate_run_id_env,
             webkit_wlcomp_d3d12_run_id_env,
@@ -2894,9 +3082,9 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             "WEBKIT_INJECTED_BUNDLE_PATH=/lib/webkit2gtk-4.1/injected-bundle",
             "WEBKIT_DISABLE_NETWORK_CACHE=1",
             "WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS=1",
-            "WEBKIT_GST_DISABLE_GL_SINK=1",
-            "WEBKIT_GST_DMABUF_SINK_DISABLED=1",
-            "WEBKIT_GST_USE_VIDEOCONVERT_SCALE=1",
+            webkit_gst_disable_gl_sink_env,
+            webkit_gst_dmabuf_sink_disabled_env,
+            webkit_gst_use_videoconvert_env,
             "WEBKIT_GST_MAX_AVC1_RESOLUTION=720P",
             "LIBGL_ALWAYS_SOFTWARE=1",
             "EGL_PLATFORM=wayland",
@@ -2936,7 +3124,12 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             "GST_REGISTRY=/tmp/gstreamer-registry.bin",
             "GST_REGISTRY_REUSE_PLUGIN_SCANNER=1",
             gst_registry_update_env,
+            webkit_gst_debug_env,
+            webkit_gst_feature_rank_env,
+            "GST_DEBUG_FILE=/tmp/gst-debug.log",
+            "GST_DEBUG_NO_COLOR=1",
             "XV6_GUI_SESSION=1",
+            webkit_youtube_probe_seconds_env,
             webkit_gpu_run_id_env,
             webkit_gpu_validate_run_id_env,
             webkit_wlcomp_d3d12_run_id_env,
@@ -2972,7 +3165,7 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             mesa_client_perf_log_env,
             "XV6_MESAWLEGL_SHM_PRESENT=0",
             mesa_capture_env,
-            mesa_capture_frame_env,
+            mesa_capture_seconds_env,
             mesa_wayland_color_buffers_env,
             NULL
         };
@@ -2992,7 +3185,7 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             "LIBGL_DRIVERS_PATH=/lib/dri",
             mesa_client_perf_log_env,
             mesa_capture_env,
-            mesa_capture_frame_env,
+            mesa_capture_seconds_env,
             mesa_wayland_color_buffers_env,
             NULL
         };
@@ -3017,7 +3210,7 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             mesa_perf_log_env,
             mesa_client_perf_log_env,
             mesa_capture_env,
-            mesa_capture_frame_env,
+            mesa_capture_seconds_env,
             mesa_wayland_color_buffers_env,
             NULL
         };
@@ -3255,42 +3448,26 @@ static int glsmoke_fbstat_wait_ms_by_cmdline(void)
     return cmdline_int_value(buf, "glsmoke_fbstat_wait_ms", 5000);
 }
 
-static int glsmoke_frame_target_by_cmdline(void)
+static int glsmoke_seconds_target_by_cmdline(void)
 {
     char buf[512];
+    int seconds;
 
     if (read_cmdline(buf, sizeof(buf)) < 0)
         return 0;
 
-    return cmdline_int_value(buf, "glsmoke_frames", 0);
-}
-
-static int fb_display_completed_query(uint64_t *completed)
-{
-    struct fb_gpu_display_wait_compat wait;
-    int fd;
-    int ret;
-
-    if (!completed)
-        return -1;
-    fd = open(XV6_FB_CONTROL_NODE, O_RDONLY | O_CLOEXEC);
-    if (fd < 0)
-        return -1;
-    memset(&wait, 0, sizeof(wait));
-    ret = ioctl(fd, FB_GPU_DISPLAY_WAIT, &wait);
-    close(fd);
-    if (ret != 0)
-        return -1;
-    *completed = wait.completed;
-    return 0;
+    seconds = cmdline_int_value(buf, "glsmoke_seconds", 0);
+    if (seconds < 0)
+        seconds = 0;
+    if (seconds > 3600)
+        seconds = 3600;
+    return seconds;
 }
 
 static void wait_for_fbstat_display_target(int settle_ms)
 {
-    int target = glsmoke_frame_target_by_cmdline();
+    int seconds = glsmoke_seconds_target_by_cmdline();
     int wait_ms = glsmoke_fbstat_wait_ms_by_cmdline();
-    long long start;
-    uint64_t completed = 0;
 
     if (settle_ms < 0)
         settle_ms = 0;
@@ -3301,33 +3478,17 @@ static void wait_for_fbstat_display_target(int settle_ms)
     if (wait_ms > 10000)
         wait_ms = 10000;
 
-    if (target <= 0) {
-        if (settle_ms > 0)
-            usleep((useconds_t)settle_ms * 1000);
+    if (seconds > 0) {
+        int seconds_ms = seconds * 1000;
+
+        if (seconds_ms > wait_ms)
+            wait_ms = seconds_ms;
+        usleep((useconds_t)wait_ms * 1000);
         return;
     }
 
-    start = monotonic_ms();
-    for (;;) {
-        long long elapsed;
-
-        if (fb_display_completed_query(&completed) == 0 &&
-            completed >= (uint64_t)target)
-            break;
-        elapsed = monotonic_ms() - start;
-        if (elapsed >= wait_ms)
-            break;
-        usleep(50000);
-    }
-    if (settle_ms > 0) {
-        long long elapsed = monotonic_ms() - start;
-
-        if (elapsed < settle_ms)
-            usleep((useconds_t)(settle_ms - elapsed) * 1000);
-    }
-    fprintf(stderr,
-            "[desktop] fbstat display settle target=%d completed=%lu wait_ms=%d\n",
-            target, (unsigned long)completed, wait_ms);
+    if (settle_ms > 0)
+        usleep((useconds_t)settle_ms * 1000);
 }
 
 static void run_fbstat_after_glsmoke(const char *label)
@@ -3577,22 +3738,6 @@ static int token_is_enabled(const char *cmdline, const char *key)
     return 0;
 }
 
-static int cmdline_has_key(const char *cmdline, const char *key)
-{
-    size_t key_len = strlen(key);
-    const char *p = cmdline;
-
-    while (*p) {
-        while (*p == ' ' || *p == '\t' || *p == '\n')
-            p++;
-        if (strncmp(p, key, key_len) == 0 && p[key_len] == '=')
-            return 1;
-        while (*p && *p != ' ' && *p != '\t' && *p != '\n')
-            p++;
-    }
-    return 0;
-}
-
 static int read_cmdline(char *buf, size_t buf_size)
 {
     int fd = open("/proc/cmdline", O_RDONLY);
@@ -3704,6 +3849,36 @@ static int webkit_dmabuf_enabled_by_cmdline(void)
     return token_is_enabled(buf, "webkit_dmabuf");
 }
 
+static int webkit_gst_gl_enabled_by_cmdline(void)
+{
+    char buf[512];
+
+    if (read_cmdline(buf, sizeof(buf)) < 0)
+        return 0;
+
+    return token_is_enabled(buf, "webkit_gst_gl");
+}
+
+static int webkit_gst_dmabuf_sink_enabled_by_cmdline(void)
+{
+    char buf[512];
+
+    if (read_cmdline(buf, sizeof(buf)) < 0)
+        return 0;
+
+    return token_is_enabled(buf, "webkit_gst_dmabuf_sink");
+}
+
+static int webkit_gbm_enabled_by_cmdline(void)
+{
+    char buf[512];
+
+    if (read_cmdline(buf, sizeof(buf)) < 0)
+        return 0;
+
+    return token_is_enabled(buf, "webkit_gbm");
+}
+
 static int webkit_gpu_smoke_enabled_by_cmdline(void)
 {
     char buf[512];
@@ -3792,6 +3967,21 @@ static int webkit_youtube_compat_disabled_by_cmdline(void)
         return 0;
 
     return token_is_disabled(buf, "webkit_youtube_compat");
+}
+
+static int webkit_youtube_probe_seconds_from_cmdline(void)
+{
+    char buf[512];
+    int seconds = 180;
+
+    if (read_cmdline(buf, sizeof(buf)) == 0)
+        seconds = cmdline_int_value(buf, "webkit_youtube_probe_seconds",
+                                    seconds);
+    if (seconds <= 0)
+        seconds = 180;
+    if (seconds > 3600)
+        seconds = 3600;
+    return seconds;
 }
 
 static int webkit_request_idle_disabled_by_cmdline(void)
@@ -4100,6 +4290,26 @@ static int glsmoke_demo_by_cmdline(void)
     return token_is_enabled(buf, "glsmoke_demo");
 }
 
+static int glsmoke_second_by_cmdline(void)
+{
+    char buf[512];
+
+    if (read_cmdline(buf, sizeof(buf)) < 0)
+        return 0;
+
+    return token_is_enabled(buf, "glsmoke_second");
+}
+
+static int glsmoke_second_demo_by_cmdline(void)
+{
+    char buf[512];
+
+    if (read_cmdline(buf, sizeof(buf)) < 0)
+        return 0;
+
+    return token_is_enabled(buf, "glsmoke_second_demo");
+}
+
 static int glsmoke_fbstat_by_cmdline(void)
 {
     char buf[512];
@@ -4130,45 +4340,43 @@ static int glmaze_enabled_by_cmdline(void)
     return token_is_enabled(buf, "glmaze");
 }
 
-static void glmaze_args_from_cmdline(char *frames_arg, size_t frames_size)
+static void glmaze_args_from_cmdline(char *seconds_arg, size_t seconds_size)
 {
     char buf[512];
-    int frames = 240;
+    int seconds = 4;
 
     if (read_cmdline(buf, sizeof(buf)) == 0)
-        frames = cmdline_int_value(buf, "glmaze_frames", frames);
-    if (frames < 1)
-        frames = 1;
-    if (frames > 20000)
-        frames = 20000;
-    snprintf(frames_arg, frames_size, "--frames=%d", frames);
+        seconds = cmdline_int_value(buf, "glmaze_seconds", seconds);
+    if (seconds < 1)
+        seconds = 1;
+    if (seconds > 3600)
+        seconds = 3600;
+    snprintf(seconds_arg, seconds_size, "--seconds=%d", seconds);
 }
 
-static void glsmoke_args_from_cmdline(char *frames_arg, size_t frames_size,
+static void glsmoke_args_from_cmdline(char *seconds_arg, size_t seconds_size,
                                       char *loops_arg, size_t loops_size,
                                       char *resize_arg, size_t resize_size)
 {
     char buf[512];
     int loops = 1;
-    int resize_every = 0;
-    int frames_set = 0;
-    int frames = 0;
+    int resize_seconds = 0;
+    int seconds = 0;
 
     if (read_cmdline(buf, sizeof(buf)) == 0) {
-        frames_set = cmdline_has_key(buf, "glsmoke_frames");
-        if (frames_set)
-            frames = cmdline_int_value(buf, "glsmoke_frames", 0);
+        seconds = cmdline_int_value(buf, "glsmoke_seconds", 0);
         loops = cmdline_int_value(buf, "glsmoke_loops", loops);
-        resize_every = cmdline_int_value(buf, "glsmoke_resize_every",
-                                         resize_every);
+        resize_seconds = cmdline_int_value(buf, "glsmoke_resize_seconds",
+                                           resize_seconds);
     }
-    if (frames_set && frames_size > 0)
-        snprintf(frames_arg, frames_size, "--frames=%d", frames);
-    else if (frames_size > 0)
-        frames_arg[0] = '\0';
+    if (seconds > 0 && seconds_size > 0)
+        snprintf(seconds_arg, seconds_size, "--seconds=%d", seconds);
+    else if (seconds_size > 0)
+        seconds_arg[0] = '\0';
     snprintf(loops_arg, loops_size, "--loops=%d", loops);
-    if (resize_every > 0)
-        snprintf(resize_arg, resize_size, "--resize-every=%d", resize_every);
+    if (resize_seconds > 0)
+        snprintf(resize_arg, resize_size, "--resize-seconds=%d",
+                 resize_seconds);
     else if (resize_size > 0)
         resize_arg[0] = '\0';
 }
@@ -4260,10 +4468,10 @@ int main(void)
 
     /* 3. Launch the requested Wayland client. */
     if (glmaze_enabled_by_cmdline()) {
-        char frames_arg[32];
+        char seconds_arg[32];
 
-        glmaze_args_from_cmdline(frames_arg, sizeof(frames_arg));
-        client_pid = launch_client("/bin/glmaze", "glmaze", frames_arg, NULL,
+        glmaze_args_from_cmdline(seconds_arg, sizeof(seconds_arg));
+        client_pid = launch_client("/bin/glmaze", "glmaze", seconds_arg, NULL,
                                    NULL);
         if (client_pid < 0) {
             perror("[desktop] fork glmaze");
@@ -4271,7 +4479,7 @@ int main(void)
             return 1;
         }
         fprintf(stderr, "[desktop] glmaze pid=%d %s\n", client_pid,
-                frames_arg);
+                seconds_arg);
         if (desktop_exit_after_smoke_by_cmdline()) {
             while (g_running && client_pid > 0) {
                 int status;
@@ -4306,7 +4514,7 @@ int main(void)
     }
 
     if (glsmoke_enabled_by_cmdline()) {
-        char frames_arg[32];
+        char seconds_arg[32];
         char loops_arg[32];
         char resize_arg[32];
         int compat = glsmoke_compat_by_cmdline();
@@ -4320,18 +4528,19 @@ int main(void)
                           demo ? "mesawlegl" :
                                           native ? "mesawlegl" : "mesaglsmoke";
 
-        glsmoke_args_from_cmdline(frames_arg, sizeof(frames_arg), loops_arg,
-                                  sizeof(loops_arg), resize_arg,
-                                  sizeof(resize_arg));
+        glsmoke_args_from_cmdline(seconds_arg, sizeof(seconds_arg),
+                                  loops_arg, sizeof(loops_arg),
+                                  resize_arg, sizeof(resize_arg));
         client_pid = demo ?
             launch_client(client_path, client_name, "--demo",
-                          frames_arg[0] ? frames_arg : loops_arg,
-                          frames_arg[0] ? loops_arg : NULL) :
+                          seconds_arg[0] ? seconds_arg : loops_arg,
+                          seconds_arg[0] ? loops_arg : NULL) :
             launch_client(client_path, client_name,
-                          frames_arg[0] ? frames_arg : loops_arg,
-                          frames_arg[0] ? loops_arg :
+                          seconds_arg[0] ? seconds_arg : loops_arg,
+                          seconds_arg[0] ? loops_arg :
                                            (resize_arg[0] ? resize_arg : NULL),
-                          frames_arg[0] && resize_arg[0] ? resize_arg : NULL);
+                          seconds_arg[0] && resize_arg[0] ?
+                              resize_arg : NULL);
         if (client_pid < 0) {
             perror("[desktop] fork GL smoke");
             cleanup();
@@ -4339,8 +4548,24 @@ int main(void)
         }
         glsmoke_pid = client_pid;
         fprintf(stderr, "[desktop] %s pid=%d %s %s %s\n", client_name,
-                client_pid, demo ? "--demo" : frames_arg,
-                frames_arg, demo ? loops_arg : resize_arg);
+                client_pid, demo ? "--demo" :
+                    seconds_arg,
+                seconds_arg,
+                demo ? loops_arg : resize_arg);
+        if (glsmoke_second_by_cmdline()) {
+            int second_demo = glsmoke_second_demo_by_cmdline();
+            pid_t second_pid = second_demo ?
+                launch_client("/bin/mesawlegl", "mesawlegl", "--demo",
+                              NULL, NULL) :
+                launch_client("/bin/mesawlegl", "mesawlegl", NULL,
+                              NULL, NULL);
+
+            if (second_pid < 0)
+                perror("[desktop] fork second GL smoke");
+            else
+                fprintf(stderr, "[desktop] mesawlegl second pid=%d %s\n",
+                        second_pid, second_demo ? "--demo" : "");
+        }
         if (webkit_enabled_by_cmdline() ||
             desktop_exit_after_smoke_by_cmdline()) {
             int smoke_ok = 1;
