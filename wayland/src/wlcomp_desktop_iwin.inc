@@ -1464,15 +1464,17 @@ static int handle_iwin_click(int mx, int my)
             if (mx >= bx && mx < bx + 130 && my >= bby && my < bby + 26) {
                 /* Apply resolution change */
                 struct fb_var_screeninfo vinfo;
+                struct fb_fix_screeninfo finfo;
+                memset(&vinfo, 0, sizeof(vinfo));
                 vinfo.xres = (uint32_t)res_modes[i].w;
                 vinfo.yres = (uint32_t)res_modes[i].h;
                 vinfo.bits_per_pixel = 32;
-                vinfo.pitch = 0;
                 if (ioctl(g_fb_fd, FBIOPUT_VSCREENINFO, &vinfo) == 0 &&
-                    ioctl(g_fb_fd, FBIOGET_VSCREENINFO, &vinfo) == 0) {
+                    ioctl(g_fb_fd, FBIOGET_VSCREENINFO, &vinfo) == 0 &&
+                    ioctl(g_fb_fd, FBIOGET_FSCREENINFO, &finfo) == 0) {
                     g_fb_w = vinfo.xres;
                     g_fb_h = vinfo.yres;
-                    g_fb_pitch = vinfo.pitch;
+                    g_fb_pitch = finfo.line_length;
                     release_framebuffer_backing();
                     if (alloc_framebuffer_backing() < 0) {
                         fprintf(stderr, "wlcomp: realloc framebuf failed\n");

@@ -671,15 +671,21 @@ static int init_framebuffer(void)
     }
 
     struct fb_var_screeninfo vinfo;
+    struct fb_fix_screeninfo finfo;
     if (ioctl(g_fb_fd, FBIOGET_VSCREENINFO, &vinfo) < 0) {
         fprintf(stderr, "wlcomp: FBIOGET_VSCREENINFO: %s\n", strerror(errno));
+        close(g_fb_fd);
+        return -1;
+    }
+    if (ioctl(g_fb_fd, FBIOGET_FSCREENINFO, &finfo) < 0) {
+        fprintf(stderr, "wlcomp: FBIOGET_FSCREENINFO: %s\n", strerror(errno));
         close(g_fb_fd);
         return -1;
     }
 
     g_fb_w     = vinfo.xres;
     g_fb_h     = vinfo.yres;
-    g_fb_pitch = vinfo.pitch;
+    g_fb_pitch = finfo.line_length;
 
     if (alloc_framebuffer_backing() < 0) {
         fprintf(stderr, "wlcomp: framebuf allocation failed\n");
@@ -736,6 +742,7 @@ static void poll_framebuffer_mode(void)
     static uint32_t next_probe_ms;
     uint32_t now = get_time_ms();
     struct fb_var_screeninfo vinfo;
+    struct fb_fix_screeninfo finfo;
     struct wlcomp_surface *surf;
 
     if (g_fb_fd < 0 || now < next_probe_ms)
@@ -744,17 +751,20 @@ static void poll_framebuffer_mode(void)
 
     if (ioctl(g_fb_fd, FBIOGET_VSCREENINFO, &vinfo) < 0)
         return;
+    if (ioctl(g_fb_fd, FBIOGET_FSCREENINFO, &finfo) < 0)
+        return;
     if (vinfo.xres == g_fb_w && vinfo.yres == g_fb_h &&
-        vinfo.pitch == g_fb_pitch)
+        finfo.line_length == g_fb_pitch)
         return;
 
     fprintf(stderr, "wlcomp: fb0 mode changed externally %ux%u pitch=%u -> %ux%u pitch=%u\n",
-            g_fb_w, g_fb_h, g_fb_pitch, vinfo.xres, vinfo.yres, vinfo.pitch);
+            g_fb_w, g_fb_h, g_fb_pitch, vinfo.xres, vinfo.yres,
+            finfo.line_length);
 
     release_framebuffer_backing();
     g_fb_w = vinfo.xres;
     g_fb_h = vinfo.yres;
-    g_fb_pitch = vinfo.pitch;
+    g_fb_pitch = finfo.line_length;
     if (alloc_framebuffer_backing() < 0) {
         fprintf(stderr, "wlcomp: framebuffer remap failed after mode change\n");
         g_running = 0;
