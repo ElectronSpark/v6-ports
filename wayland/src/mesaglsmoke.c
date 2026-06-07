@@ -75,6 +75,9 @@ struct app_state {
     EGLConfig egl_config;
     EGLContext egl_context;
     EGLSurface egl_surface;
+    GLuint fbo;
+    GLuint color_rb;
+    GLuint depth_rb;
     GLuint program;
     GLuint sphere_program;
     GLuint sphere_vbo;
@@ -99,6 +102,7 @@ struct app_state {
     int sphere_demo;
     int sphere_quality;
     int fixed_size;
+    int failed;
     int sphere_vertex_count;
     GLenum read_format;
     uint8_t *readback;
@@ -110,7 +114,59 @@ struct app_state {
 };
 
 static uint64_t monotonic_ns(void);
+static void clear_gl_errors(void);
 static void draw_and_commit(struct app_state *app);
+
+static void destroy_render_target(struct app_state *app)
+{
+    if (app->depth_rb) {
+        glDeleteRenderbuffers(1, &app->depth_rb);
+        app->depth_rb = 0;
+    }
+    if (app->color_rb) {
+        glDeleteRenderbuffers(1, &app->color_rb);
+        app->color_rb = 0;
+    }
+    if (app->fbo) {
+        glDeleteFramebuffers(1, &app->fbo);
+        app->fbo = 0;
+    }
+}
+
+static int create_render_target(struct app_state *app)
+{
+    GLenum status;
+
+    destroy_render_target(app);
+    clear_gl_errors();
+
+    glGenFramebuffers(1, &app->fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, app->fbo);
+
+    glGenRenderbuffers(1, &app->color_rb);
+    glBindRenderbuffer(GL_RENDERBUFFER, app->color_rb);
+    glRenderbufferStorage(GL_RENDERBUFFER, GL_RGBA4, app->width, app->height);
+    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                              GL_RENDERBUFFER, app->color_rb);
+
+    glGenRenderbuffers(1, &app->depth_rb);
+    glBindRenderbuffer(GL_RENDERBUFFER, app->depth_rb);
+    glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT16, app->width,
+                          app->height);
+    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
+                              GL_RENDERBUFFER, app->depth_rb);
+
+    status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+    if (status != GL_FRAMEBUFFER_COMPLETE || glGetError() != GL_NO_ERROR) {
+        fprintf(stderr,
+                "mesaglsmoke[%d]: framebuffer setup failed status=0x%x\n",
+                app->loop, status);
+        destroy_render_target(app);
+        return -1;
+    }
+    clear_gl_errors();
+    return 0;
+}
 
 static EGLDisplay get_surfaceless_display(void)
 {
@@ -295,6 +351,8 @@ static int init_mesa(struct app_state *app)
                 eglGetError());
         return -1;
     }
+    if (create_render_target(app) < 0)
+        return -1;
 
     app->program = xv6_gl_link_program("mesaglsmoke", vs, fs);
     if (!app->program)
@@ -329,6 +387,7 @@ static int init_mesa(struct app_state *app)
             app->sphere_demo ? " spherical-poly-demo" : "",
             app->sphere_demo ? " quality=" : "",
             app->sphere_demo ? app->sphere_quality : 0);
+    clear_gl_errors();
     return 0;
 }
 
@@ -362,6 +421,8 @@ static int recreate_mesa_surface(struct app_state *app)
         return -1;
     }
     app->egl_surface = surface;
+    if (create_render_target(app) < 0)
+        return -1;
     return 0;
 }
 
@@ -476,6 +537,7 @@ static void render_sphere_frame(struct app_state *app)
 static int copy_pixels_to_wayland_buffer(struct app_state *app)
 {
     size_t bytes = (size_t)app->width * (size_t)app->height * 4;
+    GLenum glerr;
 
     if (app->readback_size < bytes) {
         uint8_t *new_readback = realloc(app->readback, bytes);
@@ -486,9 +548,25 @@ static int copy_pixels_to_wayland_buffer(struct app_state *app)
         app->readback_size = bytes;
     }
     glPixelStorei(GL_PACK_ALIGNMENT, 1);
+retry_read:
+    clear_gl_errors();
+    glBindFramebuffer(GL_FRAMEBUFFER, app->fbo);
     glReadPixels(0, 0, app->width, app->height, app->read_format,
                  GL_UNSIGNED_BYTE,
                  app->readback);
+    glerr = glGetError();
+    if (glerr != GL_NO_ERROR) {
+        if (app->read_format == GL_BGRA_EXT) {
+            fprintf(stderr,
+                    "mesaglsmoke[%d]: BGRA readback failed 0x%x; retrying RGBA\n",
+                    app->loop, glerr);
+            app->read_format = GL_RGBA;
+            goto retry_read;
+        }
+        fprintf(stderr, "mesaglsmoke[%d]: glReadPixels failed 0x%x\n",
+                app->loop, glerr);
+        return -1;
+    }
     for (int y = 0; y < app->height; y++) {
         uint32_t *dst = (uint32_t *)((uint8_t *)app->buffer.pixels +
                                      (size_t)y * (size_t)app->buffer.stride);
@@ -577,17 +655,23 @@ static const struct wl_callback_listener frame_listener = {
 
 static void draw_and_commit(struct app_state *app)
 {
+    GLenum glerr;
+
+    glBindFramebuffer(GL_FRAMEBUFFER, app->fbo);
     if (app->sphere_demo)
         render_sphere_frame(app);
     else
         render_frame(app);
-    if (glGetError() != GL_NO_ERROR) {
-        fprintf(stderr, "mesaglsmoke[%d]: GL error during frame\n",
-                app->loop);
+    glerr = glGetError();
+    if (glerr != GL_NO_ERROR) {
+        fprintf(stderr, "mesaglsmoke[%d]: GL error during frame 0x%x\n",
+                app->loop, glerr);
+        app->failed = 1;
         app->running = 0;
         return;
     }
     if (copy_pixels_to_wayland_buffer(app) < 0) {
+        app->failed = 1;
         app->running = 0;
         return;
     }
@@ -751,14 +835,19 @@ static void cleanup(struct app_state *app)
     if (app->frame_cb)
         wl_callback_destroy(app->frame_cb);
     if (app->egl_display != EGL_NO_DISPLAY) {
-        eglMakeCurrent(app->egl_display, EGL_NO_SURFACE, EGL_NO_SURFACE,
-                       EGL_NO_CONTEXT);
+        if (app->egl_context != EGL_NO_CONTEXT &&
+            app->egl_surface != EGL_NO_SURFACE)
+            eglMakeCurrent(app->egl_display, app->egl_surface,
+                           app->egl_surface, app->egl_context);
         if (app->sphere_vbo)
             glDeleteBuffers(1, &app->sphere_vbo);
+        destroy_render_target(app);
         if (app->sphere_program)
             glDeleteProgram(app->sphere_program);
         if (app->program)
             glDeleteProgram(app->program);
+        eglMakeCurrent(app->egl_display, EGL_NO_SURFACE, EGL_NO_SURFACE,
+                       EGL_NO_CONTEXT);
         if (app->egl_surface != EGL_NO_SURFACE)
             eglDestroySurface(app->egl_display, app->egl_surface);
         if (app->egl_context != EGL_NO_CONTEXT)
@@ -822,6 +911,14 @@ static uint64_t monotonic_ns(void)
     return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
 }
 
+static void clear_gl_errors(void)
+{
+    for (int i = 0; i < 8; i++) {
+        if (glGetError() == GL_NO_ERROR)
+            break;
+    }
+}
+
 static int run_client(int loop, int seconds, int resize_seconds,
                       int sphere_demo, int width, int height,
                       int sphere_quality, int fixed_size)
@@ -858,6 +955,10 @@ static int run_client(int loop, int seconds, int resize_seconds,
     while (app.running && wl_display_dispatch(app.display) >= 0)
         ;
     if (app.running)
+        rc = 1;
+    if (app.failed)
+        rc = 1;
+    if (rc == 0 && app.frame == 0)
         rc = 1;
     end_ns = monotonic_ns();
     if (app.start_ns && end_ns > app.start_ns) {
