@@ -158,3 +158,6 @@
 [submodule "peanut-gb/src"]
 	path = peanut-gb/src
 	url = https://github.com/ElectronSpark/v6-Peanut-GB.git
+[submodule "kmscube/src"]
+	path = kmscube/src
+	url = https://gitlab.freedesktop.org/mesa/kmscube.git

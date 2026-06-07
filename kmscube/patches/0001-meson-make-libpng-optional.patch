@@ -1,0 +1,37 @@
+diff --git a/meson.build b/meson.build
+index 8517d6a..0a9c6d4 100644
+--- a/meson.build
++++ b/meson.build
+@@ -51,12 +51,15 @@ else
+   warning('GLES3 not supported; shadertoy & texturator are NOT included in this build')
+ endif
+ 
+-dep_libpng = dependency('libpng', required : false)
++dep_libpng = dependency('libpng', required : get_option('libpng'))
+ 
+ if dep_libpng.found()
+   add_project_arguments('-DHAVE_LIBPNG', language : 'c')
+ endif
+ 
+-dep_common = [dep_m, dep_threads, dep_libdrm, dep_gbm, dep_egl, dep_gles2, dep_libpng]
++dep_common = [dep_m, dep_threads, dep_libdrm, dep_gbm, dep_egl, dep_gles2]
++if dep_libpng.found()
++  dep_common += dep_libpng
++endif
+ 
+ dep_gst = []
+ foreach _dep : [
+diff --git a/meson_options.txt b/meson_options.txt
+index 81f2c9d..bb6a4f2 100644
+--- a/meson_options.txt
++++ b/meson_options.txt
+@@ -3,3 +3,9 @@ option(
+   type : 'feature',
+   description : 'Enable support for gstreamer and cube-video'
+ )
++
++option(
++  'libpng',
++  type : 'feature',
++  description : 'Enable PNG frame writing support'
++)
