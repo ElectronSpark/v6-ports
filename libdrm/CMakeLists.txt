@@ -39,7 +39,7 @@ xv6_port(
         -Dman-pages=disabled
         -Dvalgrind=disabled
         -Dfreedreno-kgsl=false
-        -Dinstall-test-programs=false
+        -Dinstall-test-programs=true
         -Dudev=false
-        -Dtests=false
+        -Dtests=true
 )
