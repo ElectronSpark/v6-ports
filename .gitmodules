@@ -161,3 +161,9 @@
 [submodule "kmscube/src"]
 	path = kmscube/src
 	url = https://gitlab.freedesktop.org/mesa/kmscube.git
+[submodule "json-c/src"]
+	path = json-c/src
+	url = https://github.com/json-c/json-c.git
+[submodule "drm_info/src"]
+	path = drm_info/src
+	url = https://gitlab.freedesktop.org/emersion/drm_info.git
