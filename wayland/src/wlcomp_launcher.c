@@ -922,6 +922,8 @@ void wlcomp_launcher_launch_args(const char *path, const char *name,
                          strcmp(app_name, "mesawlegl") == 0 ||
                          strcmp(app_name, "mesaglsmoke") == 0 ||
                          strcmp(app_name, "mesaeglinfo") == 0;
+        const char *minibrowser_url =
+            (arg1 && arg1[0]) ? arg1 : WEBKIT_DEFAULT_URL;
 
         if (is_webkit)
             disable_child_coredumps();
@@ -942,6 +944,9 @@ void wlcomp_launcher_launch_args(const char *path, const char *name,
             mkdir("/tmp/.local", 0755);
             mkdir("/tmp/.local/share", 0755);
             mkdir("/tmp/webkitgtk-4.1", 0755);
+            mkdir("/var", 0755);
+            mkdir("/var/tmp", 01777);
+            chmod("/var/tmp", 01777);
         }
 
         /* For netsurf, create Choices file with ca_bundle + homepage */
@@ -959,8 +964,9 @@ void wlcomp_launcher_launch_args(const char *path, const char *name,
             }
         }
 
-        if (is_minibrowser && url_needs_network_wait(arg1)) {
-            fprintf(stderr, "wlcomp: waiting for network before %s\n", arg1);
+        if (is_minibrowser && url_needs_network_wait(minibrowser_url)) {
+            fprintf(stderr, "wlcomp: waiting for network before %s\n",
+                    minibrowser_url);
             if (wlcomp_sync_resolv_conf_from_netconf(WEBKIT_NET_WAIT_US) != 0)
                 usleep(WEBKIT_NET_WAIT_US);
         }
@@ -991,7 +997,7 @@ void wlcomp_launcher_launch_args(const char *path, const char *name,
             "--enable-dns-prefetching=false",
             "--enable-offline-web-application-cache=false",
             (char *)webkit_feature_flags,
-            (char *)(arg1 ? arg1 : WEBKIT_DEFAULT_URL),
+            (char *)minibrowser_url,
             NULL,
         };
         char *argv_minibrowser_js[] = {
@@ -1008,7 +1014,7 @@ void wlcomp_launcher_launch_args(const char *path, const char *name,
             "--enable-dns-prefetching=false",
             "--enable-offline-web-application-cache=false",
             (char *)webkit_feature_flags,
-            (char *)(arg1 ? arg1 : WEBKIT_DEFAULT_URL),
+            (char *)minibrowser_url,
             NULL,
         };
         char *argv_minibrowser_accel[] = {
@@ -1025,7 +1031,7 @@ void wlcomp_launcher_launch_args(const char *path, const char *name,
             "--enable-dns-prefetching=false",
             "--enable-offline-web-application-cache=false",
             (char *)webkit_feature_flags,
-            (char *)(arg1 ? arg1 : WEBKIT_DEFAULT_URL),
+            (char *)minibrowser_url,
             NULL,
         };
         char *argv_minibrowser_accel_js[] = {
@@ -1042,7 +1048,7 @@ void wlcomp_launcher_launch_args(const char *path, const char *name,
             "--enable-dns-prefetching=false",
             "--enable-offline-web-application-cache=false",
             (char *)webkit_feature_flags,
-            (char *)(arg1 ? arg1 : WEBKIT_DEFAULT_URL),
+            (char *)minibrowser_url,
             NULL,
         };
         char webkit_gpu_run_id_value[64];
@@ -1108,6 +1114,9 @@ void wlcomp_launcher_launch_args(const char *path, const char *name,
             "XDG_CACHE_HOME=/tmp/.cache",
             "XDG_DATA_HOME=/tmp/.local/share",
             "XDG_DATA_DIRS=/share:/usr/share",
+            "TMPDIR=/tmp",
+            "TEMP=/tmp",
+            "TMP=/tmp",
             "WAYLAND_DISPLAY=wayland-0",
             "GDK_BACKEND=wayland",
             "GDK_GL=gles",
@@ -1125,6 +1134,9 @@ void wlcomp_launcher_launch_args(const char *path, const char *name,
             "XDG_RUNTIME_DIR=/tmp",
             "XDG_CACHE_HOME=/tmp/.cache",
             "XDG_DATA_DIRS=/share:/usr/share",
+            "TMPDIR=/tmp",
+            "TEMP=/tmp",
+            "TMP=/tmp",
             "WAYLAND_DISPLAY=wayland-0",
             "GDK_BACKEND=wayland",
             "GDK_GL=disable",
@@ -1174,6 +1186,9 @@ void wlcomp_launcher_launch_args(const char *path, const char *name,
             "XDG_CACHE_HOME=/tmp/.cache",
             "XDG_DATA_HOME=/tmp/.local/share",
             "XDG_DATA_DIRS=/share:/usr/share",
+            "TMPDIR=/tmp",
+            "TEMP=/tmp",
+            "TMP=/tmp",
             "WAYLAND_DISPLAY=wayland-0",
             "GDK_BACKEND=wayland",
             "GDK_GL=gles",
@@ -1224,6 +1239,9 @@ void wlcomp_launcher_launch_args(const char *path, const char *name,
             "XDG_CACHE_HOME=/tmp/.cache",
             "XDG_DATA_HOME=/tmp/.local/share",
             "XDG_DATA_DIRS=/share:/usr/share",
+            "TMPDIR=/tmp",
+            "TEMP=/tmp",
+            "TMP=/tmp",
             "WAYLAND_DISPLAY=wayland-0",
             "GDK_BACKEND=wayland",
             "GDK_GL=gles",
@@ -1279,6 +1297,9 @@ void wlcomp_launcher_launch_args(const char *path, const char *name,
             "XDG_CACHE_HOME=/tmp/.cache",
             "XDG_DATA_HOME=/tmp/.local/share",
             "XDG_DATA_DIRS=/share:/usr/share",
+            "TMPDIR=/tmp",
+            "TEMP=/tmp",
+            "TMP=/tmp",
             "WAYLAND_DISPLAY=wayland-0",
             "GDK_BACKEND=wayland",
             "GDK_GL=gles",

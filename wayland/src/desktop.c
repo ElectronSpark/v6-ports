@@ -1181,6 +1181,9 @@ static pid_t launch_gpu_substrate_validate(void)
             "XDG_RUNTIME_DIR=/tmp",
             "XDG_CACHE_HOME=/tmp/.cache",
             "XDG_DATA_DIRS=/share:/usr/share",
+            "TMPDIR=/tmp",
+            "TEMP=/tmp",
+            "TMP=/tmp",
             "WAYLAND_DISPLAY=wayland-0",
             "GDK_BACKEND=wayland",
             "LIBGL_ALWAYS_SOFTWARE=0",
@@ -1983,6 +1986,7 @@ static void webkit_read_line(const char *path, char *buf, size_t buf_size)
 
 static void webkit_dump_gst_debug_evidence(void)
 {
+    const off_t max_scan = 128 * 1024;
     static int probe_calls;
     static int dumped;
     struct stat st;
@@ -2000,6 +2004,8 @@ static void webkit_dump_gst_debug_evidence(void)
     fd = open("/tmp/gst-debug.log", O_RDONLY);
     if (fd < 0)
         return;
+    if (st.st_size > max_scan)
+        lseek(fd, st.st_size - max_scan, SEEK_SET);
     while (read(fd, &ch, 1) == 1) {
         if (ch == '\n' || len + 1 >= sizeof(line)) {
             line[len] = '\0';
@@ -2023,6 +2029,10 @@ static void webkit_dump_gst_debug_evidence(void)
         fprintf(stderr,
                 "[desktop] GST debug log present (%ld bytes) but no error/warn lines\n",
                 (long)st.st_size);
+    else if (st.st_size > max_scan)
+        fprintf(stderr,
+                "[desktop] GST debug evidence scanned tail %ld/%ld bytes\n",
+                (long)max_scan, (long)st.st_size);
     dumped = 1;
 }
 
@@ -2516,9 +2526,7 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
                  webkit_gst_gl_enabled_by_cmdline() ? 0 : 1);
         if (minibrowser_youtube_compat) {
             snprintf(webkit_gst_debug_env, sizeof(webkit_gst_debug_env),
-                     "GST_DEBUG=2,*decodebin*:5,*demux*:5,*vp9*:5,"
-                     "*matroska*:5,*typefind*:5,*vpx*:5,*opus*:5,"
-                     "*isomp4*:5,*qtdemux*:5,*adaptivedemux*:5");
+                     "GST_DEBUG=2");
             snprintf(webkit_gst_feature_rank_env,
                      sizeof(webkit_gst_feature_rank_env),
                      "GST_PLUGIN_FEATURE_RANK=vp9dec:0,avdec_vp9:0,avdec_av1:0");
@@ -2660,7 +2668,7 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
                      sizeof(webkit_virgl_sync_submit_env),
                      "XV6_VIRGL_SYNC_SUBMIT=%d",
                      cmdline_int_value(mesa_cmdline_buf,
-                                      "webkit_virgl_sync_submit", 1) != 0);
+                                      "webkit_virgl_sync_submit", 0) != 0);
         }
         snprintf(mesa_capture_env, sizeof(mesa_capture_env),
                  "XV6_MESAWLEGL_CAPTURE=%d", mesa_capture ? 1 : 0);
@@ -2844,6 +2852,9 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             "XDG_CACHE_HOME=/tmp/.cache",
             "XDG_DATA_HOME=/tmp/.local/share",
             "XDG_DATA_DIRS=/share:/usr/share",
+            "TMPDIR=/tmp",
+            "TEMP=/tmp",
+            "TMP=/tmp",
             "WAYLAND_DISPLAY=wayland-0",
             "GDK_BACKEND=wayland",
             "GDK_GL=gles",
@@ -2919,6 +2930,9 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             "XDG_CACHE_HOME=/tmp/.cache",
             "XDG_DATA_HOME=/tmp/.local/share",
             "XDG_DATA_DIRS=/share:/usr/share",
+            "TMPDIR=/tmp",
+            "TEMP=/tmp",
+            "TMP=/tmp",
             "WAYLAND_DISPLAY=wayland-0",
             "GDK_BACKEND=wayland",
             webkit_gdk_gl_env,
@@ -2996,6 +3010,9 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             "XDG_CACHE_HOME=/tmp/.cache",
             "XDG_DATA_HOME=/tmp/.local/share",
             "XDG_DATA_DIRS=/share:/usr/share",
+            "TMPDIR=/tmp",
+            "TEMP=/tmp",
+            "TMP=/tmp",
             "WAYLAND_DISPLAY=wayland-0",
             "GDK_BACKEND=wayland",
             webkit_gdk_gl_env,
@@ -3050,6 +3067,9 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             "XDG_CACHE_HOME=/tmp/.cache",
             "XDG_DATA_HOME=/tmp/.local/share",
             "XDG_DATA_DIRS=/share:/usr/share",
+            "TMPDIR=/tmp",
+            "TEMP=/tmp",
+            "TMP=/tmp",
             "WAYLAND_DISPLAY=wayland-0",
             "GDK_BACKEND=wayland",
             webkit_gdk_gl_env,
@@ -3106,6 +3126,9 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             "XDG_CACHE_HOME=/tmp/.cache",
             "XDG_DATA_HOME=/tmp/.local/share",
             "XDG_DATA_DIRS=/share:/usr/share",
+            "TMPDIR=/tmp",
+            "TEMP=/tmp",
+            "TMP=/tmp",
             "WAYLAND_DISPLAY=wayland-0",
             "GDK_BACKEND=wayland",
             webkit_gdk_gl_env,

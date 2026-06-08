@@ -678,6 +678,30 @@ static void present_trace_maybe_log(uint32_t now)
     memset(a, 0, sizeof(*a));
     next_log_ms = now + (uint32_t)interval_ms;
 }
+
+static int damage_is_bottom_refresh_only(void)
+{
+    int64_t total_area = 0;
+    int32_t min_y;
+
+    if (g_damage_count <= 0 || g_fb_h <= 0)
+        return 0;
+    min_y = (int32_t)g_fb_h - TASKBAR_H - 32;
+    if (min_y < 0)
+        min_y = 0;
+    for (int i = 0; i < g_damage_count; i++) {
+        const struct damage_rect *r = &g_damage[i];
+        int32_t w = r->x2 - r->x1;
+        int32_t h = r->y2 - r->y1;
+
+        if (w <= 0 || h <= 0)
+            continue;
+        if (r->y1 < min_y)
+            return 0;
+        total_area += (int64_t)w * h;
+    }
+    return total_area > 0 && total_area <= ((int64_t)g_fb_w * 96);
+}
 static struct gpu_compose_pending g_gpu_compose_pending[MAX_GPU_COMPOSE_PENDING];
 static int g_gpu_compose_pending_count;
 static struct damage_rect g_virgl_flip_prev_copy_rects[MAX_DAMAGE_RECTS];
@@ -1998,21 +2022,18 @@ static void composite_and_flip(void)
     }
 
     /*
-     * Idle desktop responsiveness: when no client window is mapped (the bare
-     * desktop, e.g. the 3D demo not running), the only damage is sparse and
-     * small -- the 1 Hz taskbar clock or an occasional pointer update.  On the
-     * WSL d3d12 virtio-vga-gl host those tiny partial scanout flushes are
-     * coalesced and the window only refreshes every few seconds.  Promote such
-     * idle presents to a full-surface flush so the host re-samples the whole
-     * scanout.  Restrict this to the no-toplevel case: when a client window
-     * (WebKit, a terminal, the GL demo, ...) is mapped, its own per-frame
-     * damage drives presentation, and forcing a full-surface CPU upload here
-     * would needlessly re-upload the entire (possibly large) window every
-     * frame -- so the active-client path is left untouched.
+     * Idle/quiet responsiveness: on the WSL d3d12 virtio-vga-gl host, tiny
+     * partial scanout flushes such as the 1 Hz taskbar clock can be coalesced
+     * until the host window is exposed/refocused.  Promote those quiet refreshes
+     * to a full-surface flush so the host re-samples the scanout.  Keep active
+     * animation untouched by requiring no pending client frame callbacks; the
+     * active-client case is allowed only for bottom-strip damage, which is the
+     * visible clock/taskbar symptom.
      */
     if (wlcomp_idle_full_present_enabled() &&
-        !any_frame_callbacks_pending() &&
-        surface_existing_mapped_toplevels() == 0)
+        (damage_is_bottom_refresh_only() ||
+         (!any_frame_callbacks_pending() &&
+          surface_existing_mapped_toplevels() == 0)))
         damage_full_reason(FULL_DAMAGE_REPAIR);
 
     /*
