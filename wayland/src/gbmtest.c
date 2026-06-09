@@ -107,6 +107,9 @@ static void probe_drm_prime_resource_info(struct gbm_device *dev,
            "res=%u size=%u blob_mem=%u\n",
            ret, ret == 0 ? 0 : errno, info.res_handle, info.size,
            info.blob_mem);
+    if (ret == 0 && info.res_handle != 0 && info.size != 0)
+        printf("__GBMTEST_PRIME_RESOURCE_INFO_0__ handle=%u res=%u size=%u\n",
+               imported, info.res_handle, info.size);
 
     memset(&close_req, 0, sizeof(close_req));
     close_req.handle = imported;
@@ -293,6 +296,7 @@ out_bo:
     close(fd);
     if (!ok)
         return 1;
+    printf("__GBMTEST_BO_ROUNDTRIP_0__\n");
     printf("gbmtest: passed linear BO create/map/export/import/destroy\n");
     return 0;
 }
