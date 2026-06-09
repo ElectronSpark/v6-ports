@@ -31,6 +31,7 @@
 #define WEBKIT_GST_WAIT_US   60000000
 #define WEBKIT_DEFAULT_URL   "https://www.google.com/search?q=xv6&gbv=1"
 #define WEBKIT_URL_MAX       768
+#define CMDLINE_BUF_MAX      4096
 #define XV6_DRM_RENDER_NODE  "/dev/dri/renderD128"
 #define XV6_GPU_CONTROL_NODE "/dev/gpu0"
 #define XV6_FB_CONTROL_NODE  "/dev/fb0"
@@ -162,6 +163,9 @@ static int webkit_youtube_boot_smoke_enabled_by_cmdline(void);
 static int webkit_youtube_waterfall_smoke_enabled_by_cmdline(void);
 static int webkit_youtube_compat_disabled_by_cmdline(void);
 static int webkit_youtube_probe_seconds_from_cmdline(void);
+static int youtube_fbstat_capture_limit_from_cmdline(void);
+static int youtube_fbstat_stats_enabled_by_cmdline(void);
+static int webkit_gst_probe_dump_enabled_by_cmdline(void);
 static int webkit_logging_enabled_by_cmdline(void);
 static int webkit_request_idle_disabled_by_cmdline(void);
 static int webkit_feature_gate_smoke_enabled_by_cmdline(void);
@@ -178,10 +182,14 @@ static int webkit_timeout_ms_from_cmdline(int fallback);
 static int gpu_validate_enabled_by_cmdline(void);
 static int glmaze_enabled_by_cmdline(void);
 static void glmaze_args_from_cmdline(char *seconds_arg, size_t seconds_size);
+static int weston_enabled_by_cmdline(void);
 static int desktop_disabled_by_cmdline(void);
 static int desktop_exit_after_smoke_by_cmdline(void);
 static int cmdline_int_value(const char *cmdline, const char *key,
                              int fallback);
+static int cmdline_copy_value(const char *cmdline, const char *key, char *dst,
+                              size_t dst_size);
+static int token_is_enabled(const char *cmdline, const char *key);
 static int read_cmdline(char *buf, size_t buf_size);
 static int write_all_fd(int fd, const void *buf, size_t len);
 static const char *http_content_type_for_path(const char *path);
@@ -190,6 +198,7 @@ static int http_try_serve_webkit_file(int cfd, const char *path,
 static void http_smoke_self_probe(const char *path);
 static void webkit_print_runtime_probe(void);
 static void webkit_dump_gst_debug_evidence(void);
+static void webkit_dump_gst_debug_tail(const char *reason, int max_lines);
 static void webkit_print_log_evidence(const char *reason);
 static void maybe_capture_youtube_playback_ppm(const char *media);
 static void write_webkit_gpu_policy_file(const char *name, int requested_accel,
@@ -1093,7 +1102,7 @@ static int webkit_youtube_compat_url(const char *url)
 
 static pid_t launch_wlcomp(void)
 {
-    char cmdline_buf[512] = "";
+    char cmdline_buf[4096] = "";
     char cmdline_env[sizeof("XV6_KERNEL_CMDLINE=") + sizeof(cmdline_buf)];
     char fb_bo_env[] = "XV6_WLCOMP_FB_BO=1";
     char fb_direct_env[] = "XV6_WLCOMP_FB_DIRECT=1";
@@ -1161,6 +1170,69 @@ static pid_t launch_wlcomp(void)
             snprintf(cmdline_env, sizeof(cmdline_env), "XV6_KERNEL_CMDLINE=%s",
                      cmdline_buf);
         execve("/bin/wlcomp", argv, have_cmdline ? envp_cmdline : envp_base);
+        _exit(127);
+    }
+    return pid;
+}
+
+static pid_t launch_weston(void)
+{
+    char cmdline_buf[4096] = "";
+    char cmdline_env[sizeof("XV6_KERNEL_CMDLINE=") + sizeof(cmdline_buf)];
+    int have_cmdline = read_cmdline(cmdline_buf, sizeof(cmdline_buf)) == 0;
+    pid_t pid = fork();
+
+    if (pid == 0) {
+        char shell_arg[32] = "--shell=desktop";
+
+        if (have_cmdline && token_is_enabled(cmdline_buf, "weston_kiosk"))
+            snprintf(shell_arg, sizeof(shell_arg), "--shell=kiosk");
+
+        char *argv[] = {
+            "weston",
+            "--backend=drm",
+            "--renderer=gl",
+            shell_arg,
+            "--socket=wayland-0",
+            "--idle-time=0",
+            "--log=/tmp/weston.log",
+            "--config=/etc/xdg/weston/weston.ini",
+            NULL,
+        };
+        char *envp_base[] = {
+            "HOME=/",
+            "PATH=/bin:/usr/bin:/libexec",
+            "LD_LIBRARY_PATH=/lib:/usr/lib",
+            "XDG_RUNTIME_DIR=/tmp",
+            "XDG_DATA_DIRS=/share:/usr/share",
+            "XKB_CONFIG_ROOT=/share/X11/xkb",
+            "LIBGL_ALWAYS_SOFTWARE=0",
+            "GALLIUM_DRIVER=virgl",
+            "LIBGL_DRIVERS_PATH=/lib/dri",
+            "XV6_GUI_SESSION=1",
+            NULL,
+        };
+        char *envp_cmdline[] = {
+            "HOME=/",
+            "PATH=/bin:/usr/bin:/libexec",
+            "LD_LIBRARY_PATH=/lib:/usr/lib",
+            "XDG_RUNTIME_DIR=/tmp",
+            "XDG_DATA_DIRS=/share:/usr/share",
+            "XKB_CONFIG_ROOT=/share/X11/xkb",
+            "LIBGL_ALWAYS_SOFTWARE=0",
+            "GALLIUM_DRIVER=virgl",
+            "LIBGL_DRIVERS_PATH=/lib/dri",
+            "XV6_GUI_SESSION=1",
+            cmdline_env,
+            NULL,
+        };
+
+        if (have_cmdline)
+            snprintf(cmdline_env, sizeof(cmdline_env), "XV6_KERNEL_CMDLINE=%s",
+                     cmdline_buf);
+        execve("/bin/weston", argv, have_cmdline ? envp_cmdline : envp_base);
+        fprintf(stderr, "weston: execve failed errno=%d (%s)\n", errno,
+                errno ? strerror(errno) : "no errno from kernel");
         _exit(127);
     }
     return pid;
@@ -1996,6 +2068,9 @@ static void webkit_dump_gst_debug_evidence(void)
     char ch;
     int printed = 0;
 
+    if (!webkit_gst_probe_dump_enabled_by_cmdline())
+        return;
+
     /* Wait a few probes so the media error has been logged, then dump once. */
     if (dumped || ++probe_calls < 5)
         return;
@@ -2034,6 +2109,85 @@ static void webkit_dump_gst_debug_evidence(void)
                 "[desktop] GST debug evidence scanned tail %ld/%ld bytes\n",
                 (long)max_scan, (long)st.st_size);
     dumped = 1;
+}
+
+static void webkit_dump_gst_debug_tail(const char *reason, int max_lines)
+{
+    enum { TAIL_BUF = 96 * 1024, LINE_MAX = 768 };
+    const off_t max_scan = 96 * 1024;
+    static char buf[TAIL_BUF + 1];
+    char line[LINE_MAX];
+    struct stat st;
+    int fd;
+    off_t start_off = 0;
+    ssize_t total = 0;
+    char *start;
+    char *end;
+    char *p;
+    int lines = 0;
+
+    if (max_lines <= 0 || max_lines > 256)
+        max_lines = 80;
+    if (stat("/tmp/gst-debug.log", &st) != 0 || st.st_size <= 0) {
+        fprintf(stderr,
+                "[desktop] GST tail unavailable reason=%s errno=%d (%s)\n",
+                reason ? reason : "(none)", errno, strerror(errno));
+        return;
+    }
+    fd = open("/tmp/gst-debug.log", O_RDONLY);
+    if (fd < 0) {
+        fprintf(stderr,
+                "[desktop] GST tail open failed reason=%s errno=%d (%s)\n",
+                reason ? reason : "(none)", errno, strerror(errno));
+        return;
+    }
+    if (st.st_size > max_scan) {
+        start_off = st.st_size - max_scan;
+        lseek(fd, start_off, SEEK_SET);
+    }
+    while (total < TAIL_BUF) {
+        ssize_t n = read(fd, buf + total, TAIL_BUF - (size_t)total);
+
+        if (n < 0) {
+            if (errno == EINTR)
+                continue;
+            break;
+        }
+        if (n == 0)
+            break;
+        total += n;
+    }
+    close(fd);
+    if (total <= 0)
+        return;
+    buf[total] = '\0';
+    end = buf + total;
+    start = buf;
+    for (p = end - 1; p >= buf; p--) {
+        if (*p == '\n' && ++lines > max_lines) {
+            start = p + 1;
+            break;
+        }
+    }
+
+    fprintf(stderr,
+            "[desktop] GST tail reason=%s bytes=%ld scanned=%ld lines=%d\n",
+            reason ? reason : "(none)", (long)st.st_size,
+            (long)total, lines < max_lines ? lines : max_lines);
+    while (start < end) {
+        size_t len = 0;
+
+        while (start < end && (*start == '\n' || *start == '\r'))
+            start++;
+        while (start < end && *start != '\n' && *start != '\r') {
+            if (len + 1 < sizeof(line))
+                line[len++] = *start;
+            start++;
+        }
+        line[len] = '\0';
+        if (len > 0)
+            fprintf(stderr, "[desktop] GSTTAIL: %s\n", line);
+    }
 }
 
 static void webkit_print_runtime_probe(void)
@@ -2095,7 +2249,7 @@ static int youtube_media_time_seconds(const char *media)
 {
     const char *p;
 
-    if (!media || !strstr(media, "timeupdate"))
+    if (!media)
         return -1;
     p = strstr(media, " t=");
     if (!p)
@@ -2104,6 +2258,39 @@ static int youtube_media_time_seconds(const char *media)
         return -1;
     p += p[1] == 't' ? 3 : 5;
     return atoi(p);
+}
+
+static int youtube_media_int_field(const char *media, const char *key,
+                                   int fallback)
+{
+    const char *p;
+    char *end = NULL;
+    long value;
+
+    if (!media || !key)
+        return fallback;
+    p = strstr(media, key);
+    if (!p)
+        return fallback;
+    p += strlen(key);
+    errno = 0;
+    value = strtol(p, &end, 10);
+    if (errno != 0 || end == p)
+        return fallback;
+    return (int)value;
+}
+
+static int youtube_media_fullscreen_rect_ok(const char *media)
+{
+    int iw = youtube_media_int_field(media, " iw=", 0);
+    int ih = youtube_media_int_field(media, " ih=", 0);
+    int sw = youtube_media_int_field(media, " sw=", 0);
+    int sh = youtube_media_int_field(media, " sh=", 0);
+
+    if (iw > 0 && ih > 0 && sw > 0 && sh > 0 && iw == sw && ih == sh)
+        return 1;
+    return strstr(media, " rect=0,40x1280x720 ") != NULL ||
+           strstr(media, " rect=0,0x1280x800 ") != NULL;
 }
 
 static void run_youtube_fbstat_capture(int seconds)
@@ -2153,6 +2340,45 @@ static void run_youtube_fbstat_capture(int seconds)
     fprintf(stderr,
             "[desktop] YouTube fbstat capture seconds=%s exit status=%d\n",
             seconds_buf, WIFEXITED(status) ? WEXITSTATUS(status) : status);
+    if (!youtube_fbstat_stats_enabled_by_cmdline())
+        return;
+
+    fprintf(stderr, "[desktop] YouTube fbstat stats seconds=%s\n",
+            seconds_buf);
+    pid = fork();
+    if (pid == 0) {
+        char *argv[] = {
+            "fbstat",
+            NULL,
+        };
+        char *envp[] = {
+            "HOME=/",
+            "PATH=/bin:/usr/bin",
+            NULL,
+        };
+
+        execve("/bin/fbstat", argv, envp);
+        fprintf(stderr, "fbstat: execve failed errno=%d (%s)\n", errno,
+                errno ? strerror(errno) : "no errno from kernel");
+        _exit(127);
+    }
+    if (pid < 0) {
+        fprintf(stderr,
+                "[desktop] YouTube fbstat stats fork failed errno=%d (%s)\n",
+                errno, errno ? strerror(errno) : "no errno from kernel");
+        return;
+    }
+    while (waitpid(pid, &status, 0) < 0) {
+        if (errno != EINTR) {
+            fprintf(stderr,
+                    "[desktop] YouTube fbstat stats wait failed errno=%d (%s)\n",
+                    errno, errno ? strerror(errno) : "no errno from kernel");
+            return;
+        }
+    }
+    fprintf(stderr,
+            "[desktop] YouTube fbstat stats seconds=%s exit status=%d\n",
+            seconds_buf, WIFEXITED(status) ? WEXITSTATUS(status) : status);
 }
 
 static void maybe_capture_youtube_playback_ppm(const char *media)
@@ -2160,8 +2386,14 @@ static void maybe_capture_youtube_playback_ppm(const char *media)
     static int captures;
     static int last_capture_seconds = -1;
     int seconds = youtube_media_time_seconds(media);
+    int capture_limit = youtube_fbstat_capture_limit_from_cmdline();
 
-    if (seconds < 1 || captures >= 3 || seconds <= last_capture_seconds)
+    if (capture_limit <= 0 || seconds < 7 || captures >= capture_limit ||
+        seconds <= last_capture_seconds)
+        return;
+    if (!strstr(media, " fs=1 ") || !strstr(media, " ytpFullscreen=1 ") ||
+        !strstr(media, " fsExited=0 ") ||
+        !youtube_media_fullscreen_rect_ok(media))
         return;
     captures++;
     last_capture_seconds = seconds;
@@ -2179,12 +2411,25 @@ static int webkit_log_line_is_evidence(const char *line)
            strstr(line, "xv6-webkit-skia:");
 }
 
+static void copy_log_fallback_line(char *dst, size_t dst_size, const char *src)
+{
+    size_t i;
+
+    if (dst_size == 0)
+        return;
+    for (i = 0; i + 1 < dst_size && src[i]; i++)
+        dst[i] = src[i];
+    dst[i] = '\0';
+}
+
 static void webkit_print_log_evidence(const char *reason)
 {
     int fd;
     char line[4096];
+    char fallback[8][256];
     size_t len = 0;
     int printed = 0;
+    int fallback_count = 0;
     char ch;
 
     fd = open("/tmp/webkit_log.txt", O_RDONLY);
@@ -2203,6 +2448,10 @@ static void webkit_print_log_evidence(const char *reason)
                         "[desktop] WebKit log evidence reason=%s: %s\n",
                         reason ? reason : "(none)", line);
                 printed = 1;
+            } else if (len > 0 && fallback_count < 8) {
+                copy_log_fallback_line(fallback[fallback_count],
+                                       sizeof(fallback[fallback_count]), line);
+                fallback_count++;
             }
             len = 0;
             continue;
@@ -2219,12 +2468,23 @@ static void webkit_print_log_evidence(const char *reason)
                     "[desktop] WebKit log evidence reason=%s: %s\n",
                     reason ? reason : "(none)", line);
             printed = 1;
+        } else if (fallback_count < 8) {
+            copy_log_fallback_line(fallback[fallback_count],
+                                   sizeof(fallback[fallback_count]), line);
+            fallback_count++;
         }
     }
     if (!printed) {
+        int i;
+
         fprintf(stderr,
                 "[desktop] WebKit log evidence reason=%s: no contract/title lines found\n",
                 reason ? reason : "(none)");
+        for (i = 0; i < fallback_count; i++) {
+            fprintf(stderr,
+                    "[desktop] WebKit log diagnostic reason=%s: %s\n",
+                    reason ? reason : "(none)", fallback[i]);
+        }
     }
 }
 
@@ -2473,8 +2733,12 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
         char webkit_gst_dmabuf_sink_disabled_env[44];
         char webkit_gst_use_videoconvert_env[48];
         char webkit_gst_debug_env[256] = "GST_DEBUG=1";
+        char webkit_gst_debug_value[224];
         char webkit_gst_feature_rank_env[96] = "GST_PLUGIN_FEATURE_RANK=";
+        char webkit_gst_max_avc1_resolution_env[48] =
+            "WEBKIT_GST_MAX_AVC1_RESOLUTION=720P";
         char webkit_youtube_probe_seconds_env[48];
+        char webkit_youtube_geometry_arg[40] = "--geometry=1280x800";
         char webkit_dmabuf_renderer_disable_gbm_env[48];
         char webkit_force_dmabuf_renderer_env[36];
         char webkit_virgl_force_loss_env[64] =
@@ -2491,12 +2755,26 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
         char mesa_perf_log_env[32] = "XV6_MESA_PERF_LOG=0";
         char mesa_client_perf_log_env[36] = "XV6_MESAWLEGL_PERF_LOG=0";
         char mesa_wayland_throttle_env[40] = "XV6_MESA_WAYLAND_THROTTLE=1";
-        char mesa_cmdline_buf[512];
+        char mesa_cmdline_buf[CMDLINE_BUF_MAX];
+        char webkit_cmdline_buf[CMDLINE_BUF_MAX];
         char mesa_size_arg[32];
         char mesa_present_arg[32];
         char mesa_render_arg[32];
         int mesa_capture = 0;
         int mesa_capture_seconds = 1;
+        int have_webkit_cmdline =
+            read_cmdline(webkit_cmdline_buf, sizeof(webkit_cmdline_buf)) == 0;
+        int webkit_gst_disable_vp9 =
+            have_webkit_cmdline ?
+                cmdline_int_value(webkit_cmdline_buf,
+                                  "webkit_gst_disable_vp9",
+                                  minibrowser_youtube_compat ? 1 : 0) :
+                (minibrowser_youtube_compat ? 1 : 0);
+        int webkit_gst_max_avc1_480p =
+            have_webkit_cmdline ?
+                cmdline_int_value(webkit_cmdline_buf,
+                                  "webkit_gst_max_avc1_480p", 0) :
+                0;
 
         mesa_size_arg[0] = '\0';
         mesa_present_arg[0] = '\0';
@@ -2527,9 +2805,6 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
         if (minibrowser_youtube_compat) {
             snprintf(webkit_gst_debug_env, sizeof(webkit_gst_debug_env),
                      "GST_DEBUG=2");
-            snprintf(webkit_gst_feature_rank_env,
-                     sizeof(webkit_gst_feature_rank_env),
-                     "GST_PLUGIN_FEATURE_RANK=vp9dec:0,avdec_vp9:0,avdec_av1:0");
             snprintf(webkit_require_gpu_contract_env,
                      sizeof(webkit_require_gpu_contract_env),
                      "WEBKIT_XV6_REQUIRE_GPU_CONTRACT=0");
@@ -2537,18 +2812,46 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
                      sizeof(webkit_force_compositing_mode_env),
                      "WEBKIT_XV6_FORCE_COMPOSITING_MODE=0");
         }
+        if (have_webkit_cmdline &&
+            cmdline_copy_value(webkit_cmdline_buf, "webkit_gst_debug",
+                               webkit_gst_debug_value,
+                               sizeof(webkit_gst_debug_value))) {
+            snprintf(webkit_gst_debug_env, sizeof(webkit_gst_debug_env),
+                     "GST_DEBUG=%s", webkit_gst_debug_value);
+            fprintf(stderr, "[desktop] WebKit GST debug override %s\n",
+                    webkit_gst_debug_env);
+        }
+        if (webkit_gst_disable_vp9)
+            snprintf(webkit_gst_feature_rank_env,
+                     sizeof(webkit_gst_feature_rank_env),
+                     "GST_PLUGIN_FEATURE_RANK=vp9dec:0,avdec_vp9:0,avdec_av1:0");
+        if (webkit_gst_max_avc1_480p)
+            snprintf(webkit_gst_max_avc1_resolution_env,
+                     sizeof(webkit_gst_max_avc1_resolution_env),
+                     "WEBKIT_GST_MAX_AVC1_RESOLUTION=480P");
         snprintf(webkit_youtube_probe_seconds_env,
                  sizeof(webkit_youtube_probe_seconds_env),
                  "XV6_WEBKIT_YOUTUBE_PROBE_SECONDS=%d",
                  webkit_youtube_probe_seconds_from_cmdline());
+        if (have_webkit_cmdline) {
+            const char *vid = strstr(webkit_cmdline_buf, "video=");
+            int vw, vh;
+
+            if (vid && sscanf(vid + 6, "%dx%d", &vw, &vh) == 2 &&
+                vw > 0 && vh > 0) {
+                snprintf(webkit_youtube_geometry_arg,
+                         sizeof(webkit_youtube_geometry_arg),
+                         "--geometry=%dx%d", vw, vh);
+            }
+        }
         snprintf(webkit_dmabuf_renderer_disable_gbm_env,
                  sizeof(webkit_dmabuf_renderer_disable_gbm_env),
-                 "WEBKIT_DMABUF_RENDERER_DISABLE_GBM=%d",
+                 "WEBKIT_DISABLE_DMABUF_RENDERER=%d",
                  webkit_gbm_enabled_by_cmdline() ? 0 : 1);
         snprintf(webkit_force_dmabuf_renderer_env,
                  sizeof(webkit_force_dmabuf_renderer_env),
-                 "WEBKIT_FORCE_DMABUF_RENDERER=%d",
-                 webkit_dmabuf_enabled_by_cmdline() ? 1 : 0);
+                 "WEBKIT_WEBGL_DISABLE_GBM=%d",
+                 webkit_gbm_enabled_by_cmdline() ? 0 : 1);
         if (is_mesa_gl &&
             read_cmdline(mesa_cmdline_buf, sizeof(mesa_cmdline_buf)) == 0) {
             mesa_capture =
@@ -2668,7 +2971,7 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
                      sizeof(webkit_virgl_sync_submit_env),
                      "XV6_VIRGL_SYNC_SUBMIT=%d",
                      cmdline_int_value(mesa_cmdline_buf,
-                                      "webkit_virgl_sync_submit", 0) != 0);
+                                      "webkit_virgl_sync_submit", 1) != 0);
         }
         snprintf(mesa_capture_env, sizeof(mesa_capture_env),
                  "XV6_MESAWLEGL_CAPTURE=%d", mesa_capture ? 1 : 0);
@@ -2700,6 +3003,7 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             (char *)name,
             "--autoplay-policy=allow",
             "--private",
+            webkit_youtube_geometry_arg,
             (char *)webkit_youtube_compat_user_agent,
             "--enable-sandbox=false",
             "--enable-webgl=false",
@@ -2733,6 +3037,7 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             (char *)name,
             "--autoplay-policy=allow",
             "--private",
+            webkit_youtube_geometry_arg,
             (char *)webkit_youtube_compat_user_agent,
             "--enable-sandbox=false",
             "--enable-webgl=false",
@@ -2766,6 +3071,7 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             (char *)name,
             "--autoplay-policy=allow",
             "--private",
+            webkit_youtube_geometry_arg,
             (char *)webkit_youtube_compat_user_agent,
             "--enable-sandbox=false",
             "--enable-webgl=false",
@@ -2799,6 +3105,7 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             (char *)name,
             "--autoplay-policy=allow",
             "--private",
+            webkit_youtube_geometry_arg,
             (char *)webkit_youtube_compat_user_agent,
             "--enable-sandbox=false",
             "--enable-webgl=true",
@@ -2832,6 +3139,7 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             (char *)name,
             "--autoplay-policy=allow",
             "--private",
+            webkit_youtube_geometry_arg,
             (char *)webkit_youtube_compat_user_agent,
             "--enable-sandbox=false",
             "--enable-webgl=true",
@@ -2907,7 +3215,7 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             webkit_gst_disable_gl_sink_env,
             webkit_gst_dmabuf_sink_disabled_env,
             webkit_gst_use_videoconvert_env,
-            "WEBKIT_GST_MAX_AVC1_RESOLUTION=720P",
+            webkit_gst_max_avc1_resolution_env,
             "WEBKIT_DISABLE_COMPOSITING_MODE=1",
             "WEBKIT_XV6_DISABLE_COMPOSITING_UPDATE=1",
             "LIBGL_ALWAYS_SOFTWARE=1",
@@ -2915,7 +3223,6 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             "LIBGL_DRIVERS_PATH=/lib/dri",
             "MESA_LOADER_DRIVER_OVERRIDE=swrast",
             "ANGLE_DEFAULT_PLATFORM=gl",
-            "EPOXY_XV6_ALLOW_MISSING=1",
             "WEBKIT_XV6_SKIP_RULE_FEATURES=1",
             "WEBKIT_XV6_SKIP_INITIAL_EMPTY_RENDER=1",
             "SOUP_FORCE_HTTP1=1",
@@ -2968,7 +3275,7 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             webkit_gst_disable_gl_sink_env,
             webkit_gst_dmabuf_sink_disabled_env,
             webkit_gst_use_videoconvert_env,
-            "WEBKIT_GST_MAX_AVC1_RESOLUTION=720P",
+            webkit_gst_max_avc1_resolution_env,
             webkit_dmabuf_renderer_disable_gbm_env,
             webkit_force_dmabuf_renderer_env,
             "WEBKIT_XV6_GPU_CONTRACT=virgl-opengl-submit",
@@ -2983,7 +3290,6 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             "XV6_WEBKIT_SKIA_NULL_MEMBER_RECOVER=1",
             "ANGLE_DEFAULT_PLATFORM=gl",
             "SOUP_FORCE_HTTP1=1",
-            "EPOXY_XV6_ALLOW_MISSING=1",
             NULL
         };
         /*
@@ -3055,7 +3361,6 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             "EGL_PLATFORM=wayland",
             "ANGLE_DEFAULT_PLATFORM=gl",
             "SOUP_FORCE_HTTP1=1",
-            "EPOXY_XV6_ALLOW_MISSING=1",
             NULL
         };
         char *envp_minibrowser_accel_sw[] = {
@@ -3105,7 +3410,7 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             webkit_gst_disable_gl_sink_env,
             webkit_gst_dmabuf_sink_disabled_env,
             webkit_gst_use_videoconvert_env,
-            "WEBKIT_GST_MAX_AVC1_RESOLUTION=720P",
+            webkit_gst_max_avc1_resolution_env,
             "LIBGL_ALWAYS_SOFTWARE=1",
             "EGL_PLATFORM=wayland",
             "LIBGL_DRIVERS_PATH=/lib/dri",
@@ -3114,7 +3419,6 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             "WEBKIT_XV6_DISABLE_BCG_SWITCH=1",
             "WEBKIT_XV6_SKIP_RULE_FEATURES=1",
             "SOUP_FORCE_HTTP1=1",
-            "EPOXY_XV6_ALLOW_MISSING=1",
             NULL
         };
         char *envp_minibrowser_dmabuf_sw[] = {
@@ -3167,7 +3471,6 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             "MESA_LOADER_DRIVER_OVERRIDE=swrast",
             "ANGLE_DEFAULT_PLATFORM=gl",
             "SOUP_FORCE_HTTP1=1",
-            "EPOXY_XV6_ALLOW_MISSING=1",
             NULL
         };
         char *envp_mesa_accel[] = {
@@ -3453,7 +3756,7 @@ static int glsmoke_fbstat_by_cmdline(void);
 
 static int glsmoke_fbstat_settle_ms_by_cmdline(void)
 {
-    char buf[512];
+    char buf[CMDLINE_BUF_MAX];
 
     if (read_cmdline(buf, sizeof(buf)) < 0)
         return 1200;
@@ -3463,7 +3766,7 @@ static int glsmoke_fbstat_settle_ms_by_cmdline(void)
 
 static int glsmoke_fbstat_wait_ms_by_cmdline(void)
 {
-    char buf[512];
+    char buf[CMDLINE_BUF_MAX];
 
     if (read_cmdline(buf, sizeof(buf)) < 0)
         return 5000;
@@ -3473,7 +3776,7 @@ static int glsmoke_fbstat_wait_ms_by_cmdline(void)
 
 static int glsmoke_seconds_target_by_cmdline(void)
 {
-    char buf[512];
+    char buf[CMDLINE_BUF_MAX];
     int seconds;
 
     if (read_cmdline(buf, sizeof(buf)) < 0)
@@ -3812,9 +4115,36 @@ static int cmdline_int_value(const char *cmdline, const char *key, int fallback)
     return fallback;
 }
 
+static int cmdline_copy_value(const char *cmdline, const char *key, char *dst,
+                              size_t dst_size)
+{
+    size_t key_len = strlen(key);
+    const char *p = cmdline;
+    size_t i;
+
+    if (!dst || dst_size == 0)
+        return 0;
+    dst[0] = '\0';
+    while (*p) {
+        while (*p == ' ' || *p == '\t' || *p == '\n')
+            p++;
+        if (strncmp(p, key, key_len) == 0 && p[key_len] == '=') {
+            p += key_len + 1;
+            for (i = 0; i + 1 < dst_size && p[i] && p[i] != ' ' &&
+                        p[i] != '\t' && p[i] != '\n'; i++)
+                dst[i] = p[i];
+            dst[i] = '\0';
+            return i > 0;
+        }
+        while (*p && *p != ' ' && *p != '\t' && *p != '\n')
+            p++;
+    }
+    return 0;
+}
+
 static int netsurf_disabled_by_cmdline(void)
 {
-    char buf[512];
+    char buf[CMDLINE_BUF_MAX];
 
     if (read_cmdline(buf, sizeof(buf)) < 0)
         return 0;
@@ -3824,7 +4154,7 @@ static int netsurf_disabled_by_cmdline(void)
 
 static int desktop_disabled_by_cmdline(void)
 {
-    char buf[512];
+    char buf[CMDLINE_BUF_MAX];
 
     if (read_cmdline(buf, sizeof(buf)) < 0)
         return 0;
@@ -3834,7 +4164,7 @@ static int desktop_disabled_by_cmdline(void)
 
 static int desktop_exit_after_smoke_by_cmdline(void)
 {
-    char buf[512];
+    char buf[CMDLINE_BUF_MAX];
 
     if (read_cmdline(buf, sizeof(buf)) < 0)
         return 0;
@@ -3842,9 +4172,19 @@ static int desktop_exit_after_smoke_by_cmdline(void)
     return cmdline_int_value(buf, "desktop_exit_after_smoke", 0) != 0;
 }
 
+static int weston_enabled_by_cmdline(void)
+{
+    char buf[4096];
+
+    if (read_cmdline(buf, sizeof(buf)) < 0)
+        return 0;
+
+    return token_is_enabled(buf, "weston");
+}
+
 static int webkit_enabled_by_cmdline(void)
 {
-    char buf[512];
+    char buf[CMDLINE_BUF_MAX];
 
     if (read_cmdline(buf, sizeof(buf)) < 0)
         return 0;
@@ -3854,7 +4194,7 @@ static int webkit_enabled_by_cmdline(void)
 
 static int webkit_accel_enabled_by_cmdline(void)
 {
-    char buf[512];
+    char buf[CMDLINE_BUF_MAX];
 
     if (read_cmdline(buf, sizeof(buf)) < 0)
         return 0;
@@ -3864,7 +4204,7 @@ static int webkit_accel_enabled_by_cmdline(void)
 
 static int webkit_dmabuf_enabled_by_cmdline(void)
 {
-    char buf[512];
+    char buf[CMDLINE_BUF_MAX];
 
     if (read_cmdline(buf, sizeof(buf)) < 0)
         return 0;
@@ -3874,7 +4214,7 @@ static int webkit_dmabuf_enabled_by_cmdline(void)
 
 static int webkit_gst_gl_enabled_by_cmdline(void)
 {
-    char buf[512];
+    char buf[CMDLINE_BUF_MAX];
 
     if (read_cmdline(buf, sizeof(buf)) < 0)
         return 0;
@@ -3884,7 +4224,7 @@ static int webkit_gst_gl_enabled_by_cmdline(void)
 
 static int webkit_gst_dmabuf_sink_enabled_by_cmdline(void)
 {
-    char buf[512];
+    char buf[CMDLINE_BUF_MAX];
 
     if (read_cmdline(buf, sizeof(buf)) < 0)
         return 0;
@@ -3894,7 +4234,7 @@ static int webkit_gst_dmabuf_sink_enabled_by_cmdline(void)
 
 static int webkit_gbm_enabled_by_cmdline(void)
 {
-    char buf[512];
+    char buf[CMDLINE_BUF_MAX];
 
     if (read_cmdline(buf, sizeof(buf)) < 0)
         return 0;
@@ -3904,7 +4244,7 @@ static int webkit_gbm_enabled_by_cmdline(void)
 
 static int webkit_gpu_smoke_enabled_by_cmdline(void)
 {
-    char buf[512];
+    char buf[CMDLINE_BUF_MAX];
 
     if (read_cmdline(buf, sizeof(buf)) < 0)
         return 0;
@@ -3914,7 +4254,7 @@ static int webkit_gpu_smoke_enabled_by_cmdline(void)
 
 static int webkit_webgl_smoke_enabled_by_cmdline(void)
 {
-    char buf[512];
+    char buf[CMDLINE_BUF_MAX];
 
     if (read_cmdline(buf, sizeof(buf)) < 0)
         return 0;
@@ -3924,7 +4264,7 @@ static int webkit_webgl_smoke_enabled_by_cmdline(void)
 
 static int webkit_api_smoke_enabled_by_cmdline(void)
 {
-    char buf[512];
+    char buf[CMDLINE_BUF_MAX];
 
     if (read_cmdline(buf, sizeof(buf)) < 0)
         return 0;
@@ -3934,7 +4274,7 @@ static int webkit_api_smoke_enabled_by_cmdline(void)
 
 static int webkit_http_smoke_enabled_by_cmdline(void)
 {
-    char buf[512];
+    char buf[CMDLINE_BUF_MAX];
 
     if (read_cmdline(buf, sizeof(buf)) < 0)
         return 0;
@@ -3944,7 +4284,7 @@ static int webkit_http_smoke_enabled_by_cmdline(void)
 
 static int webkit_coop_smoke_enabled_by_cmdline(void)
 {
-    char buf[512];
+    char buf[CMDLINE_BUF_MAX];
 
     if (read_cmdline(buf, sizeof(buf)) < 0)
         return 0;
@@ -3954,7 +4294,7 @@ static int webkit_coop_smoke_enabled_by_cmdline(void)
 
 static int webkit_js_smoke_enabled_by_cmdline(void)
 {
-    char buf[512];
+    char buf[CMDLINE_BUF_MAX];
 
     if (read_cmdline(buf, sizeof(buf)) < 0)
         return 0;
@@ -3964,7 +4304,7 @@ static int webkit_js_smoke_enabled_by_cmdline(void)
 
 static int webkit_youtube_boot_smoke_enabled_by_cmdline(void)
 {
-    char buf[512];
+    char buf[CMDLINE_BUF_MAX];
 
     if (read_cmdline(buf, sizeof(buf)) < 0)
         return 0;
@@ -3974,7 +4314,7 @@ static int webkit_youtube_boot_smoke_enabled_by_cmdline(void)
 
 static int webkit_youtube_waterfall_smoke_enabled_by_cmdline(void)
 {
-    char buf[512];
+    char buf[CMDLINE_BUF_MAX];
 
     if (read_cmdline(buf, sizeof(buf)) < 0)
         return 0;
@@ -3984,7 +4324,7 @@ static int webkit_youtube_waterfall_smoke_enabled_by_cmdline(void)
 
 static int webkit_youtube_compat_disabled_by_cmdline(void)
 {
-    char buf[512];
+    char buf[CMDLINE_BUF_MAX];
 
     if (read_cmdline(buf, sizeof(buf)) < 0)
         return 0;
@@ -3994,7 +4334,7 @@ static int webkit_youtube_compat_disabled_by_cmdline(void)
 
 static int webkit_youtube_probe_seconds_from_cmdline(void)
 {
-    char buf[512];
+    char buf[CMDLINE_BUF_MAX];
     int seconds = 180;
 
     if (read_cmdline(buf, sizeof(buf)) == 0)
@@ -4007,9 +4347,41 @@ static int webkit_youtube_probe_seconds_from_cmdline(void)
     return seconds;
 }
 
+static int youtube_fbstat_capture_limit_from_cmdline(void)
+{
+    char buf[CMDLINE_BUF_MAX];
+    int count = 3;
+
+    if (read_cmdline(buf, sizeof(buf)) == 0)
+        count = cmdline_int_value(buf, "youtube_fbstat_captures", count);
+    if (count < 0)
+        count = 0;
+    if (count > 8)
+        count = 8;
+    return count;
+}
+
+static int youtube_fbstat_stats_enabled_by_cmdline(void)
+{
+    char buf[CMDLINE_BUF_MAX];
+
+    if (read_cmdline(buf, sizeof(buf)) < 0)
+        return 1;
+    return cmdline_int_value(buf, "youtube_fbstat_stats", 1) != 0;
+}
+
+static int webkit_gst_probe_dump_enabled_by_cmdline(void)
+{
+    char buf[CMDLINE_BUF_MAX];
+
+    if (read_cmdline(buf, sizeof(buf)) < 0)
+        return 1;
+    return cmdline_int_value(buf, "webkit_gst_probe_dump", 1) != 0;
+}
+
 static int webkit_request_idle_disabled_by_cmdline(void)
 {
-    char buf[512];
+    char buf[CMDLINE_BUF_MAX];
 
     if (read_cmdline(buf, sizeof(buf)) < 0)
         return 0;
@@ -4019,7 +4391,7 @@ static int webkit_request_idle_disabled_by_cmdline(void)
 
 static int webkit_logging_enabled_by_cmdline(void)
 {
-    char buf[512];
+    char buf[CMDLINE_BUF_MAX];
 
     if (read_cmdline(buf, sizeof(buf)) < 0)
         return 0;
@@ -4030,7 +4402,7 @@ static int webkit_logging_enabled_by_cmdline(void)
 
 static int webkit_feature_gate_smoke_enabled_by_cmdline(void)
 {
-    char buf[512];
+    char buf[CMDLINE_BUF_MAX];
 
     if (read_cmdline(buf, sizeof(buf)) < 0)
         return 0;
@@ -4040,7 +4412,7 @@ static int webkit_feature_gate_smoke_enabled_by_cmdline(void)
 
 static int webkit_idle_browse_smoke_enabled_by_cmdline(void)
 {
-    char buf[512];
+    char buf[CMDLINE_BUF_MAX];
 
     if (read_cmdline(buf, sizeof(buf)) < 0)
         return 0;
@@ -4050,7 +4422,7 @@ static int webkit_idle_browse_smoke_enabled_by_cmdline(void)
 
 static int webkit_compat_gate_smoke_enabled_by_cmdline(void)
 {
-    char buf[512];
+    char buf[CMDLINE_BUF_MAX];
 
     if (read_cmdline(buf, sizeof(buf)) < 0)
         return 0;
@@ -4060,7 +4432,7 @@ static int webkit_compat_gate_smoke_enabled_by_cmdline(void)
 
 static int webkit_js_disabled_by_cmdline(void)
 {
-    char buf[512];
+    char buf[CMDLINE_BUF_MAX];
 
     if (read_cmdline(buf, sizeof(buf)) < 0)
         return 0;
@@ -4070,7 +4442,7 @@ static int webkit_js_disabled_by_cmdline(void)
 
 static int webkit_disable_gdk_gl_by_cmdline(void)
 {
-    char buf[512];
+    char buf[CMDLINE_BUF_MAX];
 
     if (read_cmdline(buf, sizeof(buf)) < 0)
         return 0;
@@ -4080,7 +4452,7 @@ static int webkit_disable_gdk_gl_by_cmdline(void)
 
 static int webkit_reopen_count_from_cmdline(void)
 {
-    char buf[512];
+    char buf[CMDLINE_BUF_MAX];
     int count = 1;
 
     if (read_cmdline(buf, sizeof(buf)) == 0)
@@ -4094,7 +4466,7 @@ static int webkit_reopen_count_from_cmdline(void)
 
 static int webkit_timeout_ms_from_cmdline(int fallback)
 {
-    char buf[512];
+    char buf[CMDLINE_BUF_MAX];
     int timeout_ms = fallback;
 
     if (read_cmdline(buf, sizeof(buf)) == 0) {
@@ -4274,7 +4646,7 @@ static void webkit_url_from_cmdline(char *out, size_t out_size)
 
 static int glsmoke_enabled_by_cmdline(void)
 {
-    char buf[512];
+    char buf[CMDLINE_BUF_MAX];
 
     if (read_cmdline(buf, sizeof(buf)) < 0)
         return 0;
@@ -4285,7 +4657,7 @@ static int glsmoke_enabled_by_cmdline(void)
 
 static int glsmoke_compat_by_cmdline(void)
 {
-    char buf[512];
+    char buf[CMDLINE_BUF_MAX];
 
     if (read_cmdline(buf, sizeof(buf)) < 0)
         return 0;
@@ -4295,7 +4667,7 @@ static int glsmoke_compat_by_cmdline(void)
 
 static int glsmoke_native_by_cmdline(void)
 {
-    char buf[512];
+    char buf[CMDLINE_BUF_MAX];
 
     if (read_cmdline(buf, sizeof(buf)) < 0)
         return 0;
@@ -4305,7 +4677,7 @@ static int glsmoke_native_by_cmdline(void)
 
 static int glsmoke_demo_by_cmdline(void)
 {
-    char buf[512];
+    char buf[CMDLINE_BUF_MAX];
 
     if (read_cmdline(buf, sizeof(buf)) < 0)
         return 0;
@@ -4315,7 +4687,7 @@ static int glsmoke_demo_by_cmdline(void)
 
 static int glsmoke_second_by_cmdline(void)
 {
-    char buf[512];
+    char buf[CMDLINE_BUF_MAX];
 
     if (read_cmdline(buf, sizeof(buf)) < 0)
         return 0;
@@ -4325,7 +4697,7 @@ static int glsmoke_second_by_cmdline(void)
 
 static int glsmoke_second_demo_by_cmdline(void)
 {
-    char buf[512];
+    char buf[CMDLINE_BUF_MAX];
 
     if (read_cmdline(buf, sizeof(buf)) < 0)
         return 0;
@@ -4335,7 +4707,7 @@ static int glsmoke_second_demo_by_cmdline(void)
 
 static int glsmoke_fbstat_by_cmdline(void)
 {
-    char buf[512];
+    char buf[CMDLINE_BUF_MAX];
 
     if (read_cmdline(buf, sizeof(buf)) < 0)
         return 0;
@@ -4345,7 +4717,7 @@ static int glsmoke_fbstat_by_cmdline(void)
 
 static int gpu_validate_enabled_by_cmdline(void)
 {
-    char buf[512];
+    char buf[CMDLINE_BUF_MAX];
 
     if (read_cmdline(buf, sizeof(buf)) < 0)
         return 0;
@@ -4355,7 +4727,7 @@ static int gpu_validate_enabled_by_cmdline(void)
 
 static int glmaze_enabled_by_cmdline(void)
 {
-    char buf[512];
+    char buf[CMDLINE_BUF_MAX];
 
     if (read_cmdline(buf, sizeof(buf)) < 0)
         return 0;
@@ -4365,7 +4737,7 @@ static int glmaze_enabled_by_cmdline(void)
 
 static void glmaze_args_from_cmdline(char *seconds_arg, size_t seconds_size)
 {
-    char buf[512];
+    char buf[CMDLINE_BUF_MAX];
     int seconds = 4;
 
     if (read_cmdline(buf, sizeof(buf)) == 0)
@@ -4381,7 +4753,7 @@ static void glsmoke_args_from_cmdline(char *seconds_arg, size_t seconds_size,
                                       char *loops_arg, size_t loops_size,
                                       char *resize_arg, size_t resize_size)
 {
-    char buf[512];
+    char buf[CMDLINE_BUF_MAX];
     int loops = 1;
     int resize_seconds = 0;
     int seconds = 0;
@@ -4406,6 +4778,9 @@ static void glsmoke_args_from_cmdline(char *seconds_arg, size_t seconds_size,
 
 int main(void)
 {
+    int use_weston;
+    const char *compositor_name;
+
     install_signal_handlers();
 
     if (desktop_disabled_by_cmdline()) {
@@ -4414,14 +4789,17 @@ int main(void)
     }
 
     fprintf(stderr, "[desktop] starting Wayland session\n");
+    use_weston = weston_enabled_by_cmdline();
+    compositor_name = use_weston ? "weston" : "wlcomp";
 
     /* 1. Launch compositor */
-    wlcomp_pid = launch_wlcomp();
+    wlcomp_pid = use_weston ? launch_weston() : launch_wlcomp();
     if (wlcomp_pid < 0) {
-        perror("[desktop] fork wlcomp");
+        fprintf(stderr, "[desktop] fork %s failed: %s\n", compositor_name,
+                strerror(errno));
         return 1;
     }
-    fprintf(stderr, "[desktop] wlcomp pid=%d\n", wlcomp_pid);
+    fprintf(stderr, "[desktop] %s pid=%d\n", compositor_name, wlcomp_pid);
 
     /* 2. Wait for Wayland socket */
     if (wait_for_socket() < 0) {
@@ -4770,6 +5148,7 @@ int main(void)
                         client_pid);
                 if (webkit_api_smoke)
                     webkit_print_log_evidence("watchdog-before-close");
+                webkit_dump_gst_debug_tail("watchdog-before-close", 80);
                 kill_and_reap(&client_pid);
                 if (webkit_reopen_left > 1) {
                     webkit_reopen_left--;

@@ -213,6 +213,7 @@ static void toplevel_set_maximized(struct wl_client *c, struct wl_resource *r)
     surf->saved_y = surf->y;
     surf->saved_w = gw > 0 ? gw : 400;
     surf->saved_h = gh > 0 ? gh : 300;
+    surf->fullscreen = 0;
     surf->maximized = 1;
 
     /* Send configure with MAXIMIZED + ACTIVATED, full screen minus taskbar */
@@ -272,13 +273,93 @@ static void toplevel_set_fullscreen(struct wl_client *c, struct wl_resource *r,
                                     struct wl_resource *output)
 {
     (void)c; (void)output;
-    /* Treat fullscreen same as maximize for now */
-    toplevel_set_maximized(c, r);
+    struct wlcomp_surface *surf = wl_resource_get_user_data(r);
+    int32_t gx, gy, gw, gh;
+    int32_t cw, ch;
+    struct wl_array states;
+    uint32_t *s;
+
+    if (!surf || !surf->xdg_surface || !surf->xdg_toplevel)
+        return;
+
+    if (!surf->fullscreen) {
+        surface_window_geometry(surf, &gx, &gy, &gw, &gh);
+        (void)gx;
+        (void)gy;
+    } else {
+        gw = surf->saved_w;
+        gh = surf->saved_h;
+    }
+    cancel_surface_grab(surf);
+    damage_surface(surf);
+    if (!surf->fullscreen) {
+        surf->saved_x = surf->x;
+        surf->saved_y = surf->y;
+        surf->saved_w = gw > 0 ? gw : 400;
+        surf->saved_h = gh > 0 ? gh : 300;
+    }
+    surf->fullscreen = 1;
+    surf->maximized = 0;
+
+    cw = fullscreen_configure_w(surf);
+    ch = fullscreen_configure_h(surf);
+
+    wl_array_init(&states);
+    s = wl_array_add(&states, sizeof(uint32_t));
+    *s = XDG_TOPLEVEL_STATE_FULLSCREEN;
+    s = wl_array_add(&states, sizeof(uint32_t));
+    *s = XDG_TOPLEVEL_STATE_ACTIVATED;
+    fprintf(stderr,
+            "wlcomp: xdg set_fullscreen pid=%d serial=%u configure=%dx%d target=%ux%u restore=%dx%d\n",
+            surf->client_pid, g_serial + 1, cw, ch, g_fb_w, g_fb_h,
+            surf->saved_w, surf->saved_h);
+    xdg_toplevel_send_configure(surf->xdg_toplevel, cw, ch, &states);
+    wl_array_release(&states);
+    xdg_surface_send_configure(surf->xdg_surface, ++g_serial);
+    surf->fullscreen_configure_serial = g_serial;
+    surf->fullscreen_refine_sent = 0;
+
+    surf->x = 0;
+    surf->y = 0;
+    damage_surface(surf);
 }
 
 static void toplevel_unset_fullscreen(struct wl_client *c, struct wl_resource *r)
 {
-    toplevel_unset_maximized(c, r);
+    (void)c;
+    struct wlcomp_surface *surf = wl_resource_get_user_data(r);
+    int32_t rw;
+    int32_t rh;
+    struct wl_array states;
+    uint32_t *s;
+
+    if (!surf || !surf->xdg_surface || !surf->xdg_toplevel)
+        return;
+    if (!surf->fullscreen)
+        return;
+
+    cancel_surface_grab(surf);
+    damage_surface(surf);
+    surf->fullscreen = 0;
+    surf->fullscreen_configure_serial = 0;
+    surf->fullscreen_refine_sent = 0;
+
+    rw = surf->saved_w > 0 ? surf->saved_w : work_area_w() * 4 / 5;
+    rh = surf->saved_h > 0 ? surf->saved_h : work_area_h() * 4 / 5;
+    surf->x = surf->saved_x;
+    surf->y = surf->saved_y;
+
+    wl_array_init(&states);
+    s = wl_array_add(&states, sizeof(uint32_t));
+    if (s)
+        *s = XDG_TOPLEVEL_STATE_ACTIVATED;
+    fprintf(stderr,
+            "wlcomp: xdg unset_fullscreen pid=%d serial=%u restore=%dx%d at=%d,%d\n",
+            surf->client_pid, g_serial + 1, rw, rh, surf->x, surf->y);
+    xdg_toplevel_send_configure(surf->xdg_toplevel, rw, rh, &states);
+    wl_array_release(&states);
+    xdg_surface_send_configure(surf->xdg_surface, ++g_serial);
+    damage_surface(surf);
 }
 
 static void toplevel_set_minimized(struct wl_client *c, struct wl_resource *r)
@@ -463,6 +544,30 @@ static void xdg_surface_ack_configure(struct wl_client *c,
         surf->demo_resize_configures > 0) {
         surf->demo_resize_acked = 1;
         wlcomp_emit_demo_interaction_matrix(surf, "resize-ack");
+    }
+    if (surf && surf->fullscreen && surf->xdg_surface &&
+        surf->xdg_toplevel && !surf->fullscreen_refine_sent &&
+        serial == surf->fullscreen_configure_serial) {
+        struct wl_array states;
+        uint32_t *s;
+        int32_t cw = fullscreen_configure_w(surf);
+        int32_t ch = fullscreen_configure_h(surf);
+
+        wl_array_init(&states);
+        s = wl_array_add(&states, sizeof(uint32_t));
+        if (s)
+            *s = XDG_TOPLEVEL_STATE_FULLSCREEN;
+        s = wl_array_add(&states, sizeof(uint32_t));
+        if (s)
+            *s = XDG_TOPLEVEL_STATE_ACTIVATED;
+        fprintf(stderr,
+                "wlcomp: xdg refine_fullscreen pid=%d serial=%u configure=%dx%d\n",
+                surf->client_pid, g_serial + 1, cw, ch);
+        xdg_toplevel_send_configure(surf->xdg_toplevel, cw, ch, &states);
+        wl_array_release(&states);
+        xdg_surface_send_configure(surf->xdg_surface, ++g_serial);
+        surf->fullscreen_configure_serial = g_serial;
+        surf->fullscreen_refine_sent = 1;
     }
 }
 

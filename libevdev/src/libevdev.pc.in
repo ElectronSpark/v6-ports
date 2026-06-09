@@ -1,0 +1,10 @@
+prefix=/
+exec_prefix=${prefix}
+libdir=${prefix}/lib
+includedir=${prefix}/include
+
+Name: libevdev
+Description: xv6 libevdev compatibility package
+Version: 1.13.4
+Libs: -L${libdir} -levdev
+Cflags: -I${includedir}

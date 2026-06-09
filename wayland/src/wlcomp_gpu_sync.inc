@@ -1989,6 +1989,8 @@ static void xv6_gpu_create_buffer_common(struct wl_client *client,
         gid_t client_gid = 0;
         wl_client_get_credentials(client, &client_pid, &client_uid,
                                   &client_gid);
+        buf->client_pid = client_pid;
+        buffer_register(buf);
         fprintf(stderr,
                 "wlcomp: xv6gpu buffer pid=%d size=%dx%d stride=%d fmt=0x%x handle=%u\n",
                 client_pid, width, height, stride, format, handle);
@@ -6023,6 +6025,7 @@ static void xv6_gpu_create_d3d12_resource_buffer_common(
     buf->is_d3d12_shared = 1;
     buf->d3d12_dxg_fd = -1;
     buf->d3d12_client_pid = client_pid;
+    buf->client_pid = client_pid;
     buf->d3d12_client_buffer_id = id;
     buf->d3d12_manager_resource_id = manager_resource_id;
     snprintf(buf->d3d12_client_run_id, sizeof(buf->d3d12_client_run_id),
@@ -6150,6 +6153,8 @@ static void xv6_gpu_create_d3d12_resource_buffer_common(
                                    buffer_destroy_handler);
     wl_client_get_credentials(client, &client_pid, &client_uid,
                               &client_gid);
+    buf->client_pid = client_pid;
+    buffer_register(buf);
     g_d3d12_resource_protocol_accept_count++;
     fprintf(stderr,
             "wlcomp: d3d12 shared buffer protocol accepted d3d12_protocol_accepts=%lu run_id=%s pid=%d manager_resource_id=%u client_buffer_id=%u buffer_generation=%lu size=%dx%d fmt=0x%x allocations=%u total_priv=%u fd=%d fence=%d source_luid=%08x:%08x matched_luid=%08x:%08x opened_resource=0x%x opened_fence=0x%x fence_cpu=0x%lx fence_gpu=0x%lx acquire_import=%s import_attempts=%lu import_completes=%lu\n",

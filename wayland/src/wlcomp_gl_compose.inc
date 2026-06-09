@@ -116,18 +116,26 @@ static int wlcomp_gl_compose_enabled(void)
 
     if (!initialized) {
         const char *env = getenv("XV6_WLCOMP_GL_COMPOSE");
-        int default_enabled = g_fb_virgl_backed;
+        int configured = cmdline_int_value("wlcomp_gl_compose", -1);
+        int pageflip_diag = cmdline_int_value("wlcomp_pageflip_diag", 0) != 0;
 
-        if (cmdline_int_value("wlcomp_pageflip_diag", 0) != 0)
-            default_enabled = 0;
-        g_gl_compose.enabled =
-            cmdline_int_value("wlcomp_gl_compose", default_enabled) != 0;
-        if (env && env[0])
+        if (env && env[0]) {
             g_gl_compose.enabled =
                 strcmp(env, "0") != 0 &&
                 strcmp(env, "no") != 0 && strcmp(env, "false") != 0 &&
                 strcmp(env, "off") != 0;
-        initialized = 1;
+            initialized = 1;
+        } else if (configured >= 0) {
+            g_gl_compose.enabled = configured != 0;
+            initialized = 1;
+        } else if (pageflip_diag) {
+            g_gl_compose.enabled = 0;
+            initialized = 1;
+        } else {
+            g_gl_compose.enabled = g_fb_virgl_backed;
+            if (g_fb_virgl_backed)
+                initialized = 1;
+        }
     }
     return g_gl_compose.enabled;
 }
@@ -421,6 +429,28 @@ static int wlcomp_gl_compose_buffer_release_ready(struct wlcomp_buffer *buf)
     return 0;
 }
 
+static int wlcomp_gl_compose_wait_buffer_release(struct wlcomp_buffer *buf,
+                                                 uint64_t wait_us)
+{
+    GLenum status;
+
+    if (!buf || !buf->gl_release_sync)
+        return 1;
+    if (!wlcomp_gl_compose_ensure_sync_funcs())
+        return 0;
+
+    status = g_gl_compose.client_wait_sync(
+        (GLsync)buf->gl_release_sync, GL_SYNC_FLUSH_COMMANDS_BIT,
+        (GLuint64)wait_us * 1000ULL);
+    if (status == GL_ALREADY_SIGNALED ||
+        status == GL_CONDITION_SATISFIED ||
+        status == GL_WAIT_FAILED) {
+        wlcomp_gl_compose_clear_release_sync(buf);
+        return 1;
+    }
+    return 0;
+}
+
 static void wlcomp_gl_compose_wait_draw_fence(void)
 {
     int wait_us = wlcomp_gl_compose_fence_wait_us();
@@ -514,8 +544,7 @@ static int wlcomp_gl_compose_target_warmup_read_enabled(void)
     if (initialized)
         return enabled;
     initialized = 1;
-    enabled = cmdline_int_value("wlcomp_gl_target_warmup_read",
-                                wlcomp_async_scanout_submit_enabled() ? 1 : 0) != 0;
+    enabled = cmdline_int_value("wlcomp_gl_target_warmup_read", 0) != 0;
     env = getenv("XV6_WLCOMP_GL_TARGET_WARMUP_READ");
     if (env && *env)
         enabled = strcmp(env, "0") != 0 &&
@@ -532,7 +561,9 @@ static void wlcomp_gl_compose_warmup_target_read(int x, int gl_y,
                                                  int w, int h)
 {
     struct wlcomp_gl_compose_target *target = NULL;
-    uint32_t pixel = 0;
+    struct drm_virtgpu_3d_transfer_compat transfer;
+    struct drm_virtgpu_3d_wait_compat wait_req;
+    uint32_t offset;
     int sample_x;
     int sample_y;
     static int logs;
@@ -568,14 +599,38 @@ static void wlcomp_gl_compose_warmup_target_read(int x, int gl_y,
     if (sample_x < 0 || sample_y < 0)
         return;
 
-    glReadPixels(sample_x, sample_y, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE,
-                 &pixel);
+    if (g_gl_compose.drm_fd < 0 || g_fb_pitch == 0)
+        return;
+    offset = (uint32_t)((uint32_t)sample_y * g_fb_pitch +
+                        (uint32_t)sample_x * 4u);
+    if ((uint64_t)offset + 4u >
+        (uint64_t)g_fb_pitch * (uint64_t)g_fb_h)
+        return;
+
+    memset(&transfer, 0, sizeof(transfer));
+    transfer.bo_handle = target->handle;
+    transfer.box.x = (uint32_t)sample_x;
+    transfer.box.y = (uint32_t)sample_y;
+    transfer.box.w = 1;
+    transfer.box.h = 1;
+    transfer.box.d = 1;
+    transfer.offset = offset;
+    transfer.stride = g_fb_pitch;
+    transfer.layer_stride = g_fb_pitch * g_fb_h;
+    if (ioctl(g_gl_compose.drm_fd, DRM_IOCTL_VIRTGPU_TRANSFER_FROM_HOST,
+              &transfer) != 0)
+        return;
+
+    memset(&wait_req, 0, sizeof(wait_req));
+    wait_req.handle = target->handle;
+    if (ioctl(g_gl_compose.drm_fd, DRM_IOCTL_VIRTGPU_WAIT, &wait_req) != 0)
+        return;
+
     target->warmup_done = 1;
     if (logs < 8) {
         fprintf(stderr,
-                "wlcomp: gl-compose target warmup read handle=%u tex=%u sample=%d,%d pixel=0x%08x\n",
-                target->handle, target->texture, sample_x, sample_y,
-                pixel);
+                "wlcomp: gl-compose target warmup read handle=%u tex=%u sample=%d,%d\n",
+                target->handle, target->texture, sample_x, sample_y);
         logs++;
     }
 }
@@ -926,6 +981,8 @@ static int wlcomp_gl_compose_init(void)
 
 static void wlcomp_gl_compose_destroy_buffer(struct wlcomp_buffer *buf)
 {
+    int destroyed = 0;
+
     if (!buf)
         return;
     wlcomp_gl_compose_clear_release_sync(buf);
@@ -939,11 +996,18 @@ static void wlcomp_gl_compose_destroy_buffer(struct wlcomp_buffer *buf)
 
         glDeleteTextures(1, &tex);
         buf->gl_texture = 0;
+        destroyed = 1;
     }
     if (buf->gl_egl_image) {
         g_gl_compose.destroy_image(g_gl_compose.display,
                                    (EGLImageKHR)buf->gl_egl_image);
         buf->gl_egl_image = NULL;
+        destroyed = 1;
+    }
+    if (destroyed) {
+        buf->gl_import_tried = 0;
+        buf->gl_import_ready = 0;
+        glFinish();
     }
 }
 
@@ -998,7 +1062,60 @@ static void wlcomp_gl_compose_destroy_target(void)
     g_gl_compose.fbo_complete = 0;
 }
 
-static int wlcomp_gl_compose_import_target(void)
+static void wlcomp_gl_compose_reset(void)
+{
+    struct wlcomp_buffer *buf;
+    int enabled;
+
+    if (!g_gl_compose.initialized)
+        return;
+    enabled = g_gl_compose.enabled;
+
+    if (g_gl_compose.available &&
+        eglMakeCurrent(g_gl_compose.display, g_gl_compose.surface,
+                       g_gl_compose.surface, g_gl_compose.context)) {
+        wl_list_for_each(buf, &g_buffers, link)
+            wlcomp_gl_compose_destroy_buffer(buf);
+        wlcomp_gl_compose_destroy_target();
+        if (g_gl_compose.target_texture)
+            glDeleteTextures(1, &g_gl_compose.target_texture);
+        if (g_gl_compose.color_tex)
+            glDeleteTextures(1, &g_gl_compose.color_tex);
+        if (g_gl_compose.fbo)
+            glDeleteFramebuffers(1, &g_gl_compose.fbo);
+        if (g_gl_compose.vbo)
+            glDeleteBuffers(1, &g_gl_compose.vbo);
+        if (g_gl_compose.program)
+            glDeleteProgram(g_gl_compose.program);
+        if (g_gl_compose.external_program)
+            glDeleteProgram(g_gl_compose.external_program);
+        glFinish();
+    }
+
+    if (g_gl_compose.display != EGL_NO_DISPLAY) {
+        eglMakeCurrent(g_gl_compose.display, EGL_NO_SURFACE, EGL_NO_SURFACE,
+                       EGL_NO_CONTEXT);
+        if (g_gl_compose.context != EGL_NO_CONTEXT)
+            eglDestroyContext(g_gl_compose.display, g_gl_compose.context);
+        if (g_gl_compose.surface != EGL_NO_SURFACE)
+            eglDestroySurface(g_gl_compose.display, g_gl_compose.surface);
+        eglTerminate(g_gl_compose.display);
+    }
+    if (g_gl_compose.gbm)
+        gbm_device_destroy(g_gl_compose.gbm);
+    if (g_gl_compose.drm_fd >= 0)
+        close(g_gl_compose.drm_fd);
+
+    memset(&g_gl_compose, 0, sizeof(g_gl_compose));
+    g_gl_compose.enabled = enabled;
+    g_gl_compose.display = EGL_NO_DISPLAY;
+    g_gl_compose.context = EGL_NO_CONTEXT;
+    g_gl_compose.surface = EGL_NO_SURFACE;
+    g_gl_compose.drm_fd = -1;
+}
+
+static int wlcomp_gl_compose_import_target_handle(uint32_t handle,
+                                                  uint32_t resource_id)
 {
     struct fb_gpu_bo_export_fd export_fd;
     EGLImageKHR image;
@@ -1010,7 +1127,7 @@ static int wlcomp_gl_compose_import_target(void)
     static int next_target_slot;
     static int target_logs;
 
-    if (!g_fb_virgl_backed || g_fb_bo_handle == 0 ||
+    if (!g_fb_virgl_backed || handle == 0 ||
         g_fb_w == 0 || g_fb_h == 0 || g_fb_pitch == 0)
         return 0;
     if (!wlcomp_gl_compose_init())
@@ -1020,7 +1137,7 @@ static int wlcomp_gl_compose_import_target(void)
         return 0;
 
     if (g_gl_compose.target_texture &&
-        g_gl_compose.target_handle == g_fb_bo_handle &&
+        g_gl_compose.target_handle == handle &&
         g_gl_compose.target_width == g_fb_w &&
         g_gl_compose.target_height == g_fb_h)
         return 1;
@@ -1029,7 +1146,7 @@ static int wlcomp_gl_compose_import_target(void)
         struct wlcomp_gl_compose_target *target =
             &g_gl_compose.target_cache[i];
 
-        if (target->texture && target->handle == g_fb_bo_handle &&
+        if (target->texture && target->handle == handle &&
             target->width == g_fb_w && target->height == g_fb_h) {
             g_gl_compose.target_texture = target->texture;
             g_gl_compose.target_egl_image = target->egl_image;
@@ -1054,14 +1171,14 @@ static int wlcomp_gl_compose_import_target(void)
     }
 
     memset(&export_fd, 0, sizeof(export_fd));
-    export_fd.handle = g_fb_bo_handle;
+    export_fd.handle = handle;
     export_fd.fd = -1;
     if (ioctl(g_fb_fd, FB_GPU_BO_EXPORT_FD, &export_fd) != 0 ||
         export_fd.fd < 0) {
         if (target_logs < 8) {
             fprintf(stderr,
                     "wlcomp: gl-compose target export failed handle=%u errno=%d (%s)\n",
-                    g_fb_bo_handle, errno, strerror(errno));
+                    handle, errno, strerror(errno));
             target_logs++;
         }
         return 0;
@@ -1094,7 +1211,7 @@ static int wlcomp_gl_compose_import_target(void)
         if (target_logs < 8) {
             fprintf(stderr,
                     "wlcomp: gl-compose target eglCreateImage failed handle=%u size=%ux%u pitch=%u error=0x%x\n",
-                    g_fb_bo_handle, g_fb_w, g_fb_h, g_fb_pitch,
+                    handle, g_fb_w, g_fb_h, g_fb_pitch,
                     eglGetError());
             target_logs++;
         }
@@ -1124,12 +1241,12 @@ static int wlcomp_gl_compose_import_target(void)
     }
 
     g_gl_compose.target_egl_image = image;
-    g_gl_compose.target_handle = g_fb_bo_handle;
+    g_gl_compose.target_handle = handle;
     g_gl_compose.target_width = g_fb_w;
     g_gl_compose.target_height = g_fb_h;
     g_gl_compose.target_cache[target_slot].egl_image = image;
     g_gl_compose.target_cache[target_slot].texture = g_gl_compose.target_texture;
-    g_gl_compose.target_cache[target_slot].handle = g_fb_bo_handle;
+    g_gl_compose.target_cache[target_slot].handle = handle;
     g_gl_compose.target_cache[target_slot].width = g_fb_w;
     g_gl_compose.target_cache[target_slot].height = g_fb_h;
     g_gl_compose.target_cache[target_slot].warmup_done = 0;
@@ -1138,11 +1255,60 @@ static int wlcomp_gl_compose_import_target(void)
     if (target_logs < 8) {
         fprintf(stderr,
                 "wlcomp: gl-compose target import ok handle=%u tex=%u size=%ux%u pitch=%u res=%u\n",
-                g_fb_bo_handle, g_gl_compose.target_texture, g_fb_w, g_fb_h,
-                g_fb_pitch, g_fb_virgl_resource_id);
+                handle, g_gl_compose.target_texture, g_fb_w, g_fb_h,
+                g_fb_pitch, resource_id);
         target_logs++;
     }
     return 1;
+}
+
+static int wlcomp_gl_compose_import_target(void)
+{
+    return wlcomp_gl_compose_import_target_handle(g_fb_bo_handle,
+                                                 g_fb_virgl_resource_id);
+}
+
+static void wlcomp_gl_compose_prime_draw_resources(void)
+{
+    static const GLfloat prime_quad[] = {
+        -1.0f, -1.0f, 0.0f, 0.0f,
+         1.0f, -1.0f, 1.0f, 0.0f,
+        -1.0f,  1.0f, 0.0f, 1.0f,
+         1.0f,  1.0f, 1.0f, 1.0f,
+    };
+
+    if (!g_gl_compose.initialized || !g_gl_compose.available)
+        return;
+    if (!eglMakeCurrent(g_gl_compose.display, g_gl_compose.surface,
+                        g_gl_compose.surface, g_gl_compose.context))
+        return;
+    glBindBuffer(GL_ARRAY_BUFFER, g_gl_compose.vbo);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(prime_quad), prime_quad,
+                 GL_STREAM_DRAW);
+    g_gl_compose.last_quad_valid = 0;
+    glFlush();
+}
+
+static void wlcomp_gl_compose_reprime_targets(void)
+{
+    uint32_t current_handle = g_fb_bo_handle;
+    uint32_t current_resource = g_fb_virgl_resource_id;
+
+    if (!wlcomp_gl_compose_init())
+        return;
+    if (g_fb_virgl_back_target_ready &&
+        g_fb_virgl_back_target.bo_handle != 0)
+        (void)wlcomp_gl_compose_import_target_handle(
+            g_fb_virgl_back_target.bo_handle,
+            g_fb_virgl_back_target.resource_id);
+    if (g_fb_virgl_extra_target_ready &&
+        g_fb_virgl_extra_target.bo_handle != 0)
+        (void)wlcomp_gl_compose_import_target_handle(
+            g_fb_virgl_extra_target.bo_handle,
+            g_fb_virgl_extra_target.resource_id);
+    (void)wlcomp_gl_compose_import_target_handle(current_handle,
+                                                 current_resource);
+    wlcomp_gl_compose_prime_draw_resources();
 }
 
 static int wlcomp_gl_compose_probe_buffer(struct wlcomp_buffer *buf)
@@ -1461,6 +1627,12 @@ static int wlcomp_gl_compose_present_buffer(struct wlcomp_buffer *buf,
         }
         g_gl_compose.fbo_attached_texture = g_gl_compose.target_texture;
         g_gl_compose.fbo_complete = 1;
+        if (g_gl_compose.color_tex) {
+            GLuint tex = g_gl_compose.color_tex;
+
+            glDeleteTextures(1, &tex);
+            g_gl_compose.color_tex = 0;
+        }
     } else if (!g_gl_compose.fbo_complete) {
         return 0;
     }

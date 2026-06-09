@@ -13,6 +13,4 @@ xv6_port(
         -Dlibpci=disabled
         -Dlibdisplay-info=disabled
         -Dman-pages=disabled
-    PATCHES
-        ${CMAKE_CURRENT_LIST_DIR}/patches/0001-meson-accept-xv6-libdrm-2.4.133-headers.patch
 )

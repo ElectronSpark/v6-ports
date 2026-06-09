@@ -436,11 +436,27 @@ typedef void *(*xv6_webkit_eval_finish_fn)(void *web_view, void *result,
 typedef char *(*xv6_jsc_value_to_string_fn)(void *value);
 typedef void (*xv6_g_free_fn)(void *ptr);
 typedef void (*xv6_g_object_unref_fn)(void *object);
+typedef void (*xv6_gtk_window_set_title_fn)(void *window, const char *title);
 
 static void *xv6_youtube_probe_view;
 static int xv6_youtube_probe_installed;
 static time_t xv6_youtube_probe_start;
 static int xv6_youtube_probe_seconds;
+static int xv6_youtube_probe_fullscreen = -1;
+
+static void
+xv6_write_title_probe_line(const char *title)
+{
+    FILE *fp;
+
+    if (!title || !title[0])
+        return;
+    fp = fopen("/tmp/webkit-title", "w");
+    if (!fp)
+        return;
+    fprintf(fp, "%s\n", title);
+    fclose(fp);
+}
 
 static int
 xv6_webkit_youtube_url(const char *uri)
@@ -466,6 +482,58 @@ xv6_webkit_youtube_probe_seconds(void)
         seconds = 3600;
     xv6_youtube_probe_seconds = seconds;
     return seconds;
+}
+
+static int
+xv6_kernel_cmdline_has_token(const char *token)
+{
+    char buf[1024];
+    FILE *fp;
+    size_t n;
+    const char *p;
+    size_t token_len;
+
+    if (!token || !token[0])
+        return 0;
+    fp = fopen("/proc/cmdline", "r");
+    if (!fp)
+        return 0;
+    n = fread(buf, 1, sizeof(buf) - 1, fp);
+    fclose(fp);
+    if (n == 0)
+        return 0;
+    buf[n] = '\0';
+    token_len = strlen(token);
+    p = buf;
+    while ((p = strstr(p, token)) != NULL) {
+        int left_ok = (p == buf || p[-1] == ' ' || p[-1] == '\t' ||
+                       p[-1] == '\n');
+        char right = p[token_len];
+
+        if (left_ok &&
+            (right == '\0' || right == ' ' || right == '\t' ||
+             right == '\n' || right == '='))
+            return right != '=' || p[token_len + 1] != '0';
+        p += token_len;
+    }
+    return 0;
+}
+
+static int
+xv6_webkit_youtube_fullscreen_enabled(void)
+{
+    const char *value;
+
+    if (xv6_youtube_probe_fullscreen >= 0)
+        return xv6_youtube_probe_fullscreen;
+    value = getenv("XV6_WEBKIT_YOUTUBE_FULLSCREEN");
+    if (value && value[0])
+        xv6_youtube_probe_fullscreen = !xv6_env_disabled(
+            "XV6_WEBKIT_YOUTUBE_FULLSCREEN");
+    else
+        xv6_youtube_probe_fullscreen =
+            xv6_kernel_cmdline_has_token("webkit_youtube_fullscreen");
+    return xv6_youtube_probe_fullscreen;
 }
 
 static void
@@ -523,8 +591,9 @@ static int
 xv6_youtube_probe_tick(void *data)
 {
     static xv6_webkit_eval_js_fn eval_js;
-    static const char script[] =
+    static const char script_fmt[] =
         "(function(){"
+        "var wantFs=%d;"
         "var T={vp9:'video/webm; codecs=\"vp9\"',"
         "vp9opus:'video/webm; codecs=\"vp9, opus\"',"
         "av1mp4:'video/mp4; codecs=\"av01.0.05M.08\"',"
@@ -537,21 +606,62 @@ xv6_youtube_probe_tick(void *data)
         "function cpt(t){try{var e=document.createElement("
         "t.indexOf('audio/')===0?'audio':'video');return e.canPlayType(t)||'no';}"
         "catch(e){return 'throw-'+e.name;}}"
-        "function ev(s){if(window.__xv6yt&&window.__xv6yt.e.indexOf(s)<0)"
-        "window.__xv6yt.e.push(s);}"
-        "if(!window.__xv6yt)window.__xv6yt={e:[],max:0};"
+        "function ev(s){if(!window.__xv6yt)return;"
+        "if(window.__xv6yt.e.indexOf(s)<0)window.__xv6yt.e.push(s);"
+        "var fe=document.fullscreenElement||document.webkitFullscreenElement||null;"
+        "if(s.indexOf('fullscreen')>=0){window.__xv6yt.fsPending=0;"
+        "if(fe)window.__xv6yt.fsHeld=1;else if(window.__xv6yt.fsHeld)window.__xv6yt.fsExited=1;}"
+        "window.__xv6yt.evlog=(window.__xv6yt.evlog||[]).slice(-10);"
+        "window.__xv6yt.evlog.push(s+':'+(fe?(fe.id||fe.tagName||'node'):'none'));}"
+        "if(!window.__xv6yt)window.__xv6yt={e:[],max:0,fsAttempts:0,fsReq:0,fsErr:'none',fsClickErr:'none',fsPending:0,fsHeld:0,fsExited:0};"
+        "if(!window.__xv6yt.fsEv){['fullscreenchange','fullscreenerror',"
+        "'webkitfullscreenchange','webkitfullscreenerror'].forEach(function(n){"
+        "document.addEventListener(n,function(){ev(n);});});window.__xv6yt.fsEv=1;}"
         "var v=document.querySelector('video');"
         "if(v&&!v.__xv6yt){['loadstart','loadedmetadata','canplay','playing',"
         "'timeupdate','waiting','stalled','suspend','error'].forEach(function(n){"
         "v.addEventListener(n,function(){ev(n);});});v.__xv6yt=1;}"
         "if(v){try{v.muted=true;v.playsInline=true;"
         "if(v.paused&&v.play)v.play().catch(function(){});}catch(e){}}"
+        "function fsEl(){return document.fullscreenElement||document.webkitFullscreenElement||null;}"
+        "function player(){return document.querySelector('.html5-video-player')||"
+        "document.querySelector('#movie_player')||v;}"
+        "function ytpFs(){var p=player();return !!(p&&p.classList&&"
+        "(p.classList.contains('ytp-fullscreen')||p.classList.contains('ytp-big-mode')));}"
+        "if(window.__xv6yt.fsPending&&!fsEl()&&!ytpFs()&&"
+        "window.__xv6yt.fsLastAttempt&&Date.now()-window.__xv6yt.fsLastAttempt>2500)"
+        "window.__xv6yt.fsPending=0;"
+        "var fsReady=v&&v.readyState>=3&&v.videoWidth>0&&v.currentTime>=4&&"
+        "window.__xv6yt.e.indexOf('playing')>=0;"
+        "if(wantFs&&fsReady&&!window.__xv6yt.fsExited&&!ytpFs()&&!fsEl()&&"
+        "!window.__xv6yt.fsPending&&window.__xv6yt.fsAttempts<1&&"
+        "(!window.__xv6yt.fsLastAttempt||Date.now()-window.__xv6yt.fsLastAttempt>2500)){"
+        "window.__xv6yt.fsReq=1;window.__xv6yt.fsAttempts++;window.__xv6yt.fsPending=1;"
+        "window.__xv6yt.fsLastAttempt=Date.now();"
+        "try{var p=player();var clicked=0;"
+        "var rf=p&&(p.requestFullscreen||p.webkitRequestFullscreen);"
+        "var b=document.querySelector('.ytp-fullscreen-button');"
+        "if(b&&!ytpFs()&&!fsEl()){b.click();clicked=1;window.__xv6yt.fsClickErr='none';}"
+        "if(!clicked&&rf&&!fsEl()){var pr=rf.call(p);if(pr&&pr.catch)pr.catch(function(e){window.__xv6yt.fsErr=e&&e.name?e.name:String(e);window.__xv6yt.fsPending=0;});"
+        "window.__xv6yt.fsErr='none';}"
+        "else if(!clicked&&!rf&&!b)window.__xv6yt.fsErr='missing';}"
+        "catch(e){window.__xv6yt.fsClickErr=e&&e.name?e.name:String(e);}}"
         "var q=0;if(v){try{var p=v.getVideoPlaybackQuality&&"
         "v.getVideoPlaybackQuality();q=p?p.totalVideoFrames:0;}catch(e){}"
         "if(!q&&typeof v.webkitDecodedFrameCount==='number')q=v.webkitDecodedFrameCount;"
         "if(v.currentTime>window.__xv6yt.max)window.__xv6yt.max=v.currentTime;}"
         "var r=v?v.getBoundingClientRect():{width:0,height:0,left:0,top:0};"
         "var b=0;if(v&&v.buffered&&v.buffered.length){try{b=v.buffered.end(v.buffered.length-1);}catch(e){}}"
+        "function cls(e){return e&&e.className?String(e.className).replace(/\\s+/g,'.'):'none';}"
+        "function vis(e){try{var s=e?getComputedStyle(e):null;"
+        "return s?(s.display+','+s.visibility+','+s.opacity+','+s.backgroundColor):'none';}"
+        "catch(x){return 'throw-'+x.name;}}"
+        "function tag(e){return e?(e.tagName||'node'):'none';}"
+        "function eid(e){return e&&e.id?e.id:'none';}"
+        "var cx=r.left+r.width/2,cy=r.top+r.height/2;"
+        "var hit=null;try{hit=document.elementFromPoint(cx,cy);}catch(e){}"
+        "var body=document.body,doc=document.documentElement;"
+        "var fe=fsEl();var p=player();"
         "return 'XV6-YTMEDIA mse_vp9='+mse(T.vp9)+' mse_vp9opus='+mse(T.vp9opus)+"
         "' mse_av1mp4='+mse(T.av1mp4)+' mse_av1webm='+mse(T.av1webm)+"
         "' mse_opus='+mse(T.opus)+' mse_avc='+mse(T.avc)+"
@@ -565,8 +675,30 @@ xv6_youtube_probe_tick(void *data)
         "'x'+Math.round(r.width)+'x'+Math.round(r.height)+"
         "' frames='+q+' rs='+(v?v.readyState:-1)+' ns='+(v?v.networkState:-1)+"
         "' paused='+(v&&v.paused?1:0)+' err='+(v&&v.error?v.error.code:0)+"
-        "' events='+window.__xv6yt.e.join('|');"
+        "' fs='+(fe?1:0)+' fsTag='+(fe?(fe.tagName||'node'):'none')+"
+        "' ytpFullscreen='+(ytpFs()?1:0)+' fsReq='+(window.__xv6yt.fsReq||0)+"
+        "' fsReady='+(fsReady?1:0)+"
+        "' fsAttempts='+(window.__xv6yt.fsAttempts||0)+"
+        "' fsPending='+(window.__xv6yt.fsPending||0)+"
+        "' fsHeld='+(window.__xv6yt.fsHeld||0)+"
+        "' fsExited='+(window.__xv6yt.fsExited||0)+"
+        "' fsErr='+(window.__xv6yt.fsErr||'none')+"
+        "' fsClickErr='+(window.__xv6yt.fsClickErr||'none')+"
+        "' playerTag='+(p&&(p.tagName||'node')||'none')+"
+        "' playerClass='+cls(p)+"
+        "' fsId='+(fe&&fe.id?fe.id:'none')+"
+        "' fsClass='+cls(fe)+"
+        "' fsButton='+(document.querySelector('.ytp-fullscreen-button')?1:0)+"
+        "' hit='+tag(hit)+'#'+eid(hit)+'.'+cls(hit)+"
+        "' vvis='+vis(v)+' pvis='+vis(p)+' hitvis='+vis(hit)+"
+        "' bodyvis='+vis(body)+' docvis='+vis(doc)+"
+        "' scroll='+Math.round(window.scrollX)+','+Math.round(window.scrollY)+"
+        "' iw='+window.innerWidth+' ih='+window.innerHeight+"
+        "' sw='+screen.width+' sh='+screen.height+"
+        "' events='+window.__xv6yt.e.join('|')+"
+        "' evlog='+(window.__xv6yt.evlog||[]).join(',');"
         "})()";
+    char script[12288];
     time_t now;
 
     (void)data;
@@ -584,6 +716,8 @@ xv6_youtube_probe_tick(void *data)
         xv6_write_media_probe_line("XV6-YTMEDIA eval_javascript=missing");
         return 0;
     }
+    snprintf(script, sizeof(script), script_fmt,
+             xv6_webkit_youtube_fullscreen_enabled() ? 1 : 0);
     eval_js(xv6_youtube_probe_view, script, -1, NULL, NULL, NULL,
             (void *)xv6_youtube_probe_result_cb, NULL);
     return 1;
@@ -636,6 +770,21 @@ webkit_web_view_load_uri(void *web_view, const char *uri)
                 uri, load_uri);
     real_load_uri(web_view, load_uri);
     xv6_webkit_youtube_probe_start(web_view, load_uri);
+}
+
+void
+gtk_window_set_title(void *window, const char *title)
+{
+    static xv6_gtk_window_set_title_fn real_set_title;
+
+    if (!real_set_title)
+        real_set_title = (xv6_gtk_window_set_title_fn)dlsym(
+            RTLD_NEXT, "gtk_window_set_title");
+    xv6_write_title_probe_line(title);
+    if (xv6_webkit_uri_log_enabled() && title && title[0])
+        fprintf(stderr, "xv6-webkit-title: %s\n", title);
+    if (real_set_title)
+        real_set_title(window, title);
 }
 
 typedef void *(*xv6_webkit_uri_request_new_fn)(const char *uri);

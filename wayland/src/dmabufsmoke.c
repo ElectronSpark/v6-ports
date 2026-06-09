@@ -288,12 +288,6 @@ static int create_dmabuf_buffer(struct app *app)
              backend ? backend : "?");
     app->gbm_plane_count = gbm_bo_get_plane_count(bo);
     app->gbm_modifier = gbm_bo_get_modifier(bo);
-    if (app->use_nv12 && strcmp(app->gbm_backend, "xv6-gbm") != 0) {
-        fprintf(stderr,
-                "dmabufsmoke: NV12 requires xv6 GBM backend, got %s\n",
-                app->gbm_backend);
-        goto fail;
-    }
     if ((app->use_nv12 && gbm_bo_get_plane_count(bo) != 2) ||
         (!app->use_nv12 && gbm_bo_get_plane_count(bo) != 1)) {
         fprintf(stderr, "dmabufsmoke: unexpected GBM plane count\n");
@@ -485,7 +479,7 @@ int main(int argc, char **argv)
            app.use_nv12 ? "NV12" : "XRGB8888",
            app.use_nv12 ? 2 : 1);
     if (app.use_nv12) {
-        printf("dmabufsmoke: linux-dmabuf NV12 xv6-gbm backend ok "
+        printf("dmabufsmoke: linux-dmabuf NV12 GBM backend ok "
                "path=%s backend=%s planes=%d modifier=0x%lx\n",
                app.gbm_path, app.gbm_backend, app.gbm_plane_count,
                (unsigned long)app.gbm_modifier);

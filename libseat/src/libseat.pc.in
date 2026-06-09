@@ -1,0 +1,10 @@
+prefix=/
+exec_prefix=${prefix}
+libdir=${prefix}/lib
+includedir=${prefix}/include
+
+Name: libseat
+Description: xv6 libseat compatibility shim
+Version: 0.8.0
+Libs: -L${libdir} -lseat
+Cflags: -I${includedir}

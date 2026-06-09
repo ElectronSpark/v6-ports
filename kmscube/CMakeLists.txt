@@ -8,7 +8,6 @@ xv6_port(
     BUILD_SYSTEM    meson
     DEPENDS         libdrm
                     mesa
-                    xv6-gbm
     OUTPUT_FILES    bin/kmscube
     CMAKE_ARGS
         -Dgstreamer=disabled

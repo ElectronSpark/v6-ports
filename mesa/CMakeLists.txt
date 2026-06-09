@@ -78,7 +78,6 @@ _mesa_append_existing_source_deps(
     ${CMAKE_CURRENT_SOURCE_DIR}/src/src/gallium/winsys/virgl/common/meson.build
     ${CMAKE_CURRENT_SOURCE_DIR}/src/src/gallium/winsys/virgl/drm/meson.build
     ${CMAKE_CURRENT_SOURCE_DIR}/src/src/gallium/winsys/virgl/vtest/meson.build
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/src/gallium/winsys/virgl/xv6/meson.build
     ${CMAKE_CURRENT_SOURCE_DIR}/src/src/microsoft/meson.build
     ${CMAKE_CURRENT_SOURCE_DIR}/src/subprojects/DirectX-Headers-1.0/meson.build
     ${CMAKE_CURRENT_SOURCE_DIR}/src/subprojects/DirectX-Headers-1.0/meson_options.txt
@@ -132,6 +131,7 @@ xv6_port(
     CPP_ARGS        -DDETECT_OS_XV6=1
     DEPENDS         khronos-headers
                     libdrm
+                    libudev
                     libexpat
                     wayland-libs
                     wayland-protocols

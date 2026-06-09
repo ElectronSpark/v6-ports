@@ -22,6 +22,8 @@ static volatile int g_running = 1;
 struct wlcomp_shm_pool;
 
 struct wlcomp_buffer {
+    struct wl_list      link;
+    int                 listed;
     struct wl_resource *resource;  /* wl_buffer resource */
     struct wlcomp_shm_pool *pool;
     int                  is_gpu_bo;
@@ -120,6 +122,7 @@ struct wlcomp_buffer {
     uint32_t            plane_count;
     uint32_t            format;
     int                 y_inverted;
+    pid_t               client_pid;
     struct wl_resource *explicit_release;
 };
 
@@ -156,9 +159,12 @@ struct wlcomp_surface {
     int     mapped;
     int     minimized;
     int     maximized;        /* 1 = currently maximized */
+    int     fullscreen;       /* 1 = currently fullscreen */
     int     fullscreen_direct; /* 1 = unredirected: client owns the scanout */
     int     xdg_initial_configure_sent;
     int32_t pending_configure_w, pending_configure_h;
+    uint32_t fullscreen_configure_serial;
+    int     fullscreen_refine_sent;
     int     is_cursor;        /* 1 = cursor surface, skip normal rendering */
     int     is_subsurface;
     int32_t sub_x, sub_y;
@@ -186,6 +192,7 @@ struct wlcomp_surface {
 };
 
 static struct wl_list g_surfaces;  /* list of wlcomp_surface */
+static struct wl_list g_buffers;   /* list of wlcomp_buffer */
 static uint64_t g_d3d12_present_start_count;
 static uint64_t g_d3d12_present_copy_complete_count;
 static uint64_t g_d3d12_present_display_complete_count;
@@ -198,6 +205,7 @@ static int g_kbd_enter_pending; /* deferred keyboard enter for g_kbd_focused */
 static int g_iwin_focus = -1;   /* index of focused internal window */
 
 static void surface_set_keyboard_focus(struct wlcomp_surface *surf);
+static void surface_send_output_enter(struct wlcomp_surface *surf);
 
 static int surface_existing_mapped_toplevels(void)
 {
@@ -215,15 +223,12 @@ static int surface_existing_mapped_toplevels(void)
 
 static int xv6_wlcomp_trace_enabled(void)
 {
-    static int enabled = -1;
+    const char *env = getenv("WLCOMP_XV6_TRACE");
 
-    if (enabled < 0) {
-        const char *env = getenv("WLCOMP_XV6_TRACE");
-        enabled = cmdline_flag_enabled("wlcomp_trace") ||
-                  (env && env[0] && strcmp(env, "0") != 0);
-    }
-
-    return enabled;
+    return cmdline_flag_enabled("wlcomp_trace") ||
+           cmdline_int_value("wlcomp_trace", 0) != 0 ||
+           cmdline_int_value("wlcomp_trace_present", 0) != 0 ||
+           (env && env[0] && strcmp(env, "0") != 0);
 }
 
 static void surface_log_limited(struct wlcomp_surface *surf,
@@ -234,16 +239,29 @@ static void surface_log_limited(struct wlcomp_surface *surf,
         return;
     surf->log_events++;
     fprintf(stderr,
-            "wlcomp: surface %s pid=%d sub=%d mapped=%d xdg=%d top=%d "
-            "buf=%p size=%dx%d gpu=%d pending=%d committed=%d\n",
-            event, surf->client_pid, surf->is_subsurface, surf->mapped,
+            "wlcomp: surface %s pid=%d id=%u sub=%d parent=%u mapped=%d "
+            "xdg=%d top=%d cursor=%d fullscreen=%d buf=%p bid=%u "
+            "size=%dx%d stride=%d fmt=0x%x gpu=%d res=%u pending=%d "
+            "committed=%d damage=%d\n",
+            event, surf->client_pid,
+            surf->resource ? wl_resource_get_id(surf->resource) : 0,
+            surf->is_subsurface,
+            surf->parent && surf->parent->resource ?
+                wl_resource_get_id(surf->parent->resource) : 0,
+            surf->mapped,
             surf->xdg_surface != NULL, surf->xdg_toplevel != NULL,
+            surf->is_cursor, surf->fullscreen,
             (void *)buf,
+            buf && buf->resource ? wl_resource_get_id(buf->resource) : 0,
             buf ? buf->width : 0,
             buf ? buf->height : 0,
+            buf ? buf->stride : 0,
+            buf ? buf->format : 0,
             buf ? buf->is_gpu_bo : 0,
+            buf ? buf->plane_virtio_resource_id[0] : 0,
             surf->has_pending_buffer,
-            surf->committed_buf != NULL);
+            surf->committed_buf != NULL,
+            surf->pending_damage_count);
 }
 
 static void webkit_initial_window_size(int32_t *w, int32_t *h)
@@ -410,6 +428,18 @@ static struct wlcomp_surface *compositor_fullscreen_direct_surface(void)
     return NULL;
 }
 
+static struct wlcomp_surface *compositor_fullscreen_surface(void)
+{
+    struct wlcomp_surface *surf;
+
+    wl_list_for_each_reverse(surf, &g_surfaces, link) {
+        if (surf->mapped && surf->xdg_toplevel && surf->fullscreen &&
+            !surf->is_subsurface && !surf->minimized)
+            return surf;
+    }
+    return NULL;
+}
+
 static int surface_tree_visible(const struct wlcomp_surface *surf);
 static void surface_window_geometry(const struct wlcomp_surface *s,
                                     int32_t *gx, int32_t *gy,
@@ -487,7 +517,54 @@ static int surface_is_webkit_window(const struct wlcomp_surface *surf)
 static int surface_has_window_frame(const struct wlcomp_surface *surf)
 {
     return surf && surf->xdg_toplevel && !surface_is_webkit_window(surf) &&
+           !surf->fullscreen &&
            !surface_is_fullscreen_direct(surf);
+}
+
+static int32_t fullscreen_client_w(const struct wlcomp_surface *surf)
+{
+    (void)surf;
+    return g_fb_w > 0 ? (int32_t)g_fb_w : 1;
+}
+
+static int32_t fullscreen_client_h(const struct wlcomp_surface *surf)
+{
+    (void)surf;
+    return g_fb_h > 0 ? (int32_t)g_fb_h : 1;
+}
+
+static int32_t fullscreen_csd_configure_extra(void)
+{
+    static int initialized;
+    static int32_t extra;
+
+    if (initialized)
+        return extra;
+    initialized = 1;
+    extra = cmdline_int_value("wlcomp_fullscreen_csd_extra", 52);
+    if (extra < 0)
+        extra = 0;
+    if (extra > 256)
+        extra = 256;
+    return extra;
+}
+
+static int32_t fullscreen_configure_w(const struct wlcomp_surface *surf)
+{
+    int32_t w = fullscreen_client_w(surf);
+
+    if (surface_is_webkit_window(surf))
+        w += fullscreen_csd_configure_extra();
+    return w;
+}
+
+static int32_t fullscreen_configure_h(const struct wlcomp_surface *surf)
+{
+    int32_t h = fullscreen_client_h(surf);
+
+    if (surface_is_webkit_window(surf))
+        h += fullscreen_csd_configure_extra();
+    return h;
 }
 
 static int32_t work_area_w(void)
@@ -1101,7 +1178,13 @@ static void surface_window_geometry(const struct wlcomp_surface *s,
         *gh = bh;
     }
 
-    if (s && s->maximized && s->xdg_toplevel &&
+    if (s && s->fullscreen && s->xdg_toplevel &&
+        !surface_has_window_frame(s)) {
+        *gx = 0;
+        *gy = 0;
+        *gw = fullscreen_client_w(s);
+        *gh = fullscreen_client_h(s);
+    } else if (s && s->maximized && s->xdg_toplevel &&
         !surface_has_window_frame(s)) {
         *gx = 0;
         *gy = 0;
@@ -1408,8 +1491,9 @@ static void surface_raise_to_top(struct wlcomp_surface *surf)
 static struct wlcomp_surface *surface_at(int32_t px, int32_t py,
                                           int32_t *sx, int32_t *sy)
 {
-    /* Reserve taskbar area — never hit Wayland surfaces there */
-    if (py >= (int32_t)(g_fb_h - 36 /* TASKBAR_H */))
+    /* Reserve taskbar area unless a fullscreen toplevel covers it. */
+    if (py >= (int32_t)(g_fb_h - 36 /* TASKBAR_H */) &&
+        !compositor_fullscreen_surface())
         return NULL;
 
     struct wlcomp_surface *s;
@@ -1441,7 +1525,7 @@ static struct wlcomp_surface *surface_at(int32_t px, int32_t py,
             int32_t local_x = px - draw_x;
             int32_t local_y = py - draw_y;
 
-            if (s->maximized && s->xdg_toplevel &&
+            if ((s->fullscreen || s->maximized) && s->xdg_toplevel &&
                 !surface_has_window_frame(s) && gw > 0 && gh > 0 &&
                 (s->committed_buf->width != gw ||
                  s->committed_buf->height != gh)) {

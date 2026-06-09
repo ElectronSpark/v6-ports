@@ -1775,20 +1775,22 @@ static void paint_scene(int fb_w, int fb_h, int *acquire_blocked)
     if (g_iwin_focus >= 0)
         draw_iwin_all(g_fb_buf, fb_w, fb_h);
 
-    /* Draw taskbar on top of everything */
-    draw_taskbar(g_fb_buf, fb_w, fb_h);
-    if (paint_probe) {
-        fprintf(stderr,
-                "wlcomp: paint probe after_taskbar icon=%08x task=%08x\n",
-                paint_probe_pixel(g_fb_buf, fb_w, fb_h,
-                                  paint_probe_icon_x, paint_probe_icon_y),
-                paint_probe_pixel(g_fb_buf, fb_w, fb_h,
-                                  paint_probe_task_x, paint_probe_task_y));
-        paint_probe_logged = 1;
-    }
+    if (!compositor_fullscreen_surface()) {
+        /* Draw taskbar on top of everything */
+        draw_taskbar(g_fb_buf, fb_w, fb_h);
+        if (paint_probe) {
+            fprintf(stderr,
+                    "wlcomp: paint probe after_taskbar icon=%08x task=%08x\n",
+                    paint_probe_pixel(g_fb_buf, fb_w, fb_h,
+                                      paint_probe_icon_x, paint_probe_icon_y),
+                    paint_probe_pixel(g_fb_buf, fb_w, fb_h,
+                                      paint_probe_task_x, paint_probe_task_y));
+            paint_probe_logged = 1;
+        }
 
-    /* Draw popup menu if open */
-    draw_menu(g_fb_buf, fb_w, fb_h);
+        /* Draw popup menu if open */
+        draw_menu(g_fb_buf, fb_w, fb_h);
+    }
 
     /* Draw one compositor-owned cursor. */
     draw_default_cursor();

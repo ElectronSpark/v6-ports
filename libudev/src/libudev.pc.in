@@ -1,0 +1,10 @@
+prefix=@CMAKE_INSTALL_PREFIX@
+exec_prefix=${prefix}
+libdir=${prefix}/lib
+includedir=${prefix}/include
+
+Name: libudev
+Description: xv6 libudev-compatible device metadata shim
+Version: 252
+Libs: -L${libdir} -ludev
+Cflags: -I${includedir}

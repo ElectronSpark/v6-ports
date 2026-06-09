@@ -80,13 +80,31 @@ static void destroy_surfaces_for_pid(pid_t pid)
     fprintf(stderr, "wlcomp: destroying Wayland client for exited pid %d\n",
             pid);
     wl_client_destroy(client);
+    buffer_flush_dead_client_releases(pid);
     damage_full_reason(FULL_DAMAGE_CLIENT);
 }
 
 static int process_exists(pid_t pid)
 {
+    char path[64];
+    char buf[256];
+    int fd;
+    ssize_t n;
+
     if (pid <= 0)
         return 0;
+    snprintf(path, sizeof(path), "/proc/%d/status", pid);
+    fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd >= 0) {
+        n = read(fd, buf, sizeof(buf) - 1);
+        close(fd);
+        if (n > 0) {
+            buf[n] = '\0';
+            if (strstr(buf, "State:\tZ") || strstr(buf, "State:\tX"))
+                return 0;
+            return 1;
+        }
+    }
     if (kill(pid, 0) == 0)
         return 1;
     return errno != ESRCH;
@@ -96,19 +114,42 @@ static void destroy_dead_client_surfaces(void)
 {
     struct wlcomp_surface *surf;
     struct wlcomp_surface *tmp;
+    struct wlcomp_buffer *buf;
+    struct wlcomp_buffer *buf_tmp;
+    int found;
 
-    wl_list_for_each_safe(surf, tmp, &g_surfaces, link) {
-        pid_t pid = surf->client_pid;
+    do {
+        found = 0;
+        wl_list_for_each_safe(surf, tmp, &g_surfaces, link) {
+            pid_t pid = surf->client_pid;
 
-        if (pid <= 0)
-            continue;
+            if (pid <= 0)
+                continue;
 
-        if (process_exists(pid))
-            continue;
+            if (process_exists(pid))
+                continue;
 
-        destroy_surfaces_for_pid(pid);
-        return;
-    }
+            destroy_surfaces_for_pid(pid);
+            found = 1;
+            break;
+        }
+    } while (found);
+
+    do {
+        found = 0;
+        wl_list_for_each_safe(buf, buf_tmp, &g_buffers, link) {
+            pid_t pid = buf->client_pid;
+
+            if (pid <= 0)
+                continue;
+            if (process_exists(pid))
+                continue;
+
+            buffer_flush_dead_client_releases(pid);
+            found = 1;
+            break;
+        }
+    } while (found);
 }
 
 static void surface_window_button_rects(const struct wlcomp_surface *surf,

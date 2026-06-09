@@ -282,6 +282,8 @@ static void dmabuf_buffer_import_common(struct wl_client *client,
     wl_resource_set_implementation(buf_res, &buffer_impl, buf,
                                    buffer_destroy_handler);
     wl_client_get_credentials(client, &client_pid, &client_uid, &client_gid);
+    buf->client_pid = client_pid;
+    buffer_register(buf);
     {
         static int dmabuf_buffer_logs;
 

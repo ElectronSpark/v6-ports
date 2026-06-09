@@ -305,8 +305,11 @@ static void process_mouse(void)
     if (pressed_edges & 1) {
         /* Left button was pressed (at least once) during this batch */
         int desktop_handled = 0;
+        int fullscreen_target =
+            target && target->fullscreen && target->xdg_toplevel;
         int taskbar_or_menu =
-            g_menu_open || hit_y >= (int16_t)(g_fb_h - TASKBAR_H);
+            g_menu_open ||
+            (!fullscreen_target && hit_y >= (int16_t)(g_fb_h - TASKBAR_H));
 
         if (taskbar_or_menu) {
             g_iwin_focus = -1;

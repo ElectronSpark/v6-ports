@@ -287,6 +287,26 @@ static void seat_bind(struct wl_client *client, void *data,
  *  wl_output
  * ══════════════════════════════════════════════════════════════════════ */
 
+#define MAX_OUTPUT_RES 16
+static struct wl_resource *g_output_resources[MAX_OUTPUT_RES];
+
+static void surface_send_output_enter(struct wlcomp_surface *surf)
+{
+    struct wl_client *client;
+
+    if (!surf || !surf->resource)
+        return;
+
+    client = wl_resource_get_client(surf->resource);
+    for (int i = 0; i < MAX_OUTPUT_RES; i++) {
+        struct wl_resource *output = g_output_resources[i];
+
+        if (!output || wl_resource_get_client(output) != client)
+            continue;
+        wl_surface_send_enter(surf->resource, output);
+    }
+}
+
 static void output_release(struct wl_client *c, struct wl_resource *r)
 {
     (void)c;
@@ -296,6 +316,11 @@ static void output_release(struct wl_client *c, struct wl_resource *r)
 static const struct wl_output_interface output_impl = {
     .release = output_release,
 };
+
+static void output_destroy_handler(struct wl_resource *resource)
+{
+    remove_resource(g_output_resources, MAX_OUTPUT_RES, resource);
+}
 
 static void output_bind(struct wl_client *client, void *data,
                         uint32_t version, uint32_t id)
@@ -307,7 +332,9 @@ static void output_bind(struct wl_client *client, void *data,
         wl_client_post_no_memory(client);
         return;
     }
-    wl_resource_set_implementation(res, &output_impl, NULL, NULL);
+    wl_resource_set_implementation(res, &output_impl, NULL,
+                                  output_destroy_handler);
+    add_resource(g_output_resources, MAX_OUTPUT_RES, res);
 
     wl_output_send_geometry(res, 0, 0, 0, 0,
                             WL_OUTPUT_SUBPIXEL_UNKNOWN,
@@ -319,4 +346,10 @@ static void output_bind(struct wl_client *client, void *data,
         wl_output_send_scale(res, 1);
     if (version >= 2)
         wl_output_send_done(res);
+
+    struct wlcomp_surface *surf;
+    wl_list_for_each(surf, &g_surfaces, link) {
+        if (surf->resource && wl_resource_get_client(surf->resource) == client)
+            wl_surface_send_enter(surf->resource, res);
+    }
 }

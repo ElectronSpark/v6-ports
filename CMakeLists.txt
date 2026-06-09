@@ -56,10 +56,13 @@ endforeach()
 list(LENGTH _ports _nports)
 message(STATUS "xv6 ports discovered: ${_nports} (${_ports})")
 
+# libudev and xkeyboard-config are runtime/discovery packages that other ports
+# may depend on even though they sort later than some consumers.
 # cpython declares dependencies on several library ports in its own
 # CMakeLists.txt; add it after discovery has created those targets.
 # wayland builds the compositor against the generated wayland-libs output.
-list(REMOVE_ITEM _ports cpython wayland)
+list(REMOVE_ITEM _ports libudev xkeyboard-config cpython wayland)
+list(PREPEND _ports xkeyboard-config libudev)
 list(APPEND _ports cpython wayland)
 
 foreach(p IN LISTS _ports)

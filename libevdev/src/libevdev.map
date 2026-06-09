@@ -1,0 +1,6 @@
+LIBEVDEV_1 {
+    global:
+        libevdev_*;
+    local:
+        *;
+};

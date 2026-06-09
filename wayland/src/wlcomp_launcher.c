@@ -1171,7 +1171,6 @@ void wlcomp_launcher_launch_args(const char *path, const char *name,
             "LIBGL_DRIVERS_PATH=/lib/dri",
             "MESA_LOADER_DRIVER_OVERRIDE=swrast",
             "ANGLE_DEFAULT_PLATFORM=gl",
-            "EPOXY_XV6_ALLOW_MISSING=1",
             "WEBKIT_XV6_SKIP_RULE_FEATURES=1",
             "WEBKIT_XV6_SKIP_INITIAL_EMPTY_RENDER=1",
             "SOUP_FORCE_HTTP1=1",
@@ -1227,7 +1226,6 @@ void wlcomp_launcher_launch_args(const char *path, const char *name,
             "EGL_PLATFORM=wayland",
             "ANGLE_DEFAULT_PLATFORM=gl",
             "SOUP_FORCE_HTTP1=1",
-            "EPOXY_XV6_ALLOW_MISSING=1",
             NULL
         };
         char *envp_minibrowser_dxg[] = {
@@ -1285,7 +1283,6 @@ void wlcomp_launcher_launch_args(const char *path, const char *name,
             "vblank_mode=0",
             "ANGLE_DEFAULT_PLATFORM=gl",
             "SOUP_FORCE_HTTP1=1",
-            "EPOXY_XV6_ALLOW_MISSING=1",
             NULL
         };
         char *envp_minibrowser_accel_sw[] = {
@@ -1333,7 +1330,6 @@ void wlcomp_launcher_launch_args(const char *path, const char *name,
             "MESA_LOADER_DRIVER_OVERRIDE=swrast",
             "ANGLE_DEFAULT_PLATFORM=gl",
             "SOUP_FORCE_HTTP1=1",
-            "EPOXY_XV6_ALLOW_MISSING=1",
             "WEBKIT_XV6_DISABLE_BCG_SWITCH=1",
             NULL
         };

@@ -53,11 +53,43 @@
 #endif
 #define XV6_DRM_RENDER_NODE "/dev/dri/renderD128"
 #define DRM_IOCTL_VIRTGPU_GETPARAM 0xc0106443UL
+#define DRM_IOCTL_VIRTGPU_MAP 0xc0106441UL
+#define DRM_IOCTL_VIRTGPU_TRANSFER_FROM_HOST 0xc02c6446UL
+#define DRM_IOCTL_VIRTGPU_WAIT 0xc0086448UL
 #define VIRTGPU_PARAM_3D_FEATURES  1
 
 struct drm_virtgpu_getparam_compat {
     uint64_t param;
     uint64_t value;
+};
+
+struct drm_virtgpu_map_compat {
+    uint64_t offset;
+    uint32_t handle;
+    uint32_t pad;
+};
+
+struct drm_virtgpu_3d_box_compat {
+    uint32_t x;
+    uint32_t y;
+    uint32_t z;
+    uint32_t w;
+    uint32_t h;
+    uint32_t d;
+};
+
+struct drm_virtgpu_3d_transfer_compat {
+    uint32_t bo_handle;
+    struct drm_virtgpu_3d_box_compat box;
+    uint32_t level;
+    uint32_t offset;
+    uint32_t stride;
+    uint32_t layer_stride;
+};
+
+struct drm_virtgpu_3d_wait_compat {
+    uint32_t handle;
+    uint32_t flags;
 };
 
 
@@ -485,6 +517,7 @@ int main(int argc, char **argv)
     fprintf(stderr, "wlcomp: starting Wayland compositor\n");
 
     wl_list_init(&g_surfaces);
+    wl_list_init(&g_buffers);
 
     if (init_framebuffer() < 0)
         return 1;

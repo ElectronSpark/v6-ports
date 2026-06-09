@@ -1,0 +1,11 @@
+prefix=/
+exec_prefix=${prefix}
+libdir=${prefix}/lib
+includedir=${prefix}/include
+
+Name: libinput
+Description: xv6 libinput compatibility shim
+Version: 1.25.0
+Requires.private: libudev libevdev
+Libs: -L${libdir} -linput
+Cflags: -I${includedir}

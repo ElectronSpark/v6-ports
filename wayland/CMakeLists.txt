@@ -97,12 +97,12 @@ set(_mesaeglinfo_bin ${_wl_build}/mesaeglinfo)
 set(_mesaglfeature_bin ${_wl_build}/mesaglfeature)
 set(_mesad3d12probe_bin ${_wl_build}/mesad3d12probe)
 set(_gpu_substrate_validate_bin ${_wl_build}/gpu-substrate-validate)
+set(_gbmtest_bin ${_wl_build}/gbmtest)
 set(_dmabufsmoke_bin ${_wl_build}/dmabufsmoke)
 set(_cursorsmoke_bin ${_wl_build}/cursorsmoke)
 set(_d3d12sharedsmoke_bin ${_wl_build}/d3d12sharedsmoke)
 set(_drmgpuprobe_bin ${_wl_build}/drmgpuprobe)
 set(_webkitgpusmoke_bin ${_wl_build}/webkitgpusmoke)
-set(_xv6_gbm_static ${XV6_SYSROOT}/lib/libgbm.a)
 set(_memshim_lib  ${_wl_build}/libxv6memshim.so)
 set(_fault_trace_lib ${_wl_build}/xv6_glibc_fault_trace.so)
 set(_xv6egl_obj   ${_wl_build}/xv6_egl_gles.o)
@@ -125,6 +125,7 @@ set(_mesaeglinfo_installed ${XV6_SYSROOT}/bin/mesaeglinfo)
 set(_mesaglfeature_installed ${XV6_SYSROOT}/bin/mesaglfeature)
 set(_mesad3d12probe_installed ${XV6_SYSROOT}/bin/mesad3d12probe)
 set(_gpu_substrate_validate_installed ${XV6_SYSROOT}/bin/gpu-substrate-validate)
+set(_gbmtest_installed ${XV6_SYSROOT}/bin/gbmtest)
 set(_dmabufsmoke_installed ${XV6_SYSROOT}/bin/dmabufsmoke)
 set(_cursorsmoke_installed ${XV6_SYSROOT}/bin/cursorsmoke)
 set(_d3d12sharedsmoke_installed ${XV6_SYSROOT}/bin/d3d12sharedsmoke)
@@ -772,6 +773,20 @@ add_custom_command(
     VERBATIM)
 
 add_custom_command(
+    OUTPUT  ${_gbmtest_bin}
+    COMMAND ${CMAKE_C_COMPILER} ${_wayland_opt_cflags} -Wall
+                -isystem ${XV6_SYSROOT}/include
+                -isystem ${XV6_SYSROOT}/include/libdrm
+                -L ${XV6_SYSROOT}/lib
+                -Wl,-rpath-link,${XV6_SYSROOT}/lib
+                -o ${_gbmtest_bin}
+                ${WAYLAND_SRC_DIR}/gbmtest.c
+                -lgbm -ldrm -lpthread -ldl -lrt -lm
+    DEPENDS ${WAYLAND_SRC_DIR}/gbmtest.c
+    COMMENT "Compiling GBM DRM smoke test"
+    VERBATIM)
+
+add_custom_command(
     OUTPUT  ${_dmabufsmoke_bin}
     COMMAND ${CMAKE_C_COMPILER} ${_wayland_opt_cflags} -Wall
                 -isystem ${XV6_SYSROOT}/include
@@ -782,12 +797,12 @@ add_custom_command(
                 -o ${_dmabufsmoke_bin}
                 ${WAYLAND_SRC_DIR}/dmabufsmoke.c ${_xdg_client_code}
                 ${_dmabuf_client_code} ${_explicit_sync_client_code}
-                ${_xv6_gbm_static} -lwayland-client
+                -lgbm -lwayland-client
                 -lffi -lpthread -ldl -lrt -lm
     DEPENDS ${WAYLAND_SRC_DIR}/dmabufsmoke.c ${_xdg_client_header}
             ${_xdg_client_code} ${_dmabuf_client_header}
             ${_dmabuf_client_code} ${_explicit_sync_client_header}
-            ${_explicit_sync_client_code} ${_xv6_gbm_static}
+            ${_explicit_sync_client_code}
     COMMENT "Compiling linux-dmabuf smoke client"
     VERBATIM)
 
@@ -931,6 +946,7 @@ add_custom_command(
             ${_mesaeglinfo_installed} ${_mesaglfeature_installed}
             ${_mesad3d12probe_installed}
             ${_gpu_substrate_validate_installed}
+            ${_gbmtest_installed}
             ${_dmabufsmoke_installed} ${_cursorsmoke_installed}
             ${_d3d12sharedsmoke_installed}
             ${_drmgpuprobe_installed} ${_webkitgpusmoke_installed}
@@ -952,6 +968,7 @@ add_custom_command(
     COMMAND ${CMAKE_COMMAND} -E copy ${_mesaglfeature_bin} ${_mesaglfeature_installed}
     COMMAND ${CMAKE_COMMAND} -E copy ${_mesad3d12probe_bin} ${_mesad3d12probe_installed}
     COMMAND ${CMAKE_COMMAND} -E copy ${_gpu_substrate_validate_bin} ${_gpu_substrate_validate_installed}
+    COMMAND ${CMAKE_COMMAND} -E copy ${_gbmtest_bin} ${_gbmtest_installed}
     COMMAND ${CMAKE_COMMAND} -E copy ${_dmabufsmoke_bin} ${_dmabufsmoke_installed}
     COMMAND ${CMAKE_COMMAND} -E copy ${_cursorsmoke_bin} ${_cursorsmoke_installed}
     COMMAND ${CMAKE_COMMAND} -E copy ${_d3d12sharedsmoke_bin} ${_d3d12sharedsmoke_installed}
@@ -968,7 +985,7 @@ add_custom_command(
             ${_mesawlegl_bin} ${_mesakmsgl_bin} ${_mesademo_bin}
             ${_mesaeglinfo_bin} ${_mesaglfeature_bin}
             ${_mesad3d12probe_bin} ${_gpu_substrate_validate_bin}
-            ${_dmabufsmoke_bin} ${_cursorsmoke_bin}
+            ${_gbmtest_bin} ${_dmabufsmoke_bin} ${_cursorsmoke_bin}
             ${_d3d12sharedsmoke_bin}
             ${_drmgpuprobe_bin} ${_webkitgpusmoke_bin} ${_memshim_lib}
             ${_fault_trace_lib} ${_webkit_preload_wrapper_bin}
@@ -983,7 +1000,7 @@ add_custom_target(port-wayland ALL DEPENDS
     ${_mesakmsgl_installed} ${_mesademo_installed}
     ${_mesaeglinfo_installed} ${_mesaglfeature_installed}
     ${_mesad3d12probe_installed}
-    ${_gpu_substrate_validate_installed}
+    ${_gpu_substrate_validate_installed} ${_gbmtest_installed}
     ${_dmabufsmoke_installed} ${_cursorsmoke_installed}
     ${_d3d12sharedsmoke_installed}
     ${_drmgpuprobe_installed}
@@ -994,9 +1011,6 @@ if(TARGET port-wayland-libs)
 endif()
 if(TARGET port-mesa)
     add_dependencies(port-wayland port-mesa)
-endif()
-if(TARGET port-xv6-gbm)
-    add_dependencies(port-wayland port-xv6-gbm)
 endif()
 if(TARGET port-webkit)
     add_dependencies(port-wayland port-webkit)

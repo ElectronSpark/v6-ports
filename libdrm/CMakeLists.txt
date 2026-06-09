@@ -10,14 +10,15 @@ xv6_port(
     SOURCE_DIR      ${CMAKE_CURRENT_SOURCE_DIR}/src
     BUILD_SYSTEM    meson
     MESON_DEFAULT_LIBRARY both
+    DEPENDS         libudev
     OUTPUT_FILES    lib/libdrm.a
                     lib/libdrm.so
                     lib/libdrm.so.2
-                    lib/libdrm.so.2.133.0
+                    lib/libdrm.so.2.134.0
                     lib/libdrm_nouveau.a
                     lib/libdrm_nouveau.so
                     lib/libdrm_nouveau.so.2
-                    lib/libdrm_nouveau.so.2.133.0
+                    lib/libdrm_nouveau.so.2.134.0
                     lib/pkgconfig/libdrm.pc
                     lib/pkgconfig/libdrm_nouveau.pc
                     include/xf86drm.h
@@ -40,6 +41,6 @@ xv6_port(
         -Dvalgrind=disabled
         -Dfreedreno-kgsl=false
         -Dinstall-test-programs=true
-        -Dudev=false
+        -Dudev=true
         -Dtests=true
 )

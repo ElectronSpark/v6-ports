@@ -1,0 +1,7 @@
+prefix=/host-tools
+datarootdir=${prefix}/share
+pkgdatadir=${datarootdir}/hwdata
+
+Name: hwdata
+Description: Minimal hwdata for native build tools
+Version: 0.1

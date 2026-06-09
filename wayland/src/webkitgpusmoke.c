@@ -33,7 +33,6 @@ extern void webkit_settings_set_hardware_acceleration_policy(WebKitSettings *,
                                                              WebKitHardwareAccelerationPolicy);
 extern GtkWidget *webkit_web_view_new(void);
 extern WebKitSettings *webkit_web_view_get_settings(WebKitWebView *);
-extern void webkit_web_view_load_html(WebKitWebView *, const gchar *, const gchar *);
 extern void webkit_web_view_load_uri(WebKitWebView *, const gchar *);
 
 #define WEBKIT_WEB_VIEW(obj) ((WebKitWebView *)(obj))
@@ -147,12 +146,7 @@ static char *read_text_file(const char *uri)
 static gboolean start_load_cb(gpointer data)
 {
     struct SmokeLoad *load = data;
-    char *html = read_text_file(load->uri);
-    if (html) {
-        webkit_web_view_load_html(load->view, html, "file:///share/webkit/");
-        g_free(html);
-    } else
-        webkit_web_view_load_uri(load->view, load->uri);
+    webkit_web_view_load_uri(load->view, load->uri);
     phase("uri load requested");
     g_object_unref(load->view);
     free(load->uri);

@@ -278,6 +278,35 @@ static void surface_commit(struct wl_client *client, struct wl_resource *resourc
                                    &surf->pending_frame_callbacks);
         if (surf->committed_buf)
             surf->committed_buf->gpu_compose_presented = 0;
+        {
+            static int commit_diag_logs;
+
+            if (commit_diag_logs < 96) {
+                struct wlcomp_buffer *b = surf->committed_buf;
+
+                fprintf(stderr,
+                        "wlcomp: commit diag pid=%d id=%u mapped=%d "
+                        "xdg=%d top=%d sub=%d parent=%u cursor=%d "
+                        "buf=%dx%d stride=%d fmt=0x%x gpu=%d res=%u\n",
+                        surf->client_pid,
+                        surf->resource ?
+                            wl_resource_get_id(surf->resource) : 0,
+                        surf->mapped,
+                        surf->xdg_surface != NULL,
+                        surf->xdg_toplevel != NULL,
+                        surf->is_subsurface,
+                        surf->parent && surf->parent->resource ?
+                            wl_resource_get_id(surf->parent->resource) : 0,
+                        surf->is_cursor,
+                        b ? b->width : 0,
+                        b ? b->height : 0,
+                        b ? b->stride : 0,
+                        b ? b->format : 0,
+                        b ? b->is_gpu_bo : 0,
+                        b ? b->plane_virtio_resource_id[0] : 0);
+                commit_diag_logs++;
+            }
+        }
         if (surf->committed_buf && surf->committed_buf->is_d3d12_shared) {
             surf->committed_buf->d3d12_present_complete = 0;
             surf->committed_buf->d3d12_failclosed_client_unblocked = 0;
@@ -403,6 +432,24 @@ static void surface_commit(struct wl_client *client, struct wl_resource *resourc
                 surf->committed_buf->d3d12_opened_fence,
                 (unsigned long)surf->committed_buf->d3d12_fence_value);
     }
+    if (xv6_wlcomp_trace_enabled() && surf->committed_buf &&
+        !surf->xdg_toplevel && !surf->is_subsurface &&
+        !surf->is_cursor && !surf->mapped) {
+        static int roleless_logs;
+
+        if (roleless_logs < 32 || wlcomp_verbose_log_enabled()) {
+            fprintf(stderr,
+                    "wlcomp: roleless committed surface pid=%d id=%u "
+                    "size=%dx%d fmt=0x%x gpu=%d res=%u mapped=0\n",
+                    surf->client_pid,
+                    surf->resource ? wl_resource_get_id(surf->resource) : 0,
+                    surf->committed_buf->width, surf->committed_buf->height,
+                    surf->committed_buf->format,
+                    surf->committed_buf->is_gpu_bo,
+                    surf->committed_buf->plane_virtio_resource_id[0]);
+            roleless_logs++;
+        }
+    }
 
     if (first_map || buffer_size_changed)
         damage_full_reason(FULL_DAMAGE_CLIENT);
@@ -426,6 +473,25 @@ static void surface_commit(struct wl_client *client, struct wl_resource *resourc
                     gx, gy, gw, gh, work_area_w(), work_area_h());
             if (!wlcomp_verbose_log_enabled())
                 maximized_commit_logs++;
+        }
+    }
+    if (surf->fullscreen && surf->xdg_toplevel && surf->committed_buf &&
+        (first_map || buffer_size_changed || buffer_changed)) {
+        static int fullscreen_commit_logs;
+
+        if (wlcomp_verbose_log_enabled() || fullscreen_commit_logs < 8) {
+            int32_t gx, gy, gw, gh;
+
+            surface_window_geometry(surf, &gx, &gy, &gw, &gh);
+            fprintf(stderr,
+                    "wlcomp: fullscreen commit pid=%d buf=%dx%d geom=%d,%d %dx%d fb=%ux%u window_geom=%d,%d %dx%d\n",
+                    surf->client_pid,
+                    surf->committed_buf->width, surf->committed_buf->height,
+                    gx, gy, gw, gh, g_fb_w, g_fb_h,
+                    surf->window_x, surf->window_y,
+                    surf->window_w, surf->window_h);
+            if (!wlcomp_verbose_log_enabled())
+                fullscreen_commit_logs++;
         }
     }
     if (buffer_size_changed && surface_is_demo_window(surf)) {
@@ -633,10 +699,40 @@ static const struct wl_surface_interface surface_impl = {
     .offset               = surface_offset,
 };
 
+static int surface_client_exited(pid_t pid)
+{
+    char path[64];
+    char buf[256];
+    int fd;
+    ssize_t n;
+
+    if (pid <= 0)
+        return 0;
+
+    snprintf(path, sizeof(path), "/proc/%d/status", pid);
+    fd = open(path, O_RDONLY);
+    if (fd >= 0) {
+        n = read(fd, buf, sizeof(buf) - 1);
+        close(fd);
+        if (n > 0) {
+            buf[n] = '\0';
+            if (strstr(buf, "State:\tZ") || strstr(buf, "State:\tX"))
+                return 1;
+            return 0;
+        }
+    }
+
+    if (kill(pid, 0) != 0 && errno == ESRCH)
+        return 1;
+    return 0;
+}
+
 static void surface_destroy_handler(struct wl_resource *resource)
 {
     struct wlcomp_surface *surf = surface_from_resource(resource);
     if (surf) {
+        int client_dead = 0;
+        pid_t client_pid = surf->client_pid;
         struct wlcomp_buffer *pending_buf = surf->pending_buf;
         struct wlcomp_buffer *committed_buf = surf->committed_buf;
         struct wlcomp_buffer *deferred_buf = surf->deferred_buf;
@@ -645,6 +741,8 @@ static void surface_destroy_handler(struct wl_resource *resource)
         struct wlcomp_frame_callback *cb;
         struct wlcomp_frame_callback *tmp;
 
+        if (surface_client_exited(client_pid))
+            client_dead = 1;
         if (surf->mapped || surf->title[0] || surf->app_id[0])
             fprintf(stderr,
                     "wlcomp: surface destroy pid=%d mapped=%d title='%s' app_id='%s'\n",
@@ -699,6 +797,16 @@ static void surface_destroy_handler(struct wl_resource *resource)
         wl_list_remove(&surf->link);
         free(surf);
 
+        buffer_flush_release_for_surface_destroy(pending_buf);
+        buffer_flush_release_for_surface_destroy(deferred_buf);
+        buffer_flush_release_for_surface_destroy(staged_buf);
+        buffer_flush_release_for_surface_destroy(committed_buf);
+        if (client_dead) {
+            buffer_forget_dead_client_resource(pending_buf);
+            buffer_forget_dead_client_resource(deferred_buf);
+            buffer_forget_dead_client_resource(staged_buf);
+            buffer_forget_dead_client_resource(committed_buf);
+        }
         if (pending_buf && pending_buf != committed_buf &&
             pending_buf != deferred_buf && pending_buf != staged_buf)
             buffer_maybe_free(pending_buf);
@@ -708,6 +816,9 @@ static void surface_destroy_handler(struct wl_resource *resource)
             staged_buf != deferred_buf)
             buffer_maybe_free(staged_buf);
         buffer_maybe_free(committed_buf);
+        (void)client_dead;
+        if (client_pid > 0)
+            buffer_flush_dead_client_releases(client_pid);
     }
 }
 
@@ -772,6 +883,7 @@ static void comp_create_surface(struct wl_client *client,
     wl_resource_set_implementation(res, &surface_impl, surf,
                                   surface_destroy_handler);
     wl_list_insert(g_surfaces.prev, &surf->link);
+    surface_send_output_enter(surf);
     fprintf(stderr, "wlcomp: created surface pid=%d id=%u\n",
             client_pid, id);
 }

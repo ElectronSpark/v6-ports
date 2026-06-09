@@ -42,11 +42,24 @@ static void xv6_d3d12_close_buffer_import(struct wlcomp_buffer *buf);
 static void xv6_d3d12_unblock_failclosed_client(
     struct wlcomp_buffer *buf, const char *reason);
 
+static void buffer_register(struct wlcomp_buffer *buf)
+{
+    if (!buf || buf->listed)
+        return;
+
+    wl_list_insert(g_buffers.prev, &buf->link);
+    buf->listed = 1;
+}
+
 static void buffer_free(struct wlcomp_buffer *buf)
 {
     if (!buf)
         return;
 
+    if (buf->listed) {
+        wl_list_remove(&buf->link);
+        buf->listed = 0;
+    }
     if (buf->acquire_fence_fd >= 0)
         close(buf->acquire_fence_fd);
     if (buf->is_d3d12_shared)
@@ -316,6 +329,86 @@ static void queue_buffer_release(struct wlcomp_buffer *buf)
     buffer_send_release_events(buf);
     buf->release_pending = 0;
     buffer_maybe_free(buf);
+}
+
+static void release_queue_remove_buffer(struct wlcomp_buffer *buf)
+{
+    int out = 0;
+
+    for (int i = 0; i < g_release_queue_count; i++) {
+        if (!g_release_queue[i] || g_release_queue[i] == buf)
+            continue;
+        g_release_queue[out++] = g_release_queue[i];
+    }
+    g_release_queue_count = out;
+}
+
+static void buffer_flush_release_for_surface_destroy(struct wlcomp_buffer *buf)
+{
+    if (!buf || !buf->release_pending || buf->is_d3d12_shared)
+        return;
+    if (!wlcomp_gl_compose_wait_buffer_release(buf, 100000))
+        return;
+
+    release_queue_remove_buffer(buf);
+    buffer_send_release_events(buf);
+    g_buffer_release_trace_flushed++;
+    buf->release_pending = 0;
+}
+
+static void buffer_forget_dead_client_resource(struct wlcomp_buffer *buf)
+{
+    if (!buf || !buf->resource)
+        return;
+
+    wl_resource_set_user_data(buf->resource, NULL);
+    buf->resource = NULL;
+}
+
+static void buffer_flush_dead_client_releases(pid_t client_pid)
+{
+    struct wlcomp_buffer *buf;
+    struct wlcomp_buffer *tmp;
+    int out = 0;
+
+    if (client_pid <= 0)
+        return;
+
+    for (int i = 0; i < g_release_queue_count; i++) {
+        struct wlcomp_buffer *buf = g_release_queue[i];
+
+        if (!buf)
+            continue;
+        if (buf->client_pid != client_pid || buf->is_d3d12_shared) {
+            g_release_queue[out++] = buf;
+            continue;
+        }
+
+        (void)wlcomp_gl_compose_wait_buffer_release(buf, 100000);
+        wlcomp_gl_compose_destroy_buffer(buf);
+        buffer_forget_dead_client_resource(buf);
+        buffer_send_release_events(buf);
+        g_buffer_release_trace_flushed++;
+        buf->release_pending = 0;
+        buffer_maybe_free(buf);
+    }
+    g_release_queue_count = out;
+
+    wl_list_for_each_safe(buf, tmp, &g_buffers, link) {
+        if (buf->client_pid != client_pid || buf->is_d3d12_shared)
+            continue;
+
+        release_queue_remove_buffer(buf);
+        (void)wlcomp_gl_compose_wait_buffer_release(buf, 100000);
+        wlcomp_gl_compose_destroy_buffer(buf);
+        if (buf->release_pending) {
+            buffer_send_release_events(buf);
+            g_buffer_release_trace_flushed++;
+            buf->release_pending = 0;
+        }
+        buffer_forget_dead_client_resource(buf);
+        buffer_maybe_free(buf);
+    }
 }
 
 static void flush_buffer_releases_after_present(void)
@@ -1220,9 +1313,12 @@ static int gpu_compose_present_buffer(struct wlcomp_buffer *buf,
     static uint64_t present_total_us;
     static uint64_t present_frames;
     int perf_log = cmdline_flag_enabled("wlcomp_gpu_perf");
-    int virgl_copy = gpu_compose_virgl_copy_enabled() ||
-        (force_virgl_copy && g_fb_virgl_backed &&
-         !cmdline_flag_enabled("wlcomp_no_webkit_virgl_copy"));
+    int gl_compose = wlcomp_gl_compose_enabled();
+    int base_virgl_copy = gpu_compose_virgl_copy_enabled();
+    int no_webkit_copy =
+        cmdline_flag_enabled("wlcomp_no_webkit_virgl_copy");
+    int virgl_copy = base_virgl_copy ||
+        (force_virgl_copy && g_fb_virgl_backed && !no_webkit_copy);
     int virgl_copy_delay_us =
         cmdline_int_value("wlcomp_gpu_copy_delay_us", 0);
 
@@ -1467,6 +1563,8 @@ static void pool_create_buffer(struct wl_client *client,
     buf->plane_stride[0] = stride;
     buf->plane_offset[0] = 0;
     buf->format = format;
+    wl_client_get_credentials(client, &client_pid, &client_uid, &client_gid);
+    buf->client_pid = client_pid;
     pool->refcount++;
 
     struct wl_resource *buf_res = wl_resource_create(
@@ -1479,7 +1577,7 @@ static void pool_create_buffer(struct wl_client *client,
     buf->resource = buf_res;
     wl_resource_set_implementation(buf_res, &buffer_impl, buf,
                                   buffer_destroy_handler);
-    wl_client_get_credentials(client, &client_pid, &client_uid, &client_gid);
+    buffer_register(buf);
     if (xv6_wlcomp_trace_enabled())
         fprintf(stderr,
                 "wlcomp: shm buffer pid=%d size=%dx%d stride=%d fmt=0x%x\n",

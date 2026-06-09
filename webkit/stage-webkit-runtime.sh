@@ -17,6 +17,7 @@ host_gst_plugins=(
     libgstautodetect.so
     libgstcoreelements.so
     libgstdebugutilsbad.so
+    libgstdeinterlace.so
     libgstisomp4.so
     libgstlibav.so
     libgstmatroska.so
@@ -28,6 +29,7 @@ host_gst_plugins=(
     libgstsubparse.so
     libgsttypefindfunctions.so
     libgstvideoconvertscale.so
+    libgstvideofilter.so
     libgstvideoparsersbad.so
     libgstvideorate.so
     libgstvolume.so
