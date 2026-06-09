@@ -1,7 +1,7 @@
 /*
- * desktop.c — xv6 Wayland Session Manager
+ * desktop.c — xv6 Weston Session Manager
  *
- * Launches the wlcomp Wayland compositor, then starts Wayland clients
+ * Launches the Weston compositor, then starts Wayland clients
  * (e.g. NetSurf browser).  Monitors child processes and performs clean
  * shutdown on session-control signals.
  *
@@ -144,7 +144,7 @@ struct netconf_req_compat {
 static volatile sig_atomic_t g_running = 1;
 static volatile sig_atomic_t g_shutdown_requested;
 static volatile sig_atomic_t g_pending_signals[NSIG];
-static pid_t wlcomp_pid;
+static pid_t compositor_pid;
 static pid_t client_pid;
 static pid_t glsmoke_pid;
 static pid_t httpd_pid;
@@ -182,7 +182,6 @@ static int webkit_timeout_ms_from_cmdline(int fallback);
 static int gpu_validate_enabled_by_cmdline(void);
 static int glmaze_enabled_by_cmdline(void);
 static void glmaze_args_from_cmdline(char *seconds_arg, size_t seconds_size);
-static int weston_enabled_by_cmdline(void);
 static int desktop_disabled_by_cmdline(void);
 static int desktop_exit_after_smoke_by_cmdline(void);
 static int cmdline_int_value(const char *cmdline, const char *key,
@@ -901,7 +900,7 @@ static void desktop_dispatch_signal_to_children(int sig)
         glsmoke_pid,
         gst_warmup_pid,
         httpd_pid,
-        wlcomp_pid,
+        compositor_pid,
     };
     size_t i;
 
@@ -981,7 +980,7 @@ static void install_signal_handlers(void)
     }
 }
 
-/* Wait for wlcomp to create the Wayland socket.  Returns 0 on success. */
+/* Wait for the compositor to create the Wayland socket.  Returns 0 on success. */
 static int wait_for_socket(void)
 {
     struct stat st;
@@ -1098,81 +1097,6 @@ static int webkit_youtube_compat_url(const char *url)
     return strstr(url, "youtube.com") != NULL ||
            strstr(url, "youtube-nocookie.com") != NULL ||
            strstr(url, "youtu.be") != NULL;
-}
-
-static pid_t launch_wlcomp(void)
-{
-    char cmdline_buf[4096] = "";
-    char cmdline_env[sizeof("XV6_KERNEL_CMDLINE=") + sizeof(cmdline_buf)];
-    char fb_bo_env[] = "XV6_WLCOMP_FB_BO=1";
-    char fb_direct_env[] = "XV6_WLCOMP_FB_DIRECT=1";
-    char gpu_compose_env[] = "XV6_WLCOMP_GPU_COMPOSE=1";
-    int have_cmdline = read_cmdline(cmdline_buf, sizeof(cmdline_buf)) == 0;
-    int virgl_available = xv6_virgl_available();
-    /*
-     * Prefer BO-backed presentation by default.  The direct scanout mmap path
-     * is useful for bring-up, but virtio scanout RAM can be exposed through a
-     * stale CPU alias on some host/display combinations.  Keep it opt-in via
-     * wlcomp_fb_direct=1 while the BO path remains the stable fast default.
-     */
-    int fb_cdev_available = 0;
-    {
-        int fbfd = open("/dev/fb0", O_RDWR | O_CLOEXEC);
-        if (fbfd >= 0) {
-            fb_cdev_available = 1;
-            close(fbfd);
-        }
-    }
-    int fast_default = virgl_available || fb_cdev_available;
-    int use_fb_direct = have_cmdline ?
-        cmdline_int_value(cmdline_buf, "wlcomp_fb_direct",
-                          0) :
-        0;
-    int use_fb_bo = have_cmdline ?
-        cmdline_int_value(cmdline_buf, "wlcomp_fb_bo",
-                          fast_default) :
-        fast_default;
-    int gpu_compose_default = virgl_available;
-    int use_gpu_compose = have_cmdline ?
-        cmdline_int_value(cmdline_buf, "wlcomp_gpu_compose",
-                          gpu_compose_default) : 0;
-    pid_t pid = fork();
-    if (pid == 0) {
-        char *argv[] = { "wlcomp", NULL };
-        char *envp_base[] = {
-            "HOME=/",
-            "PATH=/bin:/usr/bin",
-            "XDG_RUNTIME_DIR=/tmp",
-            "XV6_GUI_SESSION=1",
-            fb_direct_env,
-            fb_bo_env,
-            gpu_compose_env,
-            NULL
-        };
-        char *envp_cmdline[] = {
-            "HOME=/",
-            "PATH=/bin:/usr/bin",
-            "XDG_RUNTIME_DIR=/tmp",
-            "XV6_GUI_SESSION=1",
-            fb_direct_env,
-            fb_bo_env,
-            gpu_compose_env,
-            cmdline_env,
-            NULL
-        };
-        snprintf(fb_direct_env, sizeof(fb_direct_env),
-                 "XV6_WLCOMP_FB_DIRECT=%d", use_fb_direct ? 1 : 0);
-        snprintf(fb_bo_env, sizeof(fb_bo_env), "XV6_WLCOMP_FB_BO=%d",
-                 use_fb_bo ? 1 : 0);
-        snprintf(gpu_compose_env, sizeof(gpu_compose_env),
-                 "XV6_WLCOMP_GPU_COMPOSE=%d", use_gpu_compose ? 1 : 0);
-        if (have_cmdline)
-            snprintf(cmdline_env, sizeof(cmdline_env), "XV6_KERNEL_CMDLINE=%s",
-                     cmdline_buf);
-        execve("/bin/wlcomp", argv, have_cmdline ? envp_cmdline : envp_base);
-        _exit(127);
-    }
-    return pid;
 }
 
 static pid_t launch_weston(void)
@@ -2404,6 +2328,7 @@ static int webkit_log_line_is_evidence(const char *line)
 {
     return strstr(line, "webkitgpusmoke: gpu-contract") ||
            strstr(line, "webkitgpusmoke: title=xv6 WebKit WebGL") ||
+           strstr(line, "webkitgpusmoke: title=xv6-perf-video:") ||
            strstr(line, "webkitgpusmoke: complete") ||
            strstr(line, "webkitgpusmoke: GPU contract validation failed") ||
            strstr(line, "virgl-xv6:") ||
@@ -2728,7 +2653,7 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
         char webkit_gpu_run_id_value[64];
         char webkit_gpu_run_id_env[96];
         char webkit_gpu_validate_run_id_env[112];
-        char webkit_wlcomp_d3d12_run_id_env[112];
+        char webkit_d3d12_run_id_env[112];
         char webkit_gst_disable_gl_sink_env[40];
         char webkit_gst_dmabuf_sink_disabled_env[44];
         char webkit_gst_use_videoconvert_env[48];
@@ -2787,8 +2712,8 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
         snprintf(webkit_gpu_validate_run_id_env,
                  sizeof(webkit_gpu_validate_run_id_env),
                  "XV6_GPU_VALIDATE_RUN_ID=%s", webkit_gpu_run_id_value);
-        snprintf(webkit_wlcomp_d3d12_run_id_env,
-                 sizeof(webkit_wlcomp_d3d12_run_id_env),
+        snprintf(webkit_d3d12_run_id_env,
+                 sizeof(webkit_d3d12_run_id_env),
                  "XV6_WLCOMP_D3D12_RUN_ID=%s", webkit_gpu_run_id_value);
         snprintf(webkit_gst_disable_gl_sink_env,
                  sizeof(webkit_gst_disable_gl_sink_env),
@@ -3176,7 +3101,7 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             "HOME=/",
             "PATH=/bin:/usr/bin",
             "LD_LIBRARY_PATH=/lib:/usr/lib:/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu",
-            "LD_PRELOAD=/lib/libpng16.so.16:/lib/libxv6memshim.so",
+            "LD_PRELOAD=/lib/libpng16.so.16",
             "XDG_RUNTIME_DIR=/tmp",
             "XDG_CACHE_HOME=/tmp/.cache",
             "XDG_DATA_DIRS=/share:/usr/share",
@@ -3206,7 +3131,7 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             webkit_youtube_probe_seconds_env,
             webkit_gpu_run_id_env,
             webkit_gpu_validate_run_id_env,
-            webkit_wlcomp_d3d12_run_id_env,
+            webkit_d3d12_run_id_env,
             webkit_uri_log_env,
             "WEBKIT_EXEC_PATH=/libexec/webkit2gtk-4.1",
             "WEBKIT_INJECTED_BUNDLE_PATH=/lib/webkit2gtk-4.1/injected-bundle",
@@ -3232,7 +3157,7 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             "HOME=/",
             "PATH=/bin:/usr/bin",
             "LD_LIBRARY_PATH=/lib:/usr/lib:/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu",
-            "LD_PRELOAD=/lib/libpng16.so.16:/lib/libxv6memshim.so",
+            "LD_PRELOAD=/lib/libpng16.so.16",
             "XDG_RUNTIME_DIR=/tmp",
             "XDG_CACHE_HOME=/tmp/.cache",
             "XDG_DATA_HOME=/tmp/.local/share",
@@ -3266,7 +3191,7 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             webkit_youtube_probe_seconds_env,
             webkit_gpu_run_id_env,
             webkit_gpu_validate_run_id_env,
-            webkit_wlcomp_d3d12_run_id_env,
+            webkit_d3d12_run_id_env,
             webkit_uri_log_env,
             "WEBKIT_EXEC_PATH=/libexec/webkit2gtk-4.1",
             "WEBKIT_INJECTED_BUNDLE_PATH=/lib/webkit2gtk-4.1/injected-bundle",
@@ -3287,7 +3212,6 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             "EGL_PLATFORM=wayland",
             webkit_virgl_force_loss_env,
             webkit_virgl_sync_submit_env,
-            "XV6_WEBKIT_SKIA_NULL_MEMBER_RECOVER=1",
             "ANGLE_DEFAULT_PLATFORM=gl",
             "SOUP_FORCE_HTTP1=1",
             NULL
@@ -3297,8 +3221,8 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
          *
          * Unlike the virgl accel env above, this does NOT claim a native
          * present / shared-surface contract: there is no GPU scanout ABI on
-         * this host, so wlcomp still composites with a CPU framebuffer blit.
-         * What this env changes is *rendering*: WebKit's accelerated
+         * this host, so the compositor still presents through the CPU
+         * framebuffer path. What this env changes is *rendering*: WebKit's accelerated
          * compositing GL context runs on the host NVIDIA GPU through Mesa's
          * d3d12 Gallium driver (libdxcore + libd3d12 over /dev/dxg, no
          * /dev/dri render node), then the rendered buffer is read back and
@@ -3311,7 +3235,7 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             "HOME=/",
             "PATH=/bin:/usr/bin",
             "LD_LIBRARY_PATH=/usr/lib/wsl/lib:/lib:/usr/lib:/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu",
-            "LD_PRELOAD=/lib/libpng16.so.16:/lib/libxv6memshim.so",
+            "LD_PRELOAD=/lib/libpng16.so.16",
             "XDG_RUNTIME_DIR=/tmp",
             "XDG_CACHE_HOME=/tmp/.cache",
             "XDG_DATA_HOME=/tmp/.local/share",
@@ -3345,7 +3269,7 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             webkit_youtube_probe_seconds_env,
             webkit_gpu_run_id_env,
             webkit_gpu_validate_run_id_env,
-            webkit_wlcomp_d3d12_run_id_env,
+            webkit_d3d12_run_id_env,
             webkit_uri_log_env,
             "WEBKIT_EXEC_PATH=/libexec/webkit2gtk-4.1",
             "WEBKIT_INJECTED_BUNDLE_PATH=/lib/webkit2gtk-4.1/injected-bundle",
@@ -3367,7 +3291,7 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             "HOME=/",
             "PATH=/bin:/usr/bin",
             "LD_LIBRARY_PATH=/lib:/usr/lib:/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu",
-            "LD_PRELOAD=/lib/libpng16.so.16:/lib/libxv6memshim.so",
+            "LD_PRELOAD=/lib/libpng16.so.16",
             "XDG_RUNTIME_DIR=/tmp",
             "XDG_CACHE_HOME=/tmp/.cache",
             "XDG_DATA_HOME=/tmp/.local/share",
@@ -3401,7 +3325,7 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             webkit_youtube_probe_seconds_env,
             webkit_gpu_run_id_env,
             webkit_gpu_validate_run_id_env,
-            webkit_wlcomp_d3d12_run_id_env,
+            webkit_d3d12_run_id_env,
             webkit_uri_log_env,
             "WEBKIT_EXEC_PATH=/libexec/webkit2gtk-4.1",
             "WEBKIT_INJECTED_BUNDLE_PATH=/lib/webkit2gtk-4.1/injected-bundle",
@@ -3425,7 +3349,7 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             "HOME=/",
             "PATH=/bin:/usr/bin",
             "LD_LIBRARY_PATH=/lib:/usr/lib:/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu",
-            "LD_PRELOAD=/lib/libpng16.so.16:/lib/libxv6memshim.so",
+            "LD_PRELOAD=/lib/libpng16.so.16",
             "XDG_RUNTIME_DIR=/tmp",
             "XDG_CACHE_HOME=/tmp/.cache",
             "XDG_DATA_HOME=/tmp/.local/share",
@@ -3459,7 +3383,7 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             webkit_youtube_probe_seconds_env,
             webkit_gpu_run_id_env,
             webkit_gpu_validate_run_id_env,
-            webkit_wlcomp_d3d12_run_id_env,
+            webkit_d3d12_run_id_env,
             webkit_uri_log_env,
             "WEBKIT_EXEC_PATH=/libexec/webkit2gtk-4.1",
             "WEBKIT_INJECTED_BUNDLE_PATH=/lib/webkit2gtk-4.1/injected-bundle",
@@ -3821,7 +3745,7 @@ static void run_fbstat_after_glsmoke(const char *label)
 {
     pid_t pid;
     int status;
-    int wlcomp_paused = 0;
+    int compositor_paused = 0;
     int settle_ms;
 
     if (!glsmoke_fbstat_by_cmdline())
@@ -3833,10 +3757,10 @@ static void run_fbstat_after_glsmoke(const char *label)
     /*
      * The compositor keeps emitting one-second diagnostics after the GL smoke
      * client exits.  Pause it while fbstat prints its footer so strict validator
-     * line matches do not lose counter names to interleaved wlcomp stderr.
+     * line matches do not lose counter names to interleaved compositor stderr.
      */
-    if (wlcomp_pid > 0 && kill(wlcomp_pid, SIGSTOP) == 0) {
-        wlcomp_paused = 1;
+    if (compositor_pid > 0 && kill(compositor_pid, SIGSTOP) == 0) {
+        compositor_paused = 1;
         usleep(50000);
     }
     pid = fork();
@@ -3859,8 +3783,8 @@ static void run_fbstat_after_glsmoke(const char *label)
     if (pid < 0) {
         fprintf(stderr, "[desktop] fbstat fork failed errno=%d (%s)\n", errno,
                 errno ? strerror(errno) : "no errno from kernel");
-        if (wlcomp_paused)
-            kill(wlcomp_pid, SIGCONT);
+        if (compositor_paused)
+            kill(compositor_pid, SIGCONT);
         return;
     }
     while (waitpid(pid, &status, 0) < 0) {
@@ -3868,13 +3792,13 @@ static void run_fbstat_after_glsmoke(const char *label)
             fprintf(stderr,
                     "[desktop] fbstat wait failed errno=%d (%s)\n", errno,
                     errno ? strerror(errno) : "no errno from kernel");
-            if (wlcomp_paused)
-                kill(wlcomp_pid, SIGCONT);
+            if (compositor_paused)
+                kill(compositor_pid, SIGCONT);
             return;
         }
     }
-    if (wlcomp_paused)
-        kill(wlcomp_pid, SIGCONT);
+    if (compositor_paused)
+        kill(compositor_pid, SIGCONT);
     fprintf(stderr, "[desktop] fbstat exit status=%d\n",
             WIFEXITED(status) ? WEXITSTATUS(status) : status);
 }
@@ -4023,7 +3947,7 @@ static void cleanup(void)
     kill_and_reap(&glsmoke_pid);
     kill_and_reap(&gst_warmup_pid);
     kill_and_reap(&httpd_pid);
-    kill_and_reap(&wlcomp_pid);
+    kill_and_reap(&compositor_pid);
 }
 
 static int token_is_disabled(const char *cmdline, const char *key)
@@ -4170,16 +4094,6 @@ static int desktop_exit_after_smoke_by_cmdline(void)
         return 0;
 
     return cmdline_int_value(buf, "desktop_exit_after_smoke", 0) != 0;
-}
-
-static int weston_enabled_by_cmdline(void)
-{
-    char buf[4096];
-
-    if (read_cmdline(buf, sizeof(buf)) < 0)
-        return 0;
-
-    return token_is_enabled(buf, "weston");
 }
 
 static int webkit_enabled_by_cmdline(void)
@@ -4778,7 +4692,6 @@ static void glsmoke_args_from_cmdline(char *seconds_arg, size_t seconds_size,
 
 int main(void)
 {
-    int use_weston;
     const char *compositor_name;
 
     install_signal_handlers();
@@ -4789,17 +4702,16 @@ int main(void)
     }
 
     fprintf(stderr, "[desktop] starting Wayland session\n");
-    use_weston = weston_enabled_by_cmdline();
-    compositor_name = use_weston ? "weston" : "wlcomp";
+    compositor_name = "weston";
 
     /* 1. Launch compositor */
-    wlcomp_pid = use_weston ? launch_weston() : launch_wlcomp();
-    if (wlcomp_pid < 0) {
+    compositor_pid = launch_weston();
+    if (compositor_pid < 0) {
         fprintf(stderr, "[desktop] fork %s failed: %s\n", compositor_name,
                 strerror(errno));
         return 1;
     }
-    fprintf(stderr, "[desktop] %s pid=%d\n", compositor_name, wlcomp_pid);
+    fprintf(stderr, "[desktop] %s pid=%d\n", compositor_name, compositor_pid);
 
     /* 2. Wait for Wayland socket */
     if (wait_for_socket() < 0) {
@@ -4843,10 +4755,10 @@ int main(void)
             if (!g_running)
                 break;
 
-            if (exited == wlcomp_pid) {
-                fprintf(stderr, "[desktop] wlcomp exited (status %d)\n",
+            if (exited == compositor_pid) {
+                fprintf(stderr, "[desktop] compositor exited (status %d)\n",
                         WIFEXITED(status) ? WEXITSTATUS(status) : status);
-                wlcomp_pid = 0;
+                compositor_pid = 0;
                 cleanup();
                 return 1;
             }
@@ -4890,10 +4802,10 @@ int main(void)
                 if (!g_running)
                     break;
 
-                if (exited == wlcomp_pid) {
-                    fprintf(stderr, "[desktop] wlcomp exited (status %d)\n",
+                if (exited == compositor_pid) {
+                    fprintf(stderr, "[desktop] compositor exited (status %d)\n",
                             WIFEXITED(status) ? WEXITSTATUS(status) : status);
-                    wlcomp_pid = 0;
+                    compositor_pid = 0;
                     cleanup();
                     return 1;
                 }
@@ -4979,10 +4891,10 @@ int main(void)
                 if (!g_running)
                     break;
 
-                if (exited == wlcomp_pid) {
-                    fprintf(stderr, "[desktop] wlcomp exited (status %d)\n",
+                if (exited == compositor_pid) {
+                    fprintf(stderr, "[desktop] compositor exited (status %d)\n",
                             WEXITSTATUS(status));
-                    wlcomp_pid = 0;
+                    compositor_pid = 0;
                     cleanup();
                     return 1;
                 }
@@ -5091,10 +5003,10 @@ int main(void)
                 break;
 
             if (exited > 0) {
-                if (exited == wlcomp_pid) {
-                    fprintf(stderr, "[desktop] wlcomp exited (status %d)\n",
+                if (exited == compositor_pid) {
+                    fprintf(stderr, "[desktop] compositor exited (status %d)\n",
                             WEXITSTATUS(status));
-                    wlcomp_pid = 0;
+                    compositor_pid = 0;
                     break;
                 }
                 if (exited == client_pid) {
@@ -5213,10 +5125,10 @@ int main(void)
             break;
 
         if (exited > 0) {
-            if (exited == wlcomp_pid) {
-                fprintf(stderr, "[desktop] wlcomp exited (status %d)\n",
+            if (exited == compositor_pid) {
+                fprintf(stderr, "[desktop] compositor exited (status %d)\n",
                         WEXITSTATUS(status));
-                wlcomp_pid = 0;
+                compositor_pid = 0;
                 break;  /* compositor gone → session over */
             } else if (exited == glsmoke_pid) {
                 write_child_status_file("/tmp/glsmoke-status", "glsmoke",

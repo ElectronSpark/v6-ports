@@ -1,27 +1,27 @@
-#include "wlcomp_draw.h"
+#include "xv6_draw.h"
 
 #include "font8x16.h"
 
-static struct wlcomp_draw_clip g_draw_clip;
+static struct xv6_draw_clip g_draw_clip;
 static int g_draw_clip_enabled;
 
-void wlcomp_draw_set_clip(const struct wlcomp_draw_clip *clip)
+void xv6_draw_set_clip(const struct xv6_draw_clip *clip)
 {
     if (!clip) {
-        wlcomp_draw_clear_clip();
+        xv6_draw_clear_clip();
         return;
     }
     g_draw_clip = *clip;
     g_draw_clip_enabled = 1;
 }
 
-void wlcomp_draw_clear_clip(void)
+void xv6_draw_clear_clip(void)
 {
     g_draw_clip_enabled = 0;
 }
 
-int wlcomp_draw_clip_xyxy(int fb_w, int fb_h,
-                          int *x0, int *y0, int *x1, int *y1)
+int xv6_draw_clip_xyxy(int fb_w, int fb_h,
+                       int *x0, int *y0, int *x1, int *y1)
 {
     if (*x0 < 0) *x0 = 0;
     if (*y0 < 0) *y0 = 0;
@@ -36,7 +36,7 @@ int wlcomp_draw_clip_xyxy(int fb_w, int fb_h,
     return *x0 < *x1 && *y0 < *y1;
 }
 
-int wlcomp_draw_pixel_in_clip(int x, int y, int fb_w, int fb_h)
+int xv6_draw_pixel_in_clip(int x, int y, int fb_w, int fb_h)
 {
     if (x < 0 || x >= fb_w || y < 0 || y >= fb_h)
         return 0;
@@ -60,7 +60,7 @@ void draw_char(uint32_t *fb, int fb_w, int fb_h,
                     for (int sx = 0; sx < scale; sx++) {
                         int px = x + col * scale + sx;
                         int py = y + row * scale + sy;
-                        if (wlcomp_draw_pixel_in_clip(px, py, fb_w, fb_h))
+                        if (xv6_draw_pixel_in_clip(px, py, fb_w, fb_h))
                             fb[py * fb_w + px] = color;
                     }
             }
@@ -93,7 +93,7 @@ void draw_rect(uint32_t *fb, int fb_w, int fb_h,
 
     if (w <= 0 || h <= 0)
         return;
-    if (!wlcomp_draw_clip_xyxy(fb_w, fb_h, &x0, &y0, &x1, &y1))
+    if (!xv6_draw_clip_xyxy(fb_w, fb_h, &x0, &y0, &x1, &y1))
         return;
 
     for (int row = y0; row < y1; row++) {
@@ -114,16 +114,16 @@ void draw_rounded_rect(uint32_t *fb, int fb_w, int fb_h,
             if (cx * cx + cy * cy <= r * r) {
                 int px, py;
                 px = x + r - cx; py = y + r - cy;
-                if (wlcomp_draw_pixel_in_clip(px, py, fb_w, fb_h))
+                if (xv6_draw_pixel_in_clip(px, py, fb_w, fb_h))
                     fb[py * fb_w + px] = color;
                 px = x + w - r - 1 + cx; py = y + r - cy;
-                if (wlcomp_draw_pixel_in_clip(px, py, fb_w, fb_h))
+                if (xv6_draw_pixel_in_clip(px, py, fb_w, fb_h))
                     fb[py * fb_w + px] = color;
                 px = x + r - cx; py = y + h - r - 1 + cy;
-                if (wlcomp_draw_pixel_in_clip(px, py, fb_w, fb_h))
+                if (xv6_draw_pixel_in_clip(px, py, fb_w, fb_h))
                     fb[py * fb_w + px] = color;
                 px = x + w - r - 1 + cx; py = y + h - r - 1 + cy;
-                if (wlcomp_draw_pixel_in_clip(px, py, fb_w, fb_h))
+                if (xv6_draw_pixel_in_clip(px, py, fb_w, fb_h))
                     fb[py * fb_w + px] = color;
             }
         }
@@ -138,7 +138,7 @@ void draw_circle(uint32_t *fb, int fb_w, int fb_h,
             if (dx * dx + dy * dy <= r * r) {
                 int px = cx + dx;
                 int py = cy + dy;
-                if (wlcomp_draw_pixel_in_clip(px, py, fb_w, fb_h))
+                if (xv6_draw_pixel_in_clip(px, py, fb_w, fb_h))
                     fb[py * fb_w + px] = color;
             }
 }

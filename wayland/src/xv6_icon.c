@@ -7,7 +7,7 @@
 #include <string.h>
 #include <unistd.h>
 
-#include "wlcomp_draw.h"
+#include "xv6_draw.h"
 
 static int read_exact_at(int fd, void *buf, size_t len, off_t off)
 {
@@ -174,7 +174,7 @@ void xv6_icon_draw(uint32_t *fb, int fb_w, int fb_h, int x, int y,
             int sx = dx * icon->width / w;
             uint32_t src;
 
-            if (!wlcomp_draw_pixel_in_clip(px, py, fb_w, fb_h))
+            if (!xv6_draw_pixel_in_clip(px, py, fb_w, fb_h))
                 continue;
             src = icon->pixels[sy * icon->width + sx];
             fb[py * fb_w + px] = blend_argb(fb[py * fb_w + px], src);

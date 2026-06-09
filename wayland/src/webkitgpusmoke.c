@@ -34,6 +34,8 @@ extern void webkit_settings_set_hardware_acceleration_policy(WebKitSettings *,
 extern GtkWidget *webkit_web_view_new(void);
 extern WebKitSettings *webkit_web_view_get_settings(WebKitWebView *);
 extern void webkit_web_view_load_uri(WebKitWebView *, const gchar *);
+extern void webkit_web_view_load_html(WebKitWebView *, const gchar *,
+                                      const gchar *);
 
 #define WEBKIT_WEB_VIEW(obj) ((WebKitWebView *)(obj))
 #define XV6_DRM_RENDER_NODE "/dev/dri/renderD128"
@@ -85,6 +87,19 @@ static void phase(const char *message)
     fflush(stderr);
 }
 
+static void write_title_probe(const char *title)
+{
+    FILE *fp;
+
+    if (!title || !title[0])
+        return;
+    fp = fopen("/tmp/webkit-title", "w");
+    if (!fp)
+        return;
+    fprintf(fp, "%s\n", title);
+    fclose(fp);
+}
+
 static gboolean quit_cb(gpointer data)
 {
     (void)data;
@@ -102,7 +117,11 @@ static void title_changed_cb(GObject *object, GParamSpec *pspec, gpointer data)
     if (title) {
         fprintf(stderr, "webkitgpusmoke: title=%s\n", title);
         fflush(stderr);
+        write_title_probe(title);
         if (runtime && strstr(title, "webgl spherical poly complete")) {
+            runtime->completion_seen = 1;
+            g_idle_add(quit_cb, NULL);
+        } else if (runtime && strstr(title, "xv6-perf-video:RESULT pass")) {
             runtime->completion_seen = 1;
             g_idle_add(quit_cb, NULL);
         } else if (runtime) {
@@ -146,8 +165,22 @@ static char *read_text_file(const char *uri)
 static gboolean start_load_cb(gpointer data)
 {
     struct SmokeLoad *load = data;
-    webkit_web_view_load_uri(load->view, load->uri);
-    phase("uri load requested");
+
+    if (strstr(load->uri, "gpu-webgl-smoke.html")) {
+        char *html = read_text_file(load->uri);
+
+        if (html) {
+            webkit_web_view_load_html(load->view, html, load->uri);
+            g_free(html);
+            phase("html load requested");
+        } else {
+            webkit_web_view_load_uri(load->view, load->uri);
+            phase("uri load requested");
+        }
+    } else {
+        webkit_web_view_load_uri(load->view, load->uri);
+        phase("uri load requested");
+    }
     g_object_unref(load->view);
     free(load->uri);
     free(load);

@@ -167,3 +167,6 @@
 [submodule "drm_info/src"]
 	path = drm_info/src
 	url = https://gitlab.freedesktop.org/emersion/drm_info.git
+[submodule "weston/src"]
+	path = weston/src
+	url = https://gitlab.freedesktop.org/wayland/weston.git

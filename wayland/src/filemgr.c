@@ -22,7 +22,7 @@
 #include <unistd.h>
 #include <wayland-client.h>
 
-#include "wlcomp_draw.h"
+#include "xv6_draw.h"
 #include "xv6_icon.h"
 #include "xdg-shell-client-protocol.h"
 #include "xv6_present_buffer.h"

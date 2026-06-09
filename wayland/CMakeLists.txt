@@ -14,23 +14,10 @@ set(XV6_FAULT_TRACE_SRC "${XV6_REPO_ROOT}/tools/xv6_glibc_fault_trace.c")
 set(PEANUT_GB_SRC_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../peanut-gb/src")
 set(DIRECTX_HEADERS_DIR
     "${CMAKE_CURRENT_SOURCE_DIR}/../mesa/src/subprojects/DirectX-Headers-1.0/include")
-set(WLCOMP_INCLUDE_SRCS
-    ${WAYLAND_SRC_DIR}/wlcomp_fb.inc
-    ${WAYLAND_SRC_DIR}/wlcomp_surface_state.inc
-    ${WAYLAND_SRC_DIR}/wlcomp_gl_compose.inc
-    ${WAYLAND_SRC_DIR}/wlcomp_buffer_shm.inc
-    ${WAYLAND_SRC_DIR}/wlcomp_dmabuf.inc
-    ${WAYLAND_SRC_DIR}/wlcomp_gpu_sync.inc
-    ${WAYLAND_SRC_DIR}/wlcomp_compositor_subsurface.inc
-    ${WAYLAND_SRC_DIR}/wlcomp_xdg.inc
-    ${WAYLAND_SRC_DIR}/wlcomp_seat_output.inc
-    ${WAYLAND_SRC_DIR}/wlcomp_desktop_iwin.inc
-    ${WAYLAND_SRC_DIR}/wlcomp_render_loop.inc
-    ${WAYLAND_SRC_DIR}/wlcomp_input_init.inc)
 set(DESKTOP_INCLUDE_SRCS
     ${WAYLAND_SRC_DIR}/desktop_clients.inc)
 
-foreach(_src wlcomp.c wlcomp_desktop.c wlcomp_desktop.h wlcomp_draw.c wlcomp_draw.h wlcomp_iwin.h wlcomp_iwin_calc.c wlcomp_iwin_calc.h wlcomp_iwin_demo.c wlcomp_iwin_demo.h wlcomp_iwin_filemgr.c wlcomp_iwin_filemgr.h wlcomp_iwin_terminal.c wlcomp_iwin_terminal.h wlcomp_iwin_text.c wlcomp_iwin_text.h wlcomp_keymap.c wlcomp_keymap.h wlcomp_launcher.c wlcomp_launcher.h wlcomp_swgl.c wlcomp_swgl.h desktop.c filemgr.c glsmoke.c glmaze.c peanutgb.c mesaglsmoke.c mesawlegl.c mesakmsgl.c mesademo.c gl_program.c gl_program.h gl_fps_overlay.c gl_fps_overlay.h mesawlegl_sphere.c mesawlegl_sphere.h pixel_fps_overlay.c pixel_fps_overlay.h xv6_icon.c xv6_icon.h xv6_icon_filemgr.c xv6_icon_glmaze.c xv6_icon_peanutgb.c xv6_present_buffer.c xv6_present_buffer.h mesaeglinfo.c mesaglfeature.c mesad3d12probe.c gpu_substrate_validate.c dmabufsmoke.c d3d12sharedsmoke.c drmgpuprobe.c webkitgpusmoke.c cursorsmoke.c xv6_egl_gles.c xv6memshim.c webkit_preload_wrapper.c install_webkit_preload_wrappers.sh font8x16.h)
+foreach(_src desktop.c filemgr.c glsmoke.c glmaze.c peanutgb.c mesaglsmoke.c mesawlegl.c mesakmsgl.c mesademo.c gl_program.c gl_program.h gl_fps_overlay.c gl_fps_overlay.h mesawlegl_sphere.c mesawlegl_sphere.h pixel_fps_overlay.c pixel_fps_overlay.h xv6_draw.c xv6_draw.h xv6_icon.c xv6_icon.h xv6_icon_filemgr.c xv6_icon_glmaze.c xv6_present_buffer.c xv6_present_buffer.h mesaeglinfo.c mesaglfeature.c mesad3d12probe.c gpu_substrate_validate.c dmabufsmoke.c d3d12sharedsmoke.c drmgpuprobe.c webkitgpusmoke.c cursorsmoke.c xv6_egl_gles.c webkit_preload_wrapper.c install_webkit_preload_wrappers.sh font8x16.h)
     if(NOT EXISTS "${WAYLAND_SRC_DIR}/${_src}")
         message(FATAL_ERROR "ports/wayland: missing ${WAYLAND_SRC_DIR}/${_src}")
     endif()
@@ -39,11 +26,6 @@ if(NOT EXISTS "${PEANUT_GB_SRC_DIR}/peanut_gb.h")
     message(FATAL_ERROR
         "ports/wayland: missing Peanut-GB source submodule at ${PEANUT_GB_SRC_DIR}; run git submodule update --init --recursive ports/peanut-gb/src")
 endif()
-foreach(_src ${WLCOMP_INCLUDE_SRCS})
-    if(NOT EXISTS "${_src}")
-        message(FATAL_ERROR "ports/wayland: missing ${_src}")
-    endif()
-endforeach()
 foreach(_src ${DESKTOP_INCLUDE_SRCS})
     if(NOT EXISTS "${_src}")
         message(FATAL_ERROR "ports/wayland: missing ${_src}")
@@ -63,28 +45,19 @@ else()
     message(STATUS "ports/wayland: libd3d12/libdxcore not found in /usr/lib/wsl/lib; d3d12sharedsmoke will be a placeholder")
 endif()
 
-set(_wl_build     ${CMAKE_CURRENT_BINARY_DIR}/wlcomp-build)
+set(_wl_build     ${CMAKE_CURRENT_BINARY_DIR}/wayland-build)
 set(_host_wl_build ${CMAKE_CURRENT_BINARY_DIR}/wayland-host-glibc-build)
 set(_wl_proto_dir ${_wl_build}/wayland)
-set(_wl_src       ${_wl_build}/wlcomp.c)
-set(_wl_font      ${_wl_build}/font8x16.h)
 set(_xdg_xml      ${CMAKE_CURRENT_SOURCE_DIR}/../wayland-protocols/src/stable/xdg-shell/xdg-shell.xml)
-set(_xdg_header   ${_wl_proto_dir}/xdg-shell-server-protocol.h)
-set(_xdg_code     ${_wl_build}/xdg-shell-protocol.c)
 set(_xdg_client_header ${_wl_proto_dir}/xdg-shell-client-protocol.h)
 set(_xdg_client_code   ${_wl_build}/xdg-shell-client-protocol.c)
 set(_dmabuf_xml   ${CMAKE_CURRENT_SOURCE_DIR}/../wayland-protocols/src/stable/linux-dmabuf/linux-dmabuf-v1.xml)
-set(_dmabuf_header ${_wl_proto_dir}/linux-dmabuf-v1-server-protocol.h)
-set(_dmabuf_code  ${_wl_build}/linux-dmabuf-v1-protocol.c)
 set(_dmabuf_client_header ${_wl_proto_dir}/linux-dmabuf-v1-client-protocol.h)
 set(_dmabuf_client_code ${_wl_build}/linux-dmabuf-v1-client-protocol.c)
 set(_explicit_sync_xml ${CMAKE_CURRENT_SOURCE_DIR}/../wayland-protocols/src/unstable/linux-explicit-synchronization/linux-explicit-synchronization-unstable-v1.xml)
-set(_explicit_sync_header ${_wl_proto_dir}/linux-explicit-synchronization-unstable-v1-server-protocol.h)
-set(_explicit_sync_code ${_wl_build}/linux-explicit-synchronization-unstable-v1-protocol.c)
 set(_explicit_sync_client_header ${_wl_proto_dir}/linux-explicit-synchronization-unstable-v1-client-protocol.h)
 set(_explicit_sync_client_code ${_wl_build}/linux-explicit-synchronization-unstable-v1-client-protocol.c)
-set(_wl_bin       ${_wl_build}/wlcomp)
-set(_desktop_bin  ${_wl_build}/desktop)
+set(_weston_session_bin  ${_wl_build}/weston-session)
 set(_filemgr_bin  ${_wl_build}/filemgr)
 set(_glsmoke_bin  ${_wl_build}/glsmoke)
 set(_glmaze_bin   ${_wl_build}/glmaze)
@@ -103,7 +76,6 @@ set(_cursorsmoke_bin ${_wl_build}/cursorsmoke)
 set(_d3d12sharedsmoke_bin ${_wl_build}/d3d12sharedsmoke)
 set(_drmgpuprobe_bin ${_wl_build}/drmgpuprobe)
 set(_webkitgpusmoke_bin ${_wl_build}/webkitgpusmoke)
-set(_memshim_lib  ${_wl_build}/libxv6memshim.so)
 set(_fault_trace_lib ${_wl_build}/xv6_glibc_fault_trace.so)
 set(_xv6egl_obj   ${_wl_build}/xv6_egl_gles.o)
 set(_xv6egl_lib   ${_wl_build}/libEGL.a)
@@ -111,8 +83,7 @@ set(_xv6gles_lib  ${_wl_build}/libGLESv2.a)
 set(_host_xv6egl_obj  ${_wl_build}/host-xv6_egl_gles.o)
 set(_host_xv6egl_lib  ${_wl_build}/host-libEGL.a)
 set(_host_xv6gles_lib ${_wl_build}/host-libGLESv2.a)
-set(_wl_installed ${XV6_SYSROOT}/bin/wlcomp)
-set(_desktop_installed ${XV6_SYSROOT}/bin/desktop)
+set(_weston_session_installed ${XV6_SYSROOT}/bin/weston-session)
 set(_filemgr_installed ${XV6_SYSROOT}/bin/filemgr)
 set(_glsmoke_installed ${XV6_SYSROOT}/bin/glsmoke)
 set(_glmaze_installed ${XV6_SYSROOT}/bin/glmaze)
@@ -131,10 +102,9 @@ set(_cursorsmoke_installed ${XV6_SYSROOT}/bin/cursorsmoke)
 set(_d3d12sharedsmoke_installed ${XV6_SYSROOT}/bin/d3d12sharedsmoke)
 set(_drmgpuprobe_installed ${XV6_SYSROOT}/bin/drmgpuprobe)
 set(_webkitgpusmoke_installed ${XV6_SYSROOT}/bin/webkitgpusmoke)
-set(_memshim_installed ${XV6_SYSROOT}/lib/libxv6memshim.so)
 set(_fault_trace_installed ${XV6_SYSROOT}/lib/xv6_glibc_fault_trace.so)
 set(_webkit_preload_wrapper_bin ${_wl_build}/webkit-preload-wrapper)
-# The small xv6 EGL/GLES shim is linked directly into wlcomp/glsmoke from the
+# The small xv6 EGL/GLES shim is linked directly into test programs from the
 # build directory. Do not install it under Mesa's public libEGL/libGLESv2 names:
 # GTK/WebKit depend on Mesa's shared EGL stack, and a stale static shim archive
 # in the sysroot can be picked up by Meson and linked into shared libraries.
@@ -152,67 +122,10 @@ option(XV6_WAYLAND_HOST_GLIBC
        "Build the core desktop session programs with the host compiler and host glibc"
        ${XV6_WAYLAND_HOST_GLIBC_AUTO})
 find_program(XV6_WEBKIT_HOST_CC NAMES cc gcc clang REQUIRED)
-set(_memshim_cc ${CMAKE_C_COMPILER})
 
 if(XV6_WAYLAND_HOST_GLIBC)
     find_program(XV6_HOST_CC NAMES cc gcc clang REQUIRED)
-    find_program(XV6_HOST_AR NAMES ar REQUIRED)
-    find_program(XV6_HOST_RANLIB NAMES ranlib REQUIRED)
-    find_program(XV6_MESON NAMES meson REQUIRED)
-    set(_memshim_cc ${XV6_HOST_CC})
-    set(_host_wl_stamp ${_host_wl_build}/.host-wayland-built)
-    set(_host_wayland_server_lib ${_host_wl_build}/src/libwayland-server.a)
-    set(_host_wayland_client_lib ${_host_wl_build}/src/libwayland-client.a)
-    set(_host_wayland_private_lib ${_host_wl_build}/src/libwayland-private.a)
-    set(_host_wayland_util_lib ${_host_wl_build}/src/libwayland-util.a)
-
-    add_custom_command(
-        OUTPUT  ${_host_wl_stamp}
-        COMMAND ${CMAKE_COMMAND} -E rm -rf ${_host_wl_build}
-        COMMAND ${XV6_MESON} setup ${_host_wl_build}
-                    ${CMAKE_CURRENT_SOURCE_DIR}/../wayland-src/src
-                    --buildtype=release
-                    --default-library=static
-                    -Dprefix=${_host_wl_build}/install
-                    -Dlibraries=true
-                    -Dscanner=true
-                    -Dtests=false
-                    -Ddocumentation=false
-                    -Ddtd_validation=false
-        COMMAND ${XV6_MESON} compile -C ${_host_wl_build}
-        COMMAND ${CMAKE_COMMAND} -E touch ${_host_wl_stamp}
-        COMMENT "Building private host-glibc Wayland static libraries"
-        VERBATIM)
 endif()
-
-add_custom_command(
-    OUTPUT  ${_wl_src} ${_wl_font}
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                ${WAYLAND_SRC_DIR}/font8x16.h ${_wl_font}
-    COMMAND sed -e "s|(uint32_t)ev\\.dx|(uint32_t)(uint16_t)ev.dx|"
-                -e "s|(uint32_t)ev\\.dy|(uint32_t)(uint16_t)ev.dy|"
-                ${WAYLAND_SRC_DIR}/wlcomp.c > ${_wl_src}
-    DEPENDS ${WAYLAND_SRC_DIR}/wlcomp.c ${WAYLAND_SRC_DIR}/font8x16.h
-            ${WLCOMP_INCLUDE_SRCS}
-    COMMENT "Patching wlcomp.c"
-    VERBATIM)
-
-add_custom_command(
-    OUTPUT  ${_xdg_header} ${_xdg_code}
-    COMMAND ${CMAKE_COMMAND} -E make_directory ${_wl_proto_dir}
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                ${XV6_SYSROOT}/include/wayland-server-core.h
-                ${_wl_proto_dir}/wayland-server-core.h
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                ${XV6_SYSROOT}/include/wayland-server-protocol.h
-                ${_wl_proto_dir}/wayland-server-protocol.h
-    COMMAND ${XV6_SYSROOT}/host-tools/bin/wayland-scanner server-header
-                ${_xdg_xml} ${_xdg_header}
-    COMMAND ${XV6_SYSROOT}/host-tools/bin/wayland-scanner private-code
-                ${_xdg_xml} ${_xdg_code}
-    DEPENDS ${_xdg_xml}
-    COMMENT "Generating xdg-shell Wayland protocol sources"
-    VERBATIM)
 
 add_custom_command(
     OUTPUT  ${_xdg_client_header} ${_xdg_client_code}
@@ -226,17 +139,6 @@ add_custom_command(
     VERBATIM)
 
 add_custom_command(
-    OUTPUT  ${_dmabuf_header} ${_dmabuf_code}
-    COMMAND ${CMAKE_COMMAND} -E make_directory ${_wl_proto_dir}
-    COMMAND ${XV6_SYSROOT}/host-tools/bin/wayland-scanner server-header
-                ${_dmabuf_xml} ${_dmabuf_header}
-    COMMAND ${XV6_SYSROOT}/host-tools/bin/wayland-scanner private-code
-                ${_dmabuf_xml} ${_dmabuf_code}
-    DEPENDS ${_dmabuf_xml}
-    COMMENT "Generating linux-dmabuf Wayland protocol sources"
-    VERBATIM)
-
-add_custom_command(
     OUTPUT  ${_dmabuf_client_header} ${_dmabuf_client_code}
     COMMAND ${CMAKE_COMMAND} -E make_directory ${_wl_proto_dir}
     COMMAND ${XV6_SYSROOT}/host-tools/bin/wayland-scanner client-header
@@ -245,17 +147,6 @@ add_custom_command(
                 ${_dmabuf_xml} ${_dmabuf_client_code}
     DEPENDS ${_dmabuf_xml}
     COMMENT "Generating linux-dmabuf Wayland client protocol sources"
-    VERBATIM)
-
-add_custom_command(
-    OUTPUT  ${_explicit_sync_header} ${_explicit_sync_code}
-    COMMAND ${CMAKE_COMMAND} -E make_directory ${_wl_proto_dir}
-    COMMAND ${XV6_SYSROOT}/host-tools/bin/wayland-scanner server-header
-                ${_explicit_sync_xml} ${_explicit_sync_header}
-    COMMAND ${XV6_SYSROOT}/host-tools/bin/wayland-scanner private-code
-                ${_explicit_sync_xml} ${_explicit_sync_code}
-    DEPENDS ${_explicit_sync_xml}
-    COMMENT "Generating linux-explicit-sync Wayland protocol sources"
     VERBATIM)
 
 add_custom_command(
@@ -271,157 +162,21 @@ add_custom_command(
 
 if(XV6_WAYLAND_HOST_GLIBC)
     add_custom_command(
-        OUTPUT  ${_wl_bin}
+        OUTPUT  ${_weston_session_bin}
         COMMAND ${XV6_HOST_CC} ${_wayland_opt_cflags} -Wall -Wno-unused-result
-                    -I ${_host_wl_build}
-                    -I ${_host_wl_build}/src
-                    -I ${CMAKE_CURRENT_SOURCE_DIR}/../wayland-src/src/src
-                    -I ${WAYLAND_SRC_DIR}
-                    -I ${_wl_build}
-                    -I ${_wl_proto_dir}
-                    -I ${DIRECTX_HEADERS_DIR}
-                    -I ${DIRECTX_HEADERS_DIR}/wsl/stubs
-                    -I ${XV6_SYSROOT}/include/wsl/stubs
-                    -I ${XV6_SYSROOT}/include
-                    -I ${XV6_SYSROOT}/include/wayland
-                    -I ${XV6_SYSROOT}/include/libdrm
-                    -o ${_wl_bin} ${_wl_src}
-                    ${WAYLAND_SRC_DIR}/wlcomp_desktop.c
-                    ${WAYLAND_SRC_DIR}/wlcomp_draw.c
-                    ${WAYLAND_SRC_DIR}/xv6_icon.c
-                    ${WAYLAND_SRC_DIR}/wlcomp_iwin_calc.c
-                    ${WAYLAND_SRC_DIR}/wlcomp_iwin_demo.c
-                    ${WAYLAND_SRC_DIR}/wlcomp_iwin_filemgr.c
-                    ${WAYLAND_SRC_DIR}/wlcomp_iwin_terminal.c
-                    ${WAYLAND_SRC_DIR}/wlcomp_iwin_text.c
-                    ${WAYLAND_SRC_DIR}/wlcomp_keymap.c
-                    ${WAYLAND_SRC_DIR}/wlcomp_launcher.c
-                    ${WAYLAND_SRC_DIR}/wlcomp_swgl.c
-                    ${_xdg_code} ${_dmabuf_code}
-                    ${_explicit_sync_code}
-                    ${_host_wayland_server_lib}
-                    ${_host_wayland_private_lib}
-                    ${_host_wayland_util_lib}
-                    -lEGL -lGLESv2 -lgbm
-                    -lffi -lpthread -ldl -lrt -lm
-        DEPENDS ${_host_wl_stamp}
-                ${_wl_src} ${_wl_font} ${_xdg_header} ${_xdg_code}
-                ${_dmabuf_header} ${_dmabuf_code}
-                ${_explicit_sync_header} ${_explicit_sync_code}
-                ${WAYLAND_SRC_DIR}/wlcomp_desktop.c
-                ${WAYLAND_SRC_DIR}/wlcomp_desktop.h
-                ${WAYLAND_SRC_DIR}/wlcomp_draw.c
-                ${WAYLAND_SRC_DIR}/wlcomp_draw.h
-                ${WAYLAND_SRC_DIR}/xv6_icon.c
-                ${WAYLAND_SRC_DIR}/xv6_icon.h
-                ${WAYLAND_SRC_DIR}/wlcomp_iwin.h
-                ${WAYLAND_SRC_DIR}/wlcomp_iwin_calc.c
-                ${WAYLAND_SRC_DIR}/wlcomp_iwin_calc.h
-                ${WAYLAND_SRC_DIR}/wlcomp_iwin_demo.c
-                ${WAYLAND_SRC_DIR}/wlcomp_iwin_demo.h
-                ${WAYLAND_SRC_DIR}/wlcomp_iwin_filemgr.c
-                ${WAYLAND_SRC_DIR}/wlcomp_iwin_filemgr.h
-                ${WAYLAND_SRC_DIR}/wlcomp_iwin_terminal.c
-                ${WAYLAND_SRC_DIR}/wlcomp_iwin_terminal.h
-                ${WAYLAND_SRC_DIR}/wlcomp_iwin_text.c
-                ${WAYLAND_SRC_DIR}/wlcomp_iwin_text.h
-                ${WAYLAND_SRC_DIR}/wlcomp_keymap.c
-                ${WAYLAND_SRC_DIR}/wlcomp_keymap.h
-                ${WAYLAND_SRC_DIR}/wlcomp_launcher.c
-                ${WAYLAND_SRC_DIR}/wlcomp_launcher.h
-                ${WAYLAND_SRC_DIR}/wlcomp_swgl.c
-                ${WAYLAND_SRC_DIR}/wlcomp_swgl.h
-        COMMENT "Compiling wlcomp with host glibc"
-        VERBATIM)
-
-    add_custom_command(
-        OUTPUT  ${_desktop_bin}
-        COMMAND ${XV6_HOST_CC} ${_wayland_opt_cflags} -Wall -Wno-unused-result
-                    -o ${_desktop_bin} ${WAYLAND_SRC_DIR}/desktop.c
+                    -o ${_weston_session_bin} ${WAYLAND_SRC_DIR}/desktop.c
         DEPENDS ${WAYLAND_SRC_DIR}/desktop.c ${DESKTOP_INCLUDE_SRCS}
-        COMMENT "Compiling desktop session manager with host glibc"
+        COMMENT "Compiling Weston session manager with host glibc"
         VERBATIM)
 else()
     add_custom_command(
-        OUTPUT  ${_wl_bin}
-        COMMAND ${CMAKE_C_COMPILER} ${_wayland_opt_cflags} -Wall -Wno-unused-result
-                    -isystem ${XV6_SYSROOT}/include
-                    -I ${WAYLAND_SRC_DIR}
-                    -I ${_wl_build}
-                    -I ${_wl_proto_dir}
-                    -I ${DIRECTX_HEADERS_DIR}
-                    -I ${DIRECTX_HEADERS_DIR}/wsl/stubs
-                    -I ${XV6_SYSROOT}/include/wsl/stubs
-                    -I ${XV6_SYSROOT}/include/wayland
-                    -L ${XV6_SYSROOT}/lib
-                    -Wl,-rpath-link,${XV6_SYSROOT}/lib
-                    -o ${_wl_bin} ${_wl_src}
-                    ${WAYLAND_SRC_DIR}/wlcomp_desktop.c
-                    ${WAYLAND_SRC_DIR}/wlcomp_draw.c
-                    ${WAYLAND_SRC_DIR}/xv6_icon.c
-                    ${WAYLAND_SRC_DIR}/wlcomp_iwin_calc.c
-                    ${WAYLAND_SRC_DIR}/wlcomp_iwin_demo.c
-                    ${WAYLAND_SRC_DIR}/wlcomp_iwin_filemgr.c
-                    ${WAYLAND_SRC_DIR}/wlcomp_iwin_terminal.c
-                    ${WAYLAND_SRC_DIR}/wlcomp_iwin_text.c
-                    ${WAYLAND_SRC_DIR}/wlcomp_keymap.c
-                    ${WAYLAND_SRC_DIR}/wlcomp_launcher.c
-                    ${WAYLAND_SRC_DIR}/wlcomp_swgl.c
-                    ${_xdg_code} ${_dmabuf_code}
-                    ${_explicit_sync_code}
-                    ${XV6_SYSROOT}/lib/libwayland-server.a
-                    -lEGL -lGLESv2 -lgbm
-                    -lffi -lpthread -ldl -lrt -lm
-        DEPENDS ${_wl_src} ${_wl_font} ${_xdg_header} ${_xdg_code}
-                ${_dmabuf_header} ${_dmabuf_code}
-                ${_explicit_sync_header} ${_explicit_sync_code}
-                ${WAYLAND_SRC_DIR}/wlcomp_desktop.c
-                ${WAYLAND_SRC_DIR}/wlcomp_desktop.h
-                ${WAYLAND_SRC_DIR}/wlcomp_draw.c
-                ${WAYLAND_SRC_DIR}/wlcomp_draw.h
-                ${WAYLAND_SRC_DIR}/xv6_icon.c
-                ${WAYLAND_SRC_DIR}/xv6_icon.h
-                ${WAYLAND_SRC_DIR}/wlcomp_iwin.h
-                ${WAYLAND_SRC_DIR}/wlcomp_iwin_calc.c
-                ${WAYLAND_SRC_DIR}/wlcomp_iwin_calc.h
-                ${WAYLAND_SRC_DIR}/wlcomp_iwin_demo.c
-                ${WAYLAND_SRC_DIR}/wlcomp_iwin_demo.h
-                ${WAYLAND_SRC_DIR}/wlcomp_iwin_filemgr.c
-                ${WAYLAND_SRC_DIR}/wlcomp_iwin_filemgr.h
-                ${WAYLAND_SRC_DIR}/wlcomp_iwin_terminal.c
-                ${WAYLAND_SRC_DIR}/wlcomp_iwin_terminal.h
-                ${WAYLAND_SRC_DIR}/wlcomp_iwin_text.c
-                ${WAYLAND_SRC_DIR}/wlcomp_iwin_text.h
-                ${WAYLAND_SRC_DIR}/wlcomp_keymap.c
-                ${WAYLAND_SRC_DIR}/wlcomp_keymap.h
-                ${WAYLAND_SRC_DIR}/wlcomp_launcher.c
-                ${WAYLAND_SRC_DIR}/wlcomp_launcher.h
-                ${WAYLAND_SRC_DIR}/wlcomp_swgl.c
-                ${WAYLAND_SRC_DIR}/wlcomp_swgl.h
-                ${XV6_SYSROOT}/lib/libwayland-server.a
-        COMMENT "Compiling wlcomp from source"
-        VERBATIM)
-
-    add_custom_command(
-        OUTPUT  ${_desktop_bin}
+        OUTPUT  ${_weston_session_bin}
         COMMAND ${CMAKE_C_COMPILER} ${_wayland_opt_cflags} -Wall -static
-                    -o ${_desktop_bin} ${WAYLAND_SRC_DIR}/desktop.c
+                    -o ${_weston_session_bin} ${WAYLAND_SRC_DIR}/desktop.c
         DEPENDS ${WAYLAND_SRC_DIR}/desktop.c ${DESKTOP_INCLUDE_SRCS}
-        COMMENT "Compiling desktop session manager from source"
+        COMMENT "Compiling Weston session manager from source"
         VERBATIM)
 endif()
-
-add_custom_command(
-    OUTPUT  ${_memshim_lib}
-    COMMAND ${_memshim_cc} ${_wayland_opt_cflags} -Wall -fPIC -shared
-                -fno-builtin -fno-stack-protector
-                -Wl,-soname,libxv6memshim.so
-                -o ${_memshim_lib}
-                ${WAYLAND_SRC_DIR}/xv6memshim.c
-                -ldl
-    DEPENDS ${WAYLAND_SRC_DIR}/xv6memshim.c
-    COMMENT "Compiling xv6 WebKit memory-function shim"
-    VERBATIM)
 
 add_custom_command(
     OUTPUT  ${_webkit_preload_wrapper_bin}
@@ -431,9 +186,9 @@ add_custom_command(
                 -Wl,-rpath-link,${XV6_SYSROOT}/lib
                 -o ${_webkit_preload_wrapper_bin}
                 ${WAYLAND_SRC_DIR}/webkit_preload_wrapper.c
-                -Wl,--no-as-needed -lwebkit2gtk-4.1 ${_memshim_lib}
+                -Wl,--no-as-needed -lwebkit2gtk-4.1
                 -Wl,--as-needed -ldl -pthread
-    DEPENDS ${WAYLAND_SRC_DIR}/webkit_preload_wrapper.c ${_memshim_lib}
+    DEPENDS ${WAYLAND_SRC_DIR}/webkit_preload_wrapper.c
     COMMENT "Compiling WebKit process shim wrapper"
     VERBATIM)
 
@@ -603,15 +358,15 @@ add_custom_command(
                 -Wl,-rpath,/lib
                 -o ${_filemgr_bin}
                 ${WAYLAND_SRC_DIR}/filemgr.c
-                ${WAYLAND_SRC_DIR}/wlcomp_draw.c
+                ${WAYLAND_SRC_DIR}/xv6_draw.c
                 ${WAYLAND_SRC_DIR}/xv6_icon.c
                 ${WAYLAND_SRC_DIR}/xv6_icon_filemgr.c
                 ${WAYLAND_SRC_DIR}/xv6_present_buffer.c
                 ${_xdg_client_code}
                 -lwayland-client -lffi -lpthread -ldl -lrt -lm
     DEPENDS ${WAYLAND_SRC_DIR}/filemgr.c
-            ${WAYLAND_SRC_DIR}/wlcomp_draw.c
-            ${WAYLAND_SRC_DIR}/wlcomp_draw.h
+            ${WAYLAND_SRC_DIR}/xv6_draw.c
+            ${WAYLAND_SRC_DIR}/xv6_draw.h
             ${WAYLAND_SRC_DIR}/xv6_icon.c
             ${WAYLAND_SRC_DIR}/xv6_icon.h
             ${WAYLAND_SRC_DIR}/xv6_icon_filemgr.c
@@ -937,7 +692,7 @@ add_custom_command(
     VERBATIM)
 
 add_custom_command(
-    OUTPUT  ${_wl_installed} ${_desktop_installed} ${_filemgr_installed}
+    OUTPUT  ${_weston_session_installed} ${_filemgr_installed}
             ${_glsmoke_installed} ${_glmaze_installed}
             ${_peanutgb_installed}
             ${_mesaglsmoke_installed} ${_mesawlegl_installed}
@@ -950,9 +705,12 @@ add_custom_command(
             ${_dmabufsmoke_installed} ${_cursorsmoke_installed}
             ${_d3d12sharedsmoke_installed}
             ${_drmgpuprobe_installed} ${_webkitgpusmoke_installed}
-            ${_memshim_installed} ${_fault_trace_installed}
-    COMMAND ${CMAKE_COMMAND} -E copy ${_wl_bin} ${_wl_installed}
-    COMMAND ${CMAKE_COMMAND} -E copy ${_desktop_bin} ${_desktop_installed}
+            ${_fault_trace_installed}
+    COMMAND ${CMAKE_COMMAND} -E rm -f
+            ${XV6_SYSROOT}/bin/wlcomp
+            ${XV6_SYSROOT}/bin/desktop
+            ${XV6_SYSROOT}/lib/libxv6memshim.so
+    COMMAND ${CMAKE_COMMAND} -E copy ${_weston_session_bin} ${_weston_session_installed}
     COMMAND ${CMAKE_COMMAND} -E copy ${_filemgr_bin} ${_filemgr_installed}
     COMMAND ${CMAKE_COMMAND} -E copy ${_glsmoke_bin} ${_glsmoke_installed}
     COMMAND ${CMAKE_COMMAND} -E copy ${_glmaze_bin} ${_glmaze_installed}
@@ -974,12 +732,11 @@ add_custom_command(
     COMMAND ${CMAKE_COMMAND} -E copy ${_d3d12sharedsmoke_bin} ${_d3d12sharedsmoke_installed}
     COMMAND ${CMAKE_COMMAND} -E copy ${_drmgpuprobe_bin} ${_drmgpuprobe_installed}
     COMMAND ${CMAKE_COMMAND} -E copy ${_webkitgpusmoke_bin} ${_webkitgpusmoke_installed}
-    COMMAND ${CMAKE_COMMAND} -E copy ${_memshim_lib} ${_memshim_installed}
     COMMAND ${CMAKE_COMMAND} -E copy ${_fault_trace_lib} ${_fault_trace_installed}
     COMMAND bash ${WAYLAND_SRC_DIR}/install_webkit_preload_wrappers.sh
             ${_webkit_preload_wrapper_bin} ${XV6_SYSROOT}
     COMMAND ${CMAKE_COMMAND} -E rm -f ${_egl_installed} ${_gles_installed}
-    DEPENDS ${_wl_bin} ${_desktop_bin} ${_filemgr_bin}
+    DEPENDS ${_weston_session_bin} ${_filemgr_bin}
             ${_glsmoke_bin} ${_glmaze_bin} ${_peanutgb_bin}
             ${_mesaglsmoke_bin}
             ${_mesawlegl_bin} ${_mesakmsgl_bin} ${_mesademo_bin}
@@ -987,14 +744,14 @@ add_custom_command(
             ${_mesad3d12probe_bin} ${_gpu_substrate_validate_bin}
             ${_gbmtest_bin} ${_dmabufsmoke_bin} ${_cursorsmoke_bin}
             ${_d3d12sharedsmoke_bin}
-            ${_drmgpuprobe_bin} ${_webkitgpusmoke_bin} ${_memshim_lib}
+            ${_drmgpuprobe_bin} ${_webkitgpusmoke_bin}
             ${_fault_trace_lib} ${_webkit_preload_wrapper_bin}
             ${WAYLAND_SRC_DIR}/install_webkit_preload_wrappers.sh
     COMMENT "Installing GUI session into ${XV6_SYSROOT}/bin"
     VERBATIM)
 
 add_custom_target(port-wayland ALL DEPENDS
-    ${_wl_installed} ${_desktop_installed} ${_filemgr_installed}
+    ${_weston_session_installed} ${_filemgr_installed}
     ${_glsmoke_installed} ${_glmaze_installed} ${_peanutgb_installed}
     ${_mesaglsmoke_installed} ${_mesawlegl_installed}
     ${_mesakmsgl_installed} ${_mesademo_installed}
@@ -1004,7 +761,7 @@ add_custom_target(port-wayland ALL DEPENDS
     ${_dmabufsmoke_installed} ${_cursorsmoke_installed}
     ${_d3d12sharedsmoke_installed}
     ${_drmgpuprobe_installed}
-    ${_webkitgpusmoke_installed} ${_memshim_installed}
+    ${_webkitgpusmoke_installed}
     ${_fault_trace_installed})
 if(TARGET port-wayland-libs)
     add_dependencies(port-wayland port-wayland-libs)
@@ -1017,9 +774,14 @@ if(TARGET port-webkit)
 endif()
 
 add_custom_target(port-wayland-clean
-    COMMAND ${CMAKE_COMMAND} -E rm -rf ${_wl_build} ${_host_wl_build}
+    COMMAND ${CMAKE_COMMAND} -E rm -rf
+            ${_wl_build}
+            ${CMAKE_CURRENT_BINARY_DIR}/wlcomp-build
+            ${_host_wl_build}
     COMMAND ${CMAKE_COMMAND} -E remove -f
-            ${_wl_installed} ${_desktop_installed} ${_filemgr_installed}
+            ${XV6_SYSROOT}/bin/wlcomp
+            ${XV6_SYSROOT}/bin/desktop
+            ${_weston_session_installed} ${_filemgr_installed}
             ${_glsmoke_installed}
             ${_mesaglsmoke_installed} ${_mesawlegl_installed}
             ${_mesakmsgl_installed}
@@ -1030,7 +792,7 @@ add_custom_target(port-wayland-clean
             ${_dmabufsmoke_installed} ${_cursorsmoke_installed}
             ${_d3d12sharedsmoke_installed}
             ${_drmgpuprobe_installed} ${_webkitgpusmoke_installed}
-            ${_memshim_installed} ${_memshim_lib}
+            ${XV6_SYSROOT}/lib/libxv6memshim.so
             ${_webkit_preload_wrapper_bin}
             ${_egl_installed} ${_gles_installed}
             ${_host_xv6egl_obj} ${_host_xv6egl_lib} ${_host_xv6gles_lib}
