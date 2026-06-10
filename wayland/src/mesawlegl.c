@@ -9,6 +9,7 @@
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
 #include <GLES2/gl2.h>
+#include <linux/input.h>
 #include <math.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -19,6 +20,7 @@
 #include <wayland-client.h>
 #include <wayland-egl.h>
 
+#include "font8x16.h"
 #include "xdg-shell-client-protocol.h"
 #include "xv6_present_buffer.h"
 
@@ -40,6 +42,8 @@
 
 #define WINDOW_W 480
 #define WINDOW_H 360
+#define TITLEBAR_H 30
+#define TITLEBAR_CONTROL_W 34
 #define SOFTWARE_DEMO_W 180
 #define SOFTWARE_DEMO_H 135
 #define FPS_TEXT_MAX 16
@@ -77,6 +81,8 @@ struct app_state {
     struct wl_display *display;
     struct wl_registry *registry;
     struct wl_compositor *compositor;
+    struct wl_seat *seat;
+    struct wl_pointer *pointer;
     struct xdg_wm_base *wm_base;
     struct wl_surface *surface;
     struct xdg_surface *xdg_surface;
@@ -126,6 +132,9 @@ struct app_state {
     int fps_frame_count;
     int resize_count;
     int close_requested;
+    int maximized;
+    int pointer_x;
+    int pointer_y;
     double fps_value;
     double fps_start_sec;
     unsigned long last_display_bind_completed_id;
@@ -212,6 +221,7 @@ struct d3d12_present_evidence {
 
 static int mesa_env_requests_accel(void);
 static int read_wlcomp_visible_fps(double *fps_out);
+static int content_height(const struct app_state *app);
 
 static EGLDisplay get_wayland_display(struct wl_display *display)
 {
@@ -660,11 +670,11 @@ static void append_fps_evidence(struct app_state *app, double now,
         *native_fps_credit_out = native_fps_credit;
 
     render_width = app->width / app->render_div;
-    render_height = app->height / app->render_div;
+    render_height = content_height(app) / app->render_div;
     if (render_width <= 0)
         render_width = app->width;
     if (render_height <= 0)
-        render_height = app->height;
+        render_height = content_height(app);
 
     app->fps_sample_seq++;
     if (!evidence.valid && strcmp(source, "virgl-compositor-present") == 0)
@@ -1330,6 +1340,7 @@ static void render_simple_frame(struct app_state *app)
     float s = sinf(angle);
     float c = cosf(angle);
     float r = 0.72f;
+    int ch = content_height(app);
     struct vertex vertices[3] = {
         { -s * r, c * r - 0.04f, 0.0f, 0.98f, 0.21f, 0.18f, 1.0f },
         { (0.92f * c + 0.72f * s) * r,
@@ -1343,6 +1354,7 @@ static void render_simple_frame(struct app_state *app)
     glViewport(0, 0, app->width, app->height);
     glClearColor(0.03f, 0.055f, 0.07f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT);
+    glViewport(0, 0, app->width, ch);
     glUseProgram(app->program);
     glBindBuffer(GL_ARRAY_BUFFER, 0);
     glVertexAttribPointer((GLuint)app->attr_pos, 3, GL_FLOAT, GL_FALSE,
@@ -1370,10 +1382,11 @@ static void render_api_frame(struct app_state *app)
         { -0.82f,  0.72f, 0.0f, 1.0f },
         {  0.82f,  0.72f, 1.0f, 1.0f },
     };
+    int ch = content_height(app);
     int sx = app->width / 10;
-    int sy = app->height / 10;
+    int sy = ch / 10;
     int sw = app->width - sx * 2;
-    int sh = app->height - sy * 2;
+    int sh = ch - sy * 2;
 
     glBindFramebuffer(GL_FRAMEBUFFER, app->fbo);
     glViewport(0, 0, 128, 128);
@@ -1407,6 +1420,7 @@ static void render_api_frame(struct app_state *app)
     glViewport(0, 0, app->width, app->height);
     glClearColor(0.03f, 0.055f, 0.07f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT);
+    glViewport(0, 0, app->width, ch);
     glEnable(GL_SCISSOR_TEST);
     glScissor(sx, sy, sw, sh);
     glUseProgram(app->tex_program);
@@ -1427,8 +1441,8 @@ static void render_api_frame(struct app_state *app)
 
 static void render_sphere_frame(struct app_state *app)
 {
-    float aspect = app->height > 0 ? (float)app->width / (float)app->height :
-                                     1.0f;
+    int ch = content_height(app);
+    float aspect = ch > 0 ? (float)app->width / (float)ch : 1.0f;
     float projection[16];
     float view[16];
     float rx[16];
@@ -1454,6 +1468,7 @@ static void render_sphere_frame(struct app_state *app)
         glClearDepthf(1.0f);
     glClear(app->software_demo ? GL_COLOR_BUFFER_BIT :
                                  (GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT));
+    glViewport(0, 0, app->width, ch);
     glDisable(GL_BLEND);
     glDisable(GL_STENCIL_TEST);
     if (app->software_demo) {
@@ -1496,6 +1511,135 @@ static void overlay_emit_rect(struct vertex *vertices, int *count,
 
     memcpy(&vertices[*count], rect, sizeof(rect));
     *count += 6;
+}
+
+static void titlebar_emit_rect_px(const struct app_state *app,
+                                  struct vertex *vertices, int *count,
+                                  float x0, float y0, float x1, float y1,
+                                  float r, float g, float b, float a)
+{
+    float nx0;
+    float nx1;
+    float ny0;
+    float ny1;
+
+    if (*count + 6 >= 8192 || app->width <= 0 || app->height <= 0)
+        return;
+    nx0 = x0 * 2.0f / (float)app->width - 1.0f;
+    nx1 = x1 * 2.0f / (float)app->width - 1.0f;
+    ny0 = 1.0f - y0 * 2.0f / (float)app->height;
+    ny1 = 1.0f - y1 * 2.0f / (float)app->height;
+    overlay_emit_rect(vertices, count, nx0, ny0, nx1, ny1, r, g, b, a);
+}
+
+static void titlebar_emit_char(struct app_state *app, struct vertex *vertices,
+                               int *count, int x, int y, char ch,
+                               float r, float g, float b, float a)
+{
+    const uint8_t *glyph;
+
+    if (ch < 0x20 || ch > 0x7e)
+        ch = '?';
+    glyph = font8x16_data[(int)(ch - 0x20)];
+    for (int row = 0; row < 16; row++) {
+        uint8_t bits = glyph[row];
+
+        for (int col = 0; col < 8; col++) {
+            if (!(bits & (uint8_t)(1u << (7 - col))))
+                continue;
+            titlebar_emit_rect_px(app, vertices, count,
+                                  (float)(x + col), (float)(y + row),
+                                  (float)(x + col + 1),
+                                  (float)(y + row + 1),
+                                  r, g, b, a);
+        }
+    }
+}
+
+static void titlebar_emit_text_fit(struct app_state *app,
+                                   struct vertex *vertices, int *count,
+                                   int x, int y, int max_w,
+                                   const char *text,
+                                   float r, float g, float b, float a)
+{
+    int limit = max_w / 8;
+    int chars = 0;
+
+    if (limit <= 0)
+        return;
+    for (const char *p = text; *p && chars < limit; p++, chars++)
+        titlebar_emit_char(app, vertices, count, x + chars * 8, y, *p,
+                           r, g, b, a);
+}
+
+static void titlebar_emit_button_text(struct app_state *app,
+                                      struct vertex *vertices, int *count,
+                                      int x, const char *text)
+{
+    int len = (int)strlen(text);
+    int tx = x + (TITLEBAR_CONTROL_W - len * 8) / 2;
+
+    if (tx < x + 2)
+        tx = x + 2;
+    titlebar_emit_text_fit(app, vertices, count, tx, 7,
+                           TITLEBAR_CONTROL_W - 4, text,
+                           0.96f, 0.98f, 1.00f, 1.0f);
+}
+
+static const char *window_title(const struct app_state *app)
+{
+    return app->sphere_demo ? "Mesa 3D Demo" : "Mesa Native Wayland EGL";
+}
+
+static void render_titlebar(struct app_state *app)
+{
+    struct vertex vertices[8192];
+    int count = 0;
+    int close_x = app->width - TITLEBAR_CONTROL_W;
+    int max_x = close_x - TITLEBAR_CONTROL_W;
+    int min_x = max_x - TITLEBAR_CONTROL_W;
+    int title_limit = min_x - 20;
+
+    if (!app->program || app->width <= TITLEBAR_CONTROL_W * 3 ||
+        app->height <= TITLEBAR_H)
+        return;
+
+    titlebar_emit_rect_px(app, vertices, &count, 0, 0, app->width,
+                          TITLEBAR_H, 0.12f, 0.17f, 0.22f, 1.0f);
+    titlebar_emit_rect_px(app, vertices, &count, 0, TITLEBAR_H - 1,
+                          app->width, TITLEBAR_H, 0.42f, 0.52f, 0.62f,
+                          1.0f);
+    titlebar_emit_rect_px(app, vertices, &count, min_x, 0, max_x,
+                          TITLEBAR_H, 0.17f, 0.24f, 0.31f, 1.0f);
+    titlebar_emit_rect_px(app, vertices, &count, max_x, 0, close_x,
+                          TITLEBAR_H, 0.17f, 0.24f, 0.31f, 1.0f);
+    titlebar_emit_rect_px(app, vertices, &count, close_x, 0, app->width,
+                          TITLEBAR_H, 0.47f, 0.18f, 0.20f, 1.0f);
+    if (title_limit > 10)
+        titlebar_emit_text_fit(app, vertices, &count, 10, 7, title_limit,
+                               window_title(app),
+                               0.94f, 0.97f, 1.0f, 1.0f);
+    titlebar_emit_button_text(app, vertices, &count, min_x, "-");
+    titlebar_emit_button_text(app, vertices, &count, max_x,
+                              app->maximized ? "[]" : "+");
+    titlebar_emit_button_text(app, vertices, &count, close_x, "X");
+
+    glViewport(0, 0, app->width, app->height);
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_CULL_FACE);
+    glDisable(GL_SCISSOR_TEST);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glUseProgram(app->program);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    glVertexAttribPointer((GLuint)app->attr_pos, 3, GL_FLOAT, GL_FALSE,
+                          sizeof(vertices[0]), &vertices[0].x);
+    glVertexAttribPointer((GLuint)app->attr_color, 4, GL_FLOAT, GL_FALSE,
+                          sizeof(vertices[0]), &vertices[0].r);
+    glEnableVertexAttribArray((GLuint)app->attr_pos);
+    glEnableVertexAttribArray((GLuint)app->attr_color);
+    glDrawArrays(GL_TRIANGLES, 0, count);
+    glDisable(GL_BLEND);
 }
 
 static uint8_t overlay_segments_for_char(char ch)
@@ -1852,6 +1996,13 @@ static void clamp_demo_size(struct app_state *app)
         app->height = app->max_height;
 }
 
+static int content_height(const struct app_state *app)
+{
+    int h = app->height - TITLEBAR_H;
+
+    return h > 1 ? h : 1;
+}
+
 static double fps_sample_interval_sec(struct app_state *app)
 {
     static int initialized;
@@ -2125,6 +2276,7 @@ static int draw_and_swap(struct app_state *app)
         t0 = t1;
     }
     render_fps_overlay(app);
+    render_titlebar(app);
     if (perf) {
         t1 = monotonic_seconds();
         app->perf_overlay_us += (t1 - t0) * 1000000.0;
@@ -2205,9 +2357,14 @@ static void toplevel_configure(void *data, struct xdg_toplevel *toplevel,
                                struct wl_array *states)
 {
     struct app_state *app = data;
+    uint32_t *state;
     (void)toplevel;
-    (void)states;
 
+    app->maximized = 0;
+    wl_array_for_each(state, states) {
+        if (*state == XDG_TOPLEVEL_STATE_MAXIMIZED)
+            app->maximized = 1;
+    }
     if (width > 0 && height > 0) {
         app->width = width;
         app->height = height;
@@ -2229,6 +2386,154 @@ static void toplevel_close(void *data, struct xdg_toplevel *toplevel)
 static const struct xdg_toplevel_listener toplevel_listener = {
     .configure = toplevel_configure,
     .close = toplevel_close,
+};
+
+static int titlebar_control_at(const struct app_state *app, int x, int y)
+{
+    int close_x;
+    int max_x;
+    int min_x;
+
+    if (y < 0 || y >= TITLEBAR_H || app->width <= TITLEBAR_CONTROL_W * 3)
+        return -1;
+    close_x = app->width - TITLEBAR_CONTROL_W;
+    max_x = close_x - TITLEBAR_CONTROL_W;
+    min_x = max_x - TITLEBAR_CONTROL_W;
+    if (x >= close_x)
+        return 3;
+    if (x >= max_x)
+        return 2;
+    if (x >= min_x)
+        return 1;
+    return 0;
+}
+
+static void activate_titlebar_control(struct app_state *app, int control)
+{
+    if (control == 3) {
+        app->close_requested = 1;
+        app->running = 0;
+    } else if (control == 2) {
+        if (app->maximized)
+            xdg_toplevel_unset_maximized(app->toplevel);
+        else
+            xdg_toplevel_set_maximized(app->toplevel);
+    } else if (control == 1) {
+        xdg_toplevel_set_minimized(app->toplevel);
+    }
+}
+
+static void pointer_enter(void *data, struct wl_pointer *pointer,
+                          uint32_t serial, struct wl_surface *surface,
+                          wl_fixed_t sx, wl_fixed_t sy)
+{
+    struct app_state *app = data;
+
+    (void)pointer; (void)serial; (void)surface;
+    app->pointer_x = wl_fixed_to_int(sx);
+    app->pointer_y = wl_fixed_to_int(sy);
+}
+
+static void pointer_leave(void *data, struct wl_pointer *pointer,
+                          uint32_t serial, struct wl_surface *surface)
+{
+    (void)data; (void)pointer; (void)serial; (void)surface;
+}
+
+static void pointer_motion(void *data, struct wl_pointer *pointer,
+                           uint32_t time, wl_fixed_t sx, wl_fixed_t sy)
+{
+    struct app_state *app = data;
+
+    (void)pointer; (void)time;
+    app->pointer_x = wl_fixed_to_int(sx);
+    app->pointer_y = wl_fixed_to_int(sy);
+}
+
+static void pointer_button(void *data, struct wl_pointer *pointer,
+                           uint32_t serial, uint32_t time, uint32_t button,
+                           uint32_t state)
+{
+    struct app_state *app = data;
+    int control;
+
+    (void)pointer; (void)time;
+    if (button != BTN_LEFT || state != WL_POINTER_BUTTON_STATE_PRESSED)
+        return;
+    control = titlebar_control_at(app, app->pointer_x, app->pointer_y);
+    if (control >= 0)
+        fprintf(stderr, "mesawlegl: titlebar click x=%d y=%d control=%d\n",
+                app->pointer_x, app->pointer_y, control);
+    if (control == 0 && app->toplevel && app->seat) {
+        xdg_toplevel_move(app->toplevel, app->seat, serial);
+        return;
+    }
+    activate_titlebar_control(app, control);
+}
+
+static void pointer_axis(void *data, struct wl_pointer *pointer,
+                         uint32_t time, uint32_t axis, wl_fixed_t value)
+{
+    (void)data; (void)pointer; (void)time; (void)axis; (void)value;
+}
+
+static void pointer_frame(void *data, struct wl_pointer *pointer)
+{
+    (void)data; (void)pointer;
+}
+
+static void pointer_axis_source(void *data, struct wl_pointer *pointer,
+                                uint32_t axis_source)
+{
+    (void)data; (void)pointer; (void)axis_source;
+}
+
+static void pointer_axis_stop(void *data, struct wl_pointer *pointer,
+                              uint32_t time, uint32_t axis)
+{
+    (void)data; (void)pointer; (void)time; (void)axis;
+}
+
+static void pointer_axis_discrete(void *data, struct wl_pointer *pointer,
+                                  uint32_t axis, int32_t discrete)
+{
+    (void)data; (void)pointer; (void)axis; (void)discrete;
+}
+
+static const struct wl_pointer_listener pointer_listener = {
+    .enter = pointer_enter,
+    .leave = pointer_leave,
+    .motion = pointer_motion,
+    .button = pointer_button,
+    .axis = pointer_axis,
+    .frame = pointer_frame,
+    .axis_source = pointer_axis_source,
+    .axis_stop = pointer_axis_stop,
+    .axis_discrete = pointer_axis_discrete,
+};
+
+static void seat_capabilities(void *data, struct wl_seat *seat,
+                              uint32_t capabilities)
+{
+    struct app_state *app = data;
+
+    if ((capabilities & WL_SEAT_CAPABILITY_POINTER) && !app->pointer) {
+        app->pointer = wl_seat_get_pointer(seat);
+        wl_pointer_add_listener(app->pointer, &pointer_listener, app);
+    } else if (!(capabilities & WL_SEAT_CAPABILITY_POINTER) && app->pointer) {
+        wl_pointer_destroy(app->pointer);
+        app->pointer = NULL;
+    }
+}
+
+static void seat_name(void *data, struct wl_seat *seat, const char *name)
+{
+    (void)data; (void)seat; (void)name;
+}
+
+static const struct wl_seat_listener seat_listener = {
+    .capabilities = seat_capabilities,
+    .name = seat_name,
 };
 
 static void wm_base_ping(void *data, struct xdg_wm_base *wm_base,
@@ -2257,6 +2562,10 @@ static void registry_global(void *data, struct wl_registry *registry,
                                         &xdg_wm_base_interface,
                                         version > 2 ? 2 : version);
         xdg_wm_base_add_listener(app->wm_base, &wm_base_listener, app);
+    } else if (strcmp(interface, wl_seat_interface.name) == 0) {
+        app->seat = wl_registry_bind(registry, name, &wl_seat_interface,
+                                     version > 5 ? 5 : version);
+        wl_seat_add_listener(app->seat, &seat_listener, app);
     } else if (strcmp(interface, wl_shm_interface.name) == 0) {
         app->shm = wl_registry_bind(registry, name, &wl_shm_interface,
                                     version > 1 ? 1 : version);
@@ -2361,6 +2670,10 @@ static void cleanup(struct app_state *app)
         xdg_surface_destroy(app->xdg_surface);
     if (app->surface)
         wl_surface_destroy(app->surface);
+    if (app->pointer)
+        wl_pointer_destroy(app->pointer);
+    if (app->seat)
+        wl_seat_destroy(app->seat);
     if (app->wm_base)
         xdg_wm_base_destroy(app->wm_base);
     if (app->compositor)
@@ -2399,11 +2712,11 @@ static void append_demo_interaction_evidence(struct app_state *app,
     if (!app || !app->sphere_demo)
         return;
     render_width = app->width / app->render_div;
-    render_height = app->height / app->render_div;
+    render_height = content_height(app) / app->render_div;
     if (render_width <= 0)
         render_width = app->width;
     if (render_height <= 0)
-        render_height = app->height;
+        render_height = content_height(app);
     client_content_progress =
         app->source_content_hash != 0 && app->source_content_frame != 0;
     visible_demo = rc == 0 && app->frame > 0 && client_content_progress;
@@ -2632,9 +2945,10 @@ static int run_client(int loop, int seconds, int resize_seconds,
     app.present_interval = present_interval;
     app.pace_us = pace_us;
     if (sphere_demo && software_demo) {
-        if (initial_width == WINDOW_W && initial_height == WINDOW_H) {
+        if (initial_width == WINDOW_W &&
+            initial_height == WINDOW_H + TITLEBAR_H) {
             app.width = SOFTWARE_DEMO_W;
-            app.height = SOFTWARE_DEMO_H;
+            app.height = SOFTWARE_DEMO_H + TITLEBAR_H;
         }
         app.max_width = app.width;
         app.max_height = app.height;
@@ -2683,11 +2997,11 @@ static int run_client(int loop, int seconds, int resize_seconds,
                 app.read_format == GL_BGRA_EXT ? "bgra" : "rgba");
     }
     render_width = app.width / app.render_div;
-    render_height = app.height / app.render_div;
+    render_height = content_height(&app) / app.render_div;
     if (render_width <= 0)
         render_width = app.width;
     if (render_height <= 0)
-        render_height = app.height;
+        render_height = content_height(&app);
     fprintf(stderr,
             "mesawlegl[%d]: demo_surface_matrix window=%dx%d render=%dx%d render_div=%d present_interval=%d pace_us=%d status=PASS\n",
             loop, app.width, app.height, render_width, render_height,
@@ -2706,10 +3020,10 @@ static int run_client(int loop, int seconds, int resize_seconds,
             next_resize_sec += (double)app.resize_seconds;
             if (app.width == WINDOW_W) {
                 app.width = 360;
-                app.height = 260;
+                app.height = 260 + TITLEBAR_H;
             } else {
                 app.width = WINDOW_W;
-                app.height = WINDOW_H;
+                app.height = WINDOW_H + TITLEBAR_H;
             }
             if (recreate_window_surface(&app) < 0) {
                 rc = 1;
@@ -2777,7 +3091,7 @@ int main(int argc, char **argv)
     int api_smoke = 1;
     int sphere_demo = 0;
     int window_width = WINDOW_W;
-    int window_height = WINDOW_H;
+    int window_height = WINDOW_H + TITLEBAR_H;
     int render_div = 1;
     int present_interval = 1;
     int pace_us = 0;

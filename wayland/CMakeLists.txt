@@ -500,6 +500,7 @@ add_custom_command(
             ${WAYLAND_SRC_DIR}/gl_fps_overlay.h
             ${WAYLAND_SRC_DIR}/mesawlegl_sphere.c
             ${WAYLAND_SRC_DIR}/mesawlegl_sphere.h
+            ${WAYLAND_SRC_DIR}/font8x16.h
             ${WAYLAND_SRC_DIR}/xv6_present_buffer.c
             ${WAYLAND_SRC_DIR}/xv6_present_buffer.h
             ${_xdg_client_header}
