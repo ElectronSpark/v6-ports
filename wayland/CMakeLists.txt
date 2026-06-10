@@ -262,6 +262,7 @@ if(XV6_WAYLAND_HOST_GLIBC)
                     -lffi -lpthread -lrt -lm
         DEPENDS ${_host_wl_stamp}
                 ${WAYLAND_SRC_DIR}/glsmoke.c ${_xdg_client_header}
+                ${WAYLAND_SRC_DIR}/font8x16.h
                 ${_xdg_client_code} ${_host_xv6egl_lib} ${_host_xv6gles_lib}
         COMMENT "Compiling glsmoke Wayland client with host glibc"
         VERBATIM)
@@ -282,6 +283,7 @@ else()
                     ${XV6_SYSROOT}/lib/libwayland-client.a
                     -lffi -lpthread -lrt -lm
         DEPENDS ${WAYLAND_SRC_DIR}/glsmoke.c ${_xdg_client_header}
+                ${WAYLAND_SRC_DIR}/font8x16.h
                 ${_xdg_client_code} ${_xv6egl_lib} ${_xv6gles_lib}
                 ${XV6_SYSROOT}/lib/libwayland-client.a
         COMMENT "Compiling glsmoke Wayland client"
