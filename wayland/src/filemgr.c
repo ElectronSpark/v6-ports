@@ -32,9 +32,12 @@
 #endif
 
 #define APP_W 760
-#define APP_H 520
+#define APP_H 550
 #define MAX_ENTRIES 256
 #define MAX_BUTTONS 12
+#define TITLEBAR_H 30
+#define TITLE_BUTTON_W 26
+#define TITLE_BUTTON_GAP 4
 #define TOOLBAR_H 34
 #define PATH_H 24
 #define HEADER_H 22
@@ -83,6 +86,13 @@ enum sort_mode {
     SORT_SIZE,
 };
 
+enum title_action {
+    TITLE_ACTION_NONE,
+    TITLE_ACTION_MINIMIZE,
+    TITLE_ACTION_MAXIMIZE,
+    TITLE_ACTION_CLOSE,
+};
+
 struct entry {
     char name[128];
     char path[PATH_MAX];
@@ -125,6 +135,7 @@ struct app {
     int configured;
     int running;
     int dirty;
+    int maximized;
     int pointer_x;
     int pointer_y;
     uint32_t last_click_ms;
@@ -869,32 +880,33 @@ static void add_button(struct app *app, enum action action, const char *label,
 static void layout_buttons(struct app *app)
 {
     int x = 8;
+    int y = TITLEBAR_H + 5;
     int has_sel = app->selected >= 0 && app->selected < app->entry_count;
 
     app->button_count = 0;
-    add_button(app, ACT_UP, "^", x, 5, 28, strcmp(app->cwd, "/") != 0);
+    add_button(app, ACT_UP, "^", x, y, 28, strcmp(app->cwd, "/") != 0);
     x += 34;
-    add_button(app, ACT_HOME, "Home", x, 5, 48, 1);
+    add_button(app, ACT_HOME, "Home", x, y, 48, 1);
     x += 54;
-    add_button(app, ACT_ROOT, "/", x, 5, 28, 1);
+    add_button(app, ACT_ROOT, "/", x, y, 28, 1);
     x += 36;
-    add_button(app, ACT_REFRESH, "Refresh", x, 5, 70, 1);
+    add_button(app, ACT_REFRESH, "Refresh", x, y, 70, 1);
     x += 78;
-    add_button(app, ACT_NEW_FOLDER, "New", x, 5, 46, 1);
+    add_button(app, ACT_NEW_FOLDER, "New", x, y, 46, 1);
     x += 54;
-    add_button(app, ACT_RENAME, "Rename", x, 5, 68, has_sel);
+    add_button(app, ACT_RENAME, "Rename", x, y, 68, has_sel);
     x += 76;
-    add_button(app, ACT_DELETE, "Delete", x, 5, 66, has_sel);
+    add_button(app, ACT_DELETE, "Delete", x, y, 66, has_sel);
     x += 74;
-    add_button(app, ACT_COPY, "Copy", x, 5, 52, has_sel);
+    add_button(app, ACT_COPY, "Copy", x, y, 52, has_sel);
     x += 60;
-    add_button(app, ACT_CUT, "Cut", x, 5, 42, has_sel);
+    add_button(app, ACT_CUT, "Cut", x, y, 42, has_sel);
     x += 50;
-    add_button(app, ACT_PASTE, "Paste", x, 5, 58, app->clipboard[0] != '\0');
+    add_button(app, ACT_PASTE, "Paste", x, y, 58, app->clipboard[0] != '\0');
     x += 66;
-    add_button(app, ACT_OPEN, "Open", x, 5, 52, has_sel);
+    add_button(app, ACT_OPEN, "Open", x, y, 52, has_sel);
     x += 60;
-    add_button(app, ACT_SORT, "Sort", x, 5, 52, 1);
+    add_button(app, ACT_SORT, "Sort", x, y, 52, 1);
 }
 
 static void draw_text_fit(uint32_t *fb, int w, int h, int x, int y,
@@ -927,12 +939,39 @@ static void draw_button(uint32_t *fb, int w, int h, const struct button *b)
                 fg, 1);
 }
 
+static void draw_title_button(uint32_t *fb, int w, int h, int x,
+                              const char *label, uint32_t bg, uint32_t fg)
+{
+    int tw = string_pixel_width(label, 1);
+
+    draw_rounded_rect(fb, w, h, x, 4, TITLE_BUTTON_W, 22, 4, bg);
+    draw_string(fb, w, h, x + (TITLE_BUTTON_W - tw) / 2, 7, label, fg, 1);
+}
+
+static void draw_titlebar(uint32_t *fb, int w, int h, struct app *app)
+{
+    char title[PATH_MAX + 16];
+    int close_x = w - 10 - TITLE_BUTTON_W;
+    int max_x = close_x - TITLE_BUTTON_GAP - TITLE_BUTTON_W;
+    int min_x = max_x - TITLE_BUTTON_GAP - TITLE_BUTTON_W;
+
+    snprintf(title, sizeof(title), "Files - %s", app->cwd);
+    draw_rect(fb, w, h, 0, 0, w, TITLEBAR_H, 0xFFE4E0DA);
+    draw_rect(fb, w, h, 0, TITLEBAR_H - 1, w, 1, 0xFFB7B0A8);
+    draw_text_fit(fb, w, h, 12, 7, min_x - 22, title, 0xFF20262F);
+    draw_title_button(fb, w, h, min_x, "-", 0xFFD1CCC4, 0xFF20262F);
+    draw_title_button(fb, w, h, max_x, app->maximized ? "[]" : "+",
+                      0xFFD1CCC4, 0xFF20262F);
+    draw_title_button(fb, w, h, close_x, "x", 0xFFC85454, 0xFFFFFFFF);
+}
+
 static void draw_sidebar(uint32_t *fb, int w, int h, struct app *app)
 {
     const char *places[] = { "/root", "/root/desktop", "/tmp", "/" };
-    int y = TOOLBAR_H + PATH_H + 12;
+    int y = TITLEBAR_H + TOOLBAR_H + PATH_H + 12;
 
-    draw_rect(fb, w, h, 0, TOOLBAR_H, SIDEBAR_W, h - TOOLBAR_H,
+    draw_rect(fb, w, h, 0, TITLEBAR_H + TOOLBAR_H,
+              SIDEBAR_W, h - (TITLEBAR_H + TOOLBAR_H),
               0xFF111722);
     draw_string(fb, w, h, 12, y, "Places", 0xFF93A7C0, 1);
     y += 24;
@@ -948,7 +987,7 @@ static void draw_sidebar(uint32_t *fb, int w, int h, struct app *app)
 static void draw_entries(uint32_t *fb, int w, int h, struct app *app)
 {
     int x0 = LIST_X;
-    int y0 = TOOLBAR_H + PATH_H;
+    int y0 = TITLEBAR_H + TOOLBAR_H + PATH_H;
     int list_w = w - x0 - 8;
     int list_h = h - y0 - STATUS_H - 8;
     int rows = (list_h - HEADER_H) / ROW_H;
@@ -1069,13 +1108,14 @@ static void draw_app(struct app *app)
     if (!fb)
         return;
     draw_rect(fb, w, h, 0, 0, w, h, 0xFF0D121A);
-    draw_rect(fb, w, h, 0, 0, w, TOOLBAR_H, 0xFF182334);
+    draw_titlebar(fb, w, h, app);
+    draw_rect(fb, w, h, 0, TITLEBAR_H, w, TOOLBAR_H, 0xFF182334);
     layout_buttons(app);
     for (int i = 0; i < app->button_count; i++)
         draw_button(fb, w, h, &app->buttons[i]);
 
-    draw_rect(fb, w, h, 0, TOOLBAR_H, w, PATH_H, 0xFF101824);
-    draw_text_fit(fb, w, h, 10, TOOLBAR_H + 4, w - 20, app->cwd,
+    draw_rect(fb, w, h, 0, TITLEBAR_H + TOOLBAR_H, w, PATH_H, 0xFF101824);
+    draw_text_fit(fb, w, h, 10, TITLEBAR_H + TOOLBAR_H + 4, w - 20, app->cwd,
                   0xFF7FD2FF);
     draw_sidebar(fb, w, h, app);
     draw_entries(fb, w, h, app);
@@ -1100,8 +1140,8 @@ static int resize_buffer(struct app *app, int width, int height)
 {
     if (width < 420)
         width = 420;
-    if (height < 300)
-        height = 300;
+    if (height < 330)
+        height = 330;
     if (width == app->width && height == app->height &&
         app->buffer.wl_buffer)
         return 0;
@@ -1130,9 +1170,10 @@ static int button_at(struct app *app, int x, int y)
 static int entry_at(struct app *app, int x, int y)
 {
     int x0 = LIST_X;
-    int y0 = TOOLBAR_H + PATH_H + HEADER_H;
+    int y0 = TITLEBAR_H + TOOLBAR_H + PATH_H + HEADER_H;
     int list_w = app->width - x0 - 8;
-    int list_h = app->height - (TOOLBAR_H + PATH_H) - STATUS_H - 8;
+    int list_h = app->height - (TITLEBAR_H + TOOLBAR_H + PATH_H) -
+        STATUS_H - 8;
     int row;
     int idx;
 
@@ -1146,7 +1187,7 @@ static int entry_at(struct app *app, int x, int y)
 static int click_sidebar(struct app *app, int x, int y)
 {
     const char *places[] = { "/root", "/root/desktop", "/tmp", "/" };
-    int sy = TOOLBAR_H + PATH_H + 36;
+    int sy = TITLEBAR_H + TOOLBAR_H + PATH_H + 36;
 
     if (x >= SIDEBAR_W)
         return 0;
@@ -1159,8 +1200,26 @@ static int click_sidebar(struct app *app, int x, int y)
     return 0;
 }
 
+static enum title_action title_action_at(struct app *app, int x, int y)
+{
+    int close_x = app->width - 10 - TITLE_BUTTON_W;
+    int max_x = close_x - TITLE_BUTTON_GAP - TITLE_BUTTON_W;
+    int min_x = max_x - TITLE_BUTTON_GAP - TITLE_BUTTON_W;
+
+    if (y < 4 || y >= TITLEBAR_H - 4)
+        return TITLE_ACTION_NONE;
+    if (x >= close_x && x < close_x + TITLE_BUTTON_W)
+        return TITLE_ACTION_CLOSE;
+    if (x >= max_x && x < max_x + TITLE_BUTTON_W)
+        return TITLE_ACTION_MAXIMIZE;
+    if (x >= min_x && x < min_x + TITLE_BUTTON_W)
+        return TITLE_ACTION_MINIMIZE;
+    return TITLE_ACTION_NONE;
+}
+
 static void handle_click(struct app *app, uint32_t time)
 {
+    enum title_action title_action;
     int btn;
     int idx;
 
@@ -1168,6 +1227,25 @@ static void handle_click(struct app *app, uint32_t time)
         if (app->modal == MODAL_PREVIEW)
             app->modal = MODAL_NONE;
         app->dirty = 1;
+        return;
+    }
+
+    title_action = title_action_at(app, app->pointer_x, app->pointer_y);
+    if (title_action == TITLE_ACTION_CLOSE) {
+        app->running = 0;
+        return;
+    } else if (title_action == TITLE_ACTION_MAXIMIZE) {
+        if (app->maximized) {
+            xdg_toplevel_unset_maximized(app->toplevel);
+            app->maximized = 0;
+        } else {
+            xdg_toplevel_set_maximized(app->toplevel);
+            app->maximized = 1;
+        }
+        app->dirty = 1;
+        return;
+    } else if (title_action == TITLE_ACTION_MINIMIZE) {
+        xdg_toplevel_set_minimized(app->toplevel);
         return;
     }
 
@@ -1251,8 +1329,8 @@ static char key_to_char(uint32_t key, uint32_t mods)
 
 static void handle_key(struct app *app, uint32_t key)
 {
-    int rows = (app->height - (TOOLBAR_H + PATH_H) - STATUS_H - 8 -
-                HEADER_H) / ROW_H;
+    int rows = (app->height - (TITLEBAR_H + TOOLBAR_H + PATH_H) -
+                STATUS_H - 8 - HEADER_H) / ROW_H;
 
     if (app->modal != MODAL_NONE) {
         if (key == 1) {
@@ -1574,7 +1652,16 @@ static void toplevel_configure(void *data, struct xdg_toplevel *toplevel,
 {
     struct app *app = data;
     (void)toplevel;
-    (void)states;
+
+    app->maximized = 0;
+    if (states) {
+        uint32_t *state;
+
+        wl_array_for_each(state, states) {
+            if (*state == XDG_TOPLEVEL_STATE_MAXIMIZED)
+                app->maximized = 1;
+        }
+    }
 
     if (width > 0 && height > 0) {
         app->pending_width = width;
@@ -1666,7 +1753,7 @@ static int init_wayland(struct app *app)
     xdg_toplevel_add_listener(app->toplevel, &toplevel_listener, app);
     xdg_toplevel_set_title(app->toplevel, "Files");
     xdg_toplevel_set_app_id(app->toplevel, "filemgr");
-    xdg_toplevel_set_min_size(app->toplevel, 420, 300);
+    xdg_toplevel_set_min_size(app->toplevel, 420, 330);
 
     if (resize_buffer(app, app->width, app->height) != 0)
         return -1;
