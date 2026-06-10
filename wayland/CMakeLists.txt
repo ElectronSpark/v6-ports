@@ -692,7 +692,8 @@ add_custom_command(
     VERBATIM)
 
 add_custom_command(
-    OUTPUT  ${_weston_session_installed} ${_filemgr_installed}
+    OUTPUT  ${_weston_session_installed}
+            ${_filemgr_installed}
             ${_glsmoke_installed} ${_glmaze_installed}
             ${_peanutgb_installed}
             ${_mesaglsmoke_installed} ${_mesawlegl_installed}
@@ -709,6 +710,7 @@ add_custom_command(
     COMMAND ${CMAKE_COMMAND} -E rm -f
             ${XV6_SYSROOT}/bin/wlcomp
             ${XV6_SYSROOT}/bin/desktop
+            ${XV6_SYSROOT}/bin/desktop-icons
             ${XV6_SYSROOT}/lib/libxv6memshim.so
     COMMAND ${CMAKE_COMMAND} -E copy ${_weston_session_bin} ${_weston_session_installed}
     COMMAND ${CMAKE_COMMAND} -E copy ${_filemgr_bin} ${_filemgr_installed}
@@ -751,7 +753,8 @@ add_custom_command(
     VERBATIM)
 
 add_custom_target(port-wayland ALL DEPENDS
-    ${_weston_session_installed} ${_filemgr_installed}
+    ${_weston_session_installed}
+    ${_filemgr_installed}
     ${_glsmoke_installed} ${_glmaze_installed} ${_peanutgb_installed}
     ${_mesaglsmoke_installed} ${_mesawlegl_installed}
     ${_mesakmsgl_installed} ${_mesademo_installed}
@@ -781,7 +784,9 @@ add_custom_target(port-wayland-clean
     COMMAND ${CMAKE_COMMAND} -E remove -f
             ${XV6_SYSROOT}/bin/wlcomp
             ${XV6_SYSROOT}/bin/desktop
-            ${_weston_session_installed} ${_filemgr_installed}
+            ${XV6_SYSROOT}/bin/desktop-icons
+            ${_weston_session_installed}
+            ${_filemgr_installed}
             ${_glsmoke_installed}
             ${_mesaglsmoke_installed} ${_mesawlegl_installed}
             ${_mesakmsgl_installed}

@@ -1130,6 +1130,9 @@ static pid_t launch_weston(void)
             "XDG_RUNTIME_DIR=/tmp",
             "XDG_DATA_DIRS=/share:/usr/share",
             "XKB_CONFIG_ROOT=/share/X11/xkb",
+            "XCURSOR_PATH=/share/icons",
+            "XCURSOR_THEME=Adwaita",
+            "XCURSOR_SIZE=24",
             "LIBGL_ALWAYS_SOFTWARE=0",
             "GALLIUM_DRIVER=virgl",
             "LIBGL_DRIVERS_PATH=/lib/dri",
@@ -1143,6 +1146,9 @@ static pid_t launch_weston(void)
             "XDG_RUNTIME_DIR=/tmp",
             "XDG_DATA_DIRS=/share:/usr/share",
             "XKB_CONFIG_ROOT=/share/X11/xkb",
+            "XCURSOR_PATH=/share/icons",
+            "XCURSOR_THEME=Adwaita",
+            "XCURSOR_SIZE=24",
             "LIBGL_ALWAYS_SOFTWARE=0",
             "GALLIUM_DRIVER=virgl",
             "LIBGL_DRIVERS_PATH=/lib/dri",
@@ -5102,17 +5108,13 @@ int main(void)
             cleanup();
             return 0;
         }
-    } else if (netsurf_disabled_by_cmdline()) {
-        client_pid = 0;
-        fprintf(stderr, "[desktop] netsurf disabled by cmdline\n");
     } else {
-        client_pid = launch_client("/bin/netsurf", "netsurf", NULL, NULL, NULL);
-        if (client_pid < 0) {
-            perror("[desktop] fork netsurf");
-            cleanup();
-            return 1;
-        }
-        fprintf(stderr, "[desktop] netsurf pid=%d\n", client_pid);
+        if (netsurf_disabled_by_cmdline())
+            fprintf(stderr,
+                    "[desktop] legacy netsurf=0 ignored for default "
+                    "Weston desktop session\n");
+        fprintf(stderr,
+                "[desktop] desktop icons are provided by weston-desktop-shell\n");
     }
 
     /* 4. Supervise compositor and client */

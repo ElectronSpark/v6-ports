@@ -8,6 +8,10 @@ xv6_port(
     BUILD_SYSTEM    cmake
     DEPENDS         libudev
                     libevdev
+    SOURCE_DEPENDS  ${CMAKE_CURRENT_SOURCE_DIR}/src/CMakeLists.txt
+                    ${CMAKE_CURRENT_SOURCE_DIR}/src/libinput.c
+                    ${CMAKE_CURRENT_SOURCE_DIR}/src/libinput.h
+                    ${CMAKE_CURRENT_SOURCE_DIR}/src/libinput.pc.in
     OUTPUT_FILES    lib/libinput.a
                     lib/libinput.so
                     lib/libinput.so.10

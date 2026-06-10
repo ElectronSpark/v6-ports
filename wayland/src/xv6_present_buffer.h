@@ -23,6 +23,10 @@ struct xv6_present_buffer {
 int xv6_present_buffer_init(struct xv6_present_buffer *buf, int width,
                             int height, struct wl_shm *shm,
                             struct wl_proxy *gpu_manager);
+int xv6_present_buffer_init_shm_format(struct xv6_present_buffer *buf,
+                                       int width, int height,
+                                       struct wl_shm *shm,
+                                       uint32_t format);
 void xv6_present_buffer_destroy(struct xv6_present_buffer *buf);
 
 #endif

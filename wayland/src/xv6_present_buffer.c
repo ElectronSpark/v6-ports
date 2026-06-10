@@ -182,6 +182,41 @@ int xv6_present_buffer_init(struct xv6_present_buffer *buf, int width,
     return buf->wl_buffer ? 0 : -1;
 }
 
+int xv6_present_buffer_init_shm_format(struct xv6_present_buffer *buf,
+                                       int width, int height,
+                                       struct wl_shm *shm,
+                                       uint32_t format)
+{
+    int stride = width * 4;
+    struct wl_shm_pool *pool;
+
+    memset(buf, 0, sizeof(*buf));
+    buf->fd = -1;
+    buf->fb_fd = -1;
+    buf->width = width;
+    buf->height = height;
+    buf->stride = stride;
+    buf->size = (size_t)stride * (size_t)height;
+
+    if (!shm)
+        return -1;
+    buf->fd = create_shm_file(buf->size);
+    if (buf->fd < 0)
+        return -1;
+    buf->pixels = mmap(NULL, buf->size, PROT_READ | PROT_WRITE, MAP_SHARED,
+                       buf->fd, 0);
+    if (buf->pixels == MAP_FAILED) {
+        buf->pixels = NULL;
+        return -1;
+    }
+    pool = wl_shm_create_pool(shm, buf->fd, (int)buf->size);
+    buf->wl_buffer = wl_shm_pool_create_buffer(pool, 0, buf->width,
+                                               buf->height, buf->stride,
+                                               format);
+    wl_shm_pool_destroy(pool);
+    return buf->wl_buffer ? 0 : -1;
+}
+
 void xv6_present_buffer_destroy(struct xv6_present_buffer *buf)
 {
     if (buf->wl_buffer)
