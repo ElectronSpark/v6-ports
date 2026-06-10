@@ -20,6 +20,7 @@ xv6_port(
                     wayland-libs
                     wayland-protocols
     OUTPUT_FILES    bin/weston
+                    bin/weston-terminal
                     lib/libweston-15.so.0
                     lib/libweston-15/drm-backend.so
                     lib/libweston-15/gl-renderer.so
@@ -48,7 +49,7 @@ xv6_port(
         -Dcolor-management-lcms=false
         -Dimage-jpeg=false
         -Dimage-webp=false
-        -Dtools=[]
+        -Dtools=terminal
         -Ddemo-clients=false
         -Dsimple-clients=[]
         -Dresize-pool=false

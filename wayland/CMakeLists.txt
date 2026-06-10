@@ -104,6 +104,10 @@ set(_drmgpuprobe_installed ${XV6_SYSROOT}/bin/drmgpuprobe)
 set(_webkitgpusmoke_installed ${XV6_SYSROOT}/bin/webkitgpusmoke)
 set(_fault_trace_installed ${XV6_SYSROOT}/lib/xv6_glibc_fault_trace.so)
 set(_webkit_preload_wrapper_bin ${_wl_build}/webkit-preload-wrapper)
+set(_adwaita_cursor_dir ${XV6_SYSROOT}/share/icons/Adwaita/cursors)
+set(_dnd_move_cursor ${_adwaita_cursor_dir}/dnd-move)
+set(_dnd_copy_cursor ${_adwaita_cursor_dir}/dnd-copy)
+set(_dnd_none_cursor ${_adwaita_cursor_dir}/dnd-none)
 # The small xv6 EGL/GLES shim is linked directly into test programs from the
 # build directory. Do not install it under Mesa's public libEGL/libGLESv2 names:
 # GTK/WebKit depend on Mesa's shared EGL stack, and a stale static shim archive
@@ -707,10 +711,10 @@ add_custom_command(
             ${_d3d12sharedsmoke_installed}
             ${_drmgpuprobe_installed} ${_webkitgpusmoke_installed}
             ${_fault_trace_installed}
+            ${_dnd_move_cursor} ${_dnd_copy_cursor} ${_dnd_none_cursor}
     COMMAND ${CMAKE_COMMAND} -E rm -f
             ${XV6_SYSROOT}/bin/wlcomp
             ${XV6_SYSROOT}/bin/desktop
-            ${XV6_SYSROOT}/bin/desktop-icons
             ${XV6_SYSROOT}/lib/libxv6memshim.so
     COMMAND ${CMAKE_COMMAND} -E copy ${_weston_session_bin} ${_weston_session_installed}
     COMMAND ${CMAKE_COMMAND} -E copy ${_filemgr_bin} ${_filemgr_installed}
@@ -737,6 +741,13 @@ add_custom_command(
     COMMAND ${CMAKE_COMMAND} -E copy ${_fault_trace_lib} ${_fault_trace_installed}
     COMMAND bash ${WAYLAND_SRC_DIR}/install_webkit_preload_wrappers.sh
             ${_webkit_preload_wrapper_bin} ${XV6_SYSROOT}
+    COMMAND ${CMAKE_COMMAND} -E make_directory ${_adwaita_cursor_dir}
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            ${_adwaita_cursor_dir}/move ${_dnd_move_cursor}
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            ${_adwaita_cursor_dir}/copy ${_dnd_copy_cursor}
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            ${_adwaita_cursor_dir}/no-drop ${_dnd_none_cursor}
     COMMAND ${CMAKE_COMMAND} -E rm -f ${_egl_installed} ${_gles_installed}
     DEPENDS ${_weston_session_bin} ${_filemgr_bin}
             ${_glsmoke_bin} ${_glmaze_bin} ${_peanutgb_bin}
@@ -765,7 +776,8 @@ add_custom_target(port-wayland ALL DEPENDS
     ${_d3d12sharedsmoke_installed}
     ${_drmgpuprobe_installed}
     ${_webkitgpusmoke_installed}
-    ${_fault_trace_installed})
+    ${_fault_trace_installed}
+    ${_dnd_move_cursor} ${_dnd_copy_cursor} ${_dnd_none_cursor})
 if(TARGET port-wayland-libs)
     add_dependencies(port-wayland port-wayland-libs)
 endif()
@@ -784,7 +796,6 @@ add_custom_target(port-wayland-clean
     COMMAND ${CMAKE_COMMAND} -E remove -f
             ${XV6_SYSROOT}/bin/wlcomp
             ${XV6_SYSROOT}/bin/desktop
-            ${XV6_SYSROOT}/bin/desktop-icons
             ${_weston_session_installed}
             ${_filemgr_installed}
             ${_glsmoke_installed}
@@ -797,6 +808,7 @@ add_custom_target(port-wayland-clean
             ${_dmabufsmoke_installed} ${_cursorsmoke_installed}
             ${_d3d12sharedsmoke_installed}
             ${_drmgpuprobe_installed} ${_webkitgpusmoke_installed}
+            ${_dnd_move_cursor} ${_dnd_copy_cursor} ${_dnd_none_cursor}
             ${XV6_SYSROOT}/lib/libxv6memshim.so
             ${_webkit_preload_wrapper_bin}
             ${_egl_installed} ${_gles_installed}
