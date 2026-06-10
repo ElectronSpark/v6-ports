@@ -9,11 +9,13 @@
 #include <wayland-client.h>
 
 #include "xdg-shell-client-protocol.h"
+#include "xv6_draw.h"
 #include "xv6_present_buffer.h"
 
 #include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <linux/input.h>
 #include <poll.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -31,6 +33,8 @@
 #define WINDOW_SCALE 4
 #define DEFAULT_W (LCD_WIDTH * WINDOW_SCALE)
 #define DEFAULT_H (LCD_HEIGHT * WINDOW_SCALE)
+#define TITLEBAR_H 30
+#define CONTROL_W 34
 #define KEY_ESC 1
 #define KEY_BACKSPACE 14
 #define KEY_ENTER 28
@@ -49,6 +53,7 @@ struct frontend {
     struct wl_compositor *compositor;
     struct wl_shm *shm;
     struct wl_seat *seat;
+    struct wl_pointer *pointer;
     struct wl_keyboard *keyboard;
     struct xdg_wm_base *wm_base;
     struct wl_surface *surface;
@@ -60,6 +65,9 @@ struct frontend {
     int running;
     int width;
     int height;
+    int maximized;
+    int pointer_x;
+    int pointer_y;
     int keys[256];
 
     struct gb_s gb;
@@ -262,7 +270,7 @@ static void update_joypad(struct frontend *fe)
 static int ensure_present(struct frontend *fe)
 {
     int width = fe->width > 0 ? fe->width : DEFAULT_W;
-    int height = fe->height > 0 ? fe->height : DEFAULT_H;
+    int height = fe->height > 0 ? fe->height : DEFAULT_H + TITLEBAR_H;
 
     if (fe->present_ready && fe->present.width == width &&
         fe->present.height == height)
@@ -278,9 +286,37 @@ static int ensure_present(struct frontend *fe)
     return 0;
 }
 
+static void draw_titlebar(struct frontend *fe)
+{
+    uint32_t *fb = fe->present.pixels;
+    int w = fe->present.width;
+    int h = fe->present.height;
+    int close_x = w - CONTROL_W;
+    int max_x = w - CONTROL_W * 2;
+    int min_x = w - CONTROL_W * 3;
+    char title[80];
+
+    if (!fb || w <= 0 || h <= 0)
+        return;
+
+    draw_rect(fb, w, h, 0, 0, w, TITLEBAR_H, 0x243447);
+    draw_rect(fb, w, h, 0, TITLEBAR_H - 1, w, 1, 0x5e768e);
+    snprintf(title, sizeof(title), "Peanut-GB - %s",
+             fe->rom_title[0] ? fe->rom_title : "Game Boy");
+    draw_string(fb, w, h, 10, 7, title, 0xf4f7fb, 1);
+
+    draw_rect(fb, w, h, min_x, 0, CONTROL_W, TITLEBAR_H, 0x2f4358);
+    draw_rect(fb, w, h, max_x, 0, CONTROL_W, TITLEBAR_H, 0x2f4358);
+    draw_rect(fb, w, h, close_x, 0, CONTROL_W, TITLEBAR_H, 0x70383d);
+    draw_string(fb, w, h, min_x + 13, 7, "-", 0xf4f7fb, 1);
+    draw_string(fb, w, h, max_x + 13, 7, fe->maximized ? "[]" : "+",
+                0xf4f7fb, 1);
+    draw_string(fb, w, h, close_x + 13, 7, "x", 0xf4f7fb, 1);
+}
+
 static void present_frame(struct frontend *fe)
 {
-    int dst_w, dst_h, scale, off_x, off_y;
+    int dst_w, dst_h, scale, off_x, off_y, content_h;
     uint32_t bg = 0x0b0f14;
 
     if (ensure_present(fe) < 0)
@@ -291,16 +327,20 @@ static void present_frame(struct frontend *fe)
         for (int x = 0; x < fe->present.width; x++)
             row[x] = bg;
     }
+    draw_titlebar(fe);
 
+    content_h = fe->present.height - TITLEBAR_H;
+    if (content_h < 1)
+        content_h = 1;
     scale = fe->present.width / LCD_WIDTH;
-    if (fe->present.height / LCD_HEIGHT < scale)
-        scale = fe->present.height / LCD_HEIGHT;
+    if (content_h / LCD_HEIGHT < scale)
+        scale = content_h / LCD_HEIGHT;
     if (scale < 1)
         scale = 1;
     dst_w = LCD_WIDTH * scale;
     dst_h = LCD_HEIGHT * scale;
     off_x = (fe->present.width - dst_w) / 2;
-    off_y = (fe->present.height - dst_h) / 2;
+    off_y = TITLEBAR_H + (content_h - dst_h) / 2;
 
     for (int y = 0; y < dst_h; y++) {
         int sy = y / scale;
@@ -316,6 +356,38 @@ static void present_frame(struct frontend *fe)
     wl_surface_damage(fe->surface, 0, 0, fe->present.width,
                       fe->present.height);
     wl_surface_commit(fe->surface);
+}
+
+static int titlebar_control_at(struct frontend *fe, int x, int y)
+{
+    int w = fe->present_ready ? fe->present.width : fe->width;
+
+    if (y < 0 || y >= TITLEBAR_H || w <= CONTROL_W * 3)
+        return 0;
+    if (x >= w - CONTROL_W)
+        return 'x';
+    if (x >= w - CONTROL_W * 2)
+        return 'm';
+    if (x >= w - CONTROL_W * 3)
+        return '-';
+    return 't';
+}
+
+static void activate_titlebar_control(struct frontend *fe, int control)
+{
+    if (control == 'x') {
+        fe->running = 0;
+    } else if (control == 'm') {
+        if (fe->maximized) {
+            xdg_toplevel_unset_maximized(fe->toplevel);
+            fe->maximized = 0;
+        } else {
+            xdg_toplevel_set_maximized(fe->toplevel);
+            fe->maximized = 1;
+        }
+    } else if (control == '-') {
+        xdg_toplevel_set_minimized(fe->toplevel);
+    }
 }
 
 static void write_status(struct frontend *fe, int status)
@@ -388,11 +460,99 @@ static const struct wl_keyboard_listener keyboard_listener = {
     .repeat_info = keyboard_repeat_info,
 };
 
+static void pointer_enter(void *data, struct wl_pointer *pointer,
+                          uint32_t serial, struct wl_surface *surface,
+                          wl_fixed_t sx, wl_fixed_t sy)
+{
+    struct frontend *fe = data;
+    (void)pointer; (void)serial; (void)surface;
+    fe->pointer_x = wl_fixed_to_int(sx);
+    fe->pointer_y = wl_fixed_to_int(sy);
+}
+
+static void pointer_leave(void *data, struct wl_pointer *pointer,
+                          uint32_t serial, struct wl_surface *surface)
+{
+    (void)data; (void)pointer; (void)serial; (void)surface;
+}
+
+static void pointer_motion(void *data, struct wl_pointer *pointer,
+                           uint32_t time, wl_fixed_t sx, wl_fixed_t sy)
+{
+    struct frontend *fe = data;
+    (void)pointer; (void)time;
+    fe->pointer_x = wl_fixed_to_int(sx);
+    fe->pointer_y = wl_fixed_to_int(sy);
+}
+
+static void pointer_button(void *data, struct wl_pointer *pointer,
+                           uint32_t serial, uint32_t time, uint32_t button,
+                           uint32_t state)
+{
+    struct frontend *fe = data;
+    int control;
+    (void)pointer; (void)time;
+
+    if (button != BTN_LEFT || state != WL_POINTER_BUTTON_STATE_PRESSED)
+        return;
+    control = titlebar_control_at(fe, fe->pointer_x, fe->pointer_y);
+    if (control == 't') {
+        xdg_toplevel_move(fe->toplevel, fe->seat, serial);
+    } else if (control) {
+        activate_titlebar_control(fe, control);
+    }
+}
+
+static void pointer_axis(void *data, struct wl_pointer *pointer,
+                         uint32_t time, uint32_t axis, wl_fixed_t value)
+{
+    (void)data; (void)pointer; (void)time; (void)axis; (void)value;
+}
+
+static void pointer_frame(void *data, struct wl_pointer *pointer)
+{
+    (void)data; (void)pointer;
+}
+
+static void pointer_axis_source(void *data, struct wl_pointer *pointer,
+                                uint32_t axis_source)
+{
+    (void)data; (void)pointer; (void)axis_source;
+}
+
+static void pointer_axis_stop(void *data, struct wl_pointer *pointer,
+                              uint32_t time, uint32_t axis)
+{
+    (void)data; (void)pointer; (void)time; (void)axis;
+}
+
+static void pointer_axis_discrete(void *data, struct wl_pointer *pointer,
+                                  uint32_t axis, int32_t discrete)
+{
+    (void)data; (void)pointer; (void)axis; (void)discrete;
+}
+
+static const struct wl_pointer_listener pointer_listener = {
+    .enter = pointer_enter,
+    .leave = pointer_leave,
+    .motion = pointer_motion,
+    .button = pointer_button,
+    .axis = pointer_axis,
+    .frame = pointer_frame,
+    .axis_source = pointer_axis_source,
+    .axis_stop = pointer_axis_stop,
+    .axis_discrete = pointer_axis_discrete,
+};
+
 static void seat_capabilities(void *data, struct wl_seat *seat,
                               uint32_t capabilities)
 {
     struct frontend *fe = data;
 
+    if ((capabilities & WL_SEAT_CAPABILITY_POINTER) && !fe->pointer) {
+        fe->pointer = wl_seat_get_pointer(seat);
+        wl_pointer_add_listener(fe->pointer, &pointer_listener, fe);
+    }
     if ((capabilities & WL_SEAT_CAPABILITY_KEYBOARD) && !fe->keyboard) {
         fe->keyboard = wl_seat_get_keyboard(seat);
         wl_keyboard_add_listener(fe->keyboard, &keyboard_listener, fe);
@@ -426,11 +586,17 @@ static void toplevel_configure(void *data, struct xdg_toplevel *toplevel,
                                struct wl_array *states)
 {
     struct frontend *fe = data;
-    (void)toplevel; (void)states;
+    uint32_t *state;
+    (void)toplevel;
 
     if (width > 0 && height > 0) {
         fe->width = width;
         fe->height = height;
+    }
+    fe->maximized = 0;
+    wl_array_for_each(state, states) {
+        if (*state == XDG_TOPLEVEL_STATE_MAXIMIZED)
+            fe->maximized = 1;
     }
 }
 
@@ -495,7 +661,7 @@ static const struct wl_registry_listener registry_listener = {
 static int init_wayland(struct frontend *fe)
 {
     fe->width = DEFAULT_W;
-    fe->height = DEFAULT_H;
+    fe->height = DEFAULT_H + TITLEBAR_H;
     fe->display = wl_display_connect(NULL);
     if (!fe->display)
         return -1;
@@ -513,6 +679,8 @@ static int init_wayland(struct frontend *fe)
     xdg_toplevel_add_listener(fe->toplevel, &toplevel_listener, fe);
     xdg_toplevel_set_title(fe->toplevel, "Peanut-GB");
     xdg_toplevel_set_app_id(fe->toplevel, "peanutgb");
+    xdg_toplevel_set_min_size(fe->toplevel, DEFAULT_W / 2,
+                              DEFAULT_H / 2 + TITLEBAR_H);
     wl_surface_commit(fe->surface);
     while (!fe->configured && wl_display_dispatch(fe->display) >= 0)
         ;
@@ -551,6 +719,8 @@ static void cleanup(struct frontend *fe)
     write_save(fe);
     if (fe->present_ready)
         xv6_present_buffer_destroy(&fe->present);
+    if (fe->pointer)
+        wl_pointer_destroy(fe->pointer);
     if (fe->keyboard)
         wl_keyboard_destroy(fe->keyboard);
     if (fe->seat)

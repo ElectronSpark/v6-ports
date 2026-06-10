@@ -453,6 +453,7 @@ add_custom_command(
                 -o ${_peanutgb_bin}
                 ${WAYLAND_SRC_DIR}/peanutgb.c
                 ${WAYLAND_SRC_DIR}/xv6_icon_peanutgb.c
+                ${WAYLAND_SRC_DIR}/xv6_draw.c
                 ${WAYLAND_SRC_DIR}/xv6_present_buffer.c
                 ${_xdg_client_code}
                 -lwayland-client
@@ -460,6 +461,8 @@ add_custom_command(
     DEPENDS ${WAYLAND_SRC_DIR}/peanutgb.c
             ${WAYLAND_SRC_DIR}/xv6_icon.h
             ${WAYLAND_SRC_DIR}/xv6_icon_peanutgb.c
+            ${WAYLAND_SRC_DIR}/xv6_draw.c
+            ${WAYLAND_SRC_DIR}/xv6_draw.h
             ${PEANUT_GB_SRC_DIR}/peanut_gb.h
             ${WAYLAND_SRC_DIR}/xv6_present_buffer.c
             ${WAYLAND_SRC_DIR}/xv6_present_buffer.h
