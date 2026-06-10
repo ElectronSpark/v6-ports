@@ -406,6 +406,7 @@ add_custom_command(
     DEPENDS ${WAYLAND_SRC_DIR}/mesaglsmoke.c
             ${WAYLAND_SRC_DIR}/gl_program.c
             ${WAYLAND_SRC_DIR}/gl_program.h
+            ${WAYLAND_SRC_DIR}/font8x16.h
             ${WAYLAND_SRC_DIR}/mesawlegl_sphere.c
             ${WAYLAND_SRC_DIR}/mesawlegl_sphere.h
             ${WAYLAND_SRC_DIR}/pixel_fps_overlay.c

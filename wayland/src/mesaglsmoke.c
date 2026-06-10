@@ -11,6 +11,7 @@
 #include <EGL/eglext.h>
 #include <GLES2/gl2.h>
 #include <math.h>
+#include <linux/input.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -19,6 +20,7 @@
 #include <unistd.h>
 #include <wayland-client.h>
 
+#include "font8x16.h"
 #include "gl_program.h"
 #include "mesawlegl_sphere.h"
 #include "pixel_fps_overlay.h"
@@ -48,6 +50,9 @@
 #define DEMO_H 260
 #define DEFAULT_SPHERE_QUALITY 4
 #define DEMO_SPHERE_QUALITY 3
+#define TITLEBAR_H 30
+#define CONTROL_W 34
+#define TITLEBAR_TITLE "Mesa GL Smoke"
 
 struct vertex {
     GLfloat x;
@@ -63,6 +68,8 @@ struct app_state {
     struct wl_display *display;
     struct wl_registry *registry;
     struct wl_compositor *compositor;
+    struct wl_seat *seat;
+    struct wl_pointer *pointer;
     struct wl_shm *shm;
     struct wl_proxy *gpu_manager;
     struct xdg_wm_base *wm_base;
@@ -99,6 +106,9 @@ struct app_state {
     int pending_width;
     int pending_height;
     int loop;
+    int maximized;
+    int pointer_x;
+    int pointer_y;
     int sphere_demo;
     int sphere_quality;
     int fixed_size;
@@ -116,6 +126,109 @@ struct app_state {
 static uint64_t monotonic_ns(void);
 static void clear_gl_errors(void);
 static void draw_and_commit(struct app_state *app);
+
+static int content_height(const struct app_state *app)
+{
+    int h = app->height - TITLEBAR_H;
+
+    return h > 1 ? h : 1;
+}
+
+static void fill_rect(uint32_t *pixels, int width, int height, int stride,
+                      int x, int y, int w, int h, uint32_t color)
+{
+    if (!pixels || w <= 0 || h <= 0)
+        return;
+    if (x < 0) {
+        w += x;
+        x = 0;
+    }
+    if (y < 0) {
+        h += y;
+        y = 0;
+    }
+    if (x >= width || y >= height)
+        return;
+    if (x + w > width)
+        w = width - x;
+    if (y + h > height)
+        h = height - y;
+    for (int yy = y; yy < y + h; yy++) {
+        uint32_t *row = (uint32_t *)((uint8_t *)pixels +
+                                     (size_t)yy * (size_t)stride);
+
+        for (int xx = x; xx < x + w; xx++)
+            row[xx] = color;
+    }
+}
+
+static void draw_glyph(uint32_t *pixels, int width, int height, int stride,
+                       int x, int y, char ch, uint32_t color)
+{
+    const uint8_t *glyph;
+
+    if (ch < 0x20 || ch > 0x7e)
+        ch = '?';
+    glyph = font8x16_data[ch - 0x20];
+    for (int row = 0; row < 16; row++) {
+        uint8_t bits = glyph[row];
+
+        for (int col = 0; col < 8; col++) {
+            if (bits & (0x80u >> col))
+                fill_rect(pixels, width, height, stride, x + col, y + row,
+                          1, 1, color);
+        }
+    }
+}
+
+static void draw_text_clipped(uint32_t *pixels, int width, int height,
+                              int stride, int x, int y, int max_w,
+                              const char *text, uint32_t color)
+{
+    if (max_w <= 0)
+        return;
+    for (const char *p = text; *p && x + 8 <= max_w; p++, x += 8)
+        draw_glyph(pixels, width, height, stride, x, y, *p, color);
+}
+
+static void draw_title_button(uint32_t *pixels, int width, int height,
+                              int stride, int x, const char *label,
+                              uint32_t bg, uint32_t fg)
+{
+    fill_rect(pixels, width, height, stride, x, 0, CONTROL_W, TITLEBAR_H, bg);
+    fill_rect(pixels, width, height, stride, x, TITLEBAR_H - 1, CONTROL_W, 1,
+              0xff8292a5u);
+    draw_text_clipped(pixels, width, height, stride, x + 9, 7,
+                      x + CONTROL_W - 4, label, fg);
+}
+
+static void draw_titlebar(struct app_state *app)
+{
+    uint32_t *pixels = app->buffer.pixels;
+    int close_x = app->width - CONTROL_W;
+    int max_x = app->width - CONTROL_W * 2;
+    int min_x = app->width - CONTROL_W * 3;
+    int title_limit = min_x - 12;
+
+    if (!pixels || app->width <= 0 || app->height <= 0)
+        return;
+    fill_rect(pixels, app->width, app->height, app->buffer.stride, 0, 0,
+              app->width, TITLEBAR_H, 0xff243241u);
+    fill_rect(pixels, app->width, app->height, app->buffer.stride, 0,
+              TITLEBAR_H - 1, app->width, 1, 0xff6f8295u);
+    if (title_limit > 16)
+        draw_text_clipped(pixels, app->width, app->height, app->buffer.stride,
+                          10, 7, title_limit, TITLEBAR_TITLE, 0xfff2f5f8u);
+    if (app->width > CONTROL_W * 3) {
+        draw_title_button(pixels, app->width, app->height, app->buffer.stride,
+                          min_x, "-", 0xff2f4050u, 0xfff2f5f8u);
+        draw_title_button(pixels, app->width, app->height, app->buffer.stride,
+                          max_x, app->maximized ? "[]" : "+",
+                          0xff2f4050u, 0xfff2f5f8u);
+        draw_title_button(pixels, app->width, app->height, app->buffer.stride,
+                          close_x, "x", 0xff8b3438u, 0xffffffffu);
+    }
+}
 
 static void destroy_render_target(struct app_state *app)
 {
@@ -429,10 +542,12 @@ static int recreate_mesa_surface(struct app_state *app)
 static int resize_surface_and_buffer_to(struct app_state *app, int width,
                                         int height)
 {
+    int min_h = 150 + TITLEBAR_H;
+
     if (width < 200)
         width = 200;
-    if (height < 150)
-        height = 150;
+    if (height < min_h)
+        height = min_h;
     if (width == app->width && height == app->height)
         return 0;
 
@@ -451,8 +566,8 @@ static int resize_surface_and_buffer_to(struct app_state *app, int width,
 static int resize_surface_and_buffer(struct app_state *app)
 {
     if (app->width == WINDOW_W)
-        return resize_surface_and_buffer_to(app, 360, 260);
-    return resize_surface_and_buffer_to(app, WINDOW_W, WINDOW_H);
+        return resize_surface_and_buffer_to(app, 360, 260 + TITLEBAR_H);
+    return resize_surface_and_buffer_to(app, WINDOW_W, WINDOW_H + TITLEBAR_H);
 }
 
 static void render_frame(struct app_state *app)
@@ -474,6 +589,7 @@ static void render_frame(struct app_state *app)
     glViewport(0, 0, app->width, app->height);
     glClearColor(0.03f, 0.055f, 0.07f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT);
+    glViewport(0, 0, app->width, content_height(app));
     glUseProgram(app->program);
     glBindBuffer(GL_ARRAY_BUFFER, 0);
     glVertexAttribPointer((GLuint)app->attr_pos, 3, GL_FLOAT, GL_FALSE,
@@ -487,8 +603,8 @@ static void render_frame(struct app_state *app)
 
 static void render_sphere_frame(struct app_state *app)
 {
-    float aspect = app->height > 0 ? (float)app->width / (float)app->height :
-                                     1.0f;
+    int ch = content_height(app);
+    float aspect = ch > 0 ? (float)app->width / (float)ch : 1.0f;
     float projection[16];
     float view[16];
     float rx[16];
@@ -512,6 +628,7 @@ static void render_sphere_frame(struct app_state *app)
     glClearColor(0.015f, 0.022f, 0.032f, 1.0f);
     glClearDepthf(1.0f);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    glViewport(0, 0, app->width, ch);
     glDisable(GL_BLEND);
     glEnable(GL_DEPTH_TEST);
     glDepthFunc(GL_LEQUAL);
@@ -679,6 +796,7 @@ static void draw_and_commit(struct app_state *app)
         update_fps_overlay(app);
         draw_fps_overlay(app);
     }
+    draw_titlebar(app);
     app->frame_cb = wl_surface_frame(app->surface);
     wl_callback_add_listener(app->frame_cb, &frame_listener, app);
     wl_surface_attach(app->surface, app->buffer.wl_buffer, 0, 0);
@@ -718,8 +836,14 @@ static void toplevel_configure(void *data, struct xdg_toplevel *toplevel,
                                struct wl_array *states)
 {
     struct app_state *app = data;
+    uint32_t *state;
     (void)toplevel;
-    (void)states;
+
+    app->maximized = 0;
+    wl_array_for_each(state, states) {
+        if (*state == XDG_TOPLEVEL_STATE_MAXIMIZED)
+            app->maximized = 1;
+    }
 
     if (app->fixed_size)
         return;
@@ -739,6 +863,141 @@ static void toplevel_close(void *data, struct xdg_toplevel *toplevel)
 static const struct xdg_toplevel_listener toplevel_listener = {
     .configure = toplevel_configure,
     .close = toplevel_close,
+};
+
+static int titlebar_control_at(struct app_state *app, int x, int y)
+{
+    if (y < 0 || y >= TITLEBAR_H || app->width <= CONTROL_W * 3)
+        return 0;
+    if (x >= app->width - CONTROL_W)
+        return 'x';
+    if (x >= app->width - CONTROL_W * 2)
+        return 'm';
+    if (x >= app->width - CONTROL_W * 3)
+        return '-';
+    return 't';
+}
+
+static void activate_titlebar_control(struct app_state *app, int control)
+{
+    if (control == 'x') {
+        app->running = 0;
+    } else if (control == 'm') {
+        if (app->maximized) {
+            xdg_toplevel_unset_maximized(app->toplevel);
+            app->maximized = 0;
+        } else {
+            xdg_toplevel_set_maximized(app->toplevel);
+            app->maximized = 1;
+        }
+    } else if (control == '-') {
+        xdg_toplevel_set_minimized(app->toplevel);
+    }
+}
+
+static void pointer_enter(void *data, struct wl_pointer *pointer,
+                          uint32_t serial, struct wl_surface *surface,
+                          wl_fixed_t sx, wl_fixed_t sy)
+{
+    struct app_state *app = data;
+    (void)pointer; (void)serial; (void)surface;
+    app->pointer_x = wl_fixed_to_int(sx);
+    app->pointer_y = wl_fixed_to_int(sy);
+}
+
+static void pointer_leave(void *data, struct wl_pointer *pointer,
+                          uint32_t serial, struct wl_surface *surface)
+{
+    (void)data; (void)pointer; (void)serial; (void)surface;
+}
+
+static void pointer_motion(void *data, struct wl_pointer *pointer,
+                           uint32_t time, wl_fixed_t sx, wl_fixed_t sy)
+{
+    struct app_state *app = data;
+    (void)pointer; (void)time;
+    app->pointer_x = wl_fixed_to_int(sx);
+    app->pointer_y = wl_fixed_to_int(sy);
+}
+
+static void pointer_button(void *data, struct wl_pointer *pointer,
+                           uint32_t serial, uint32_t time, uint32_t button,
+                           uint32_t state)
+{
+    struct app_state *app = data;
+    int control;
+    (void)pointer; (void)time;
+
+    if (button != BTN_LEFT || state != WL_POINTER_BUTTON_STATE_PRESSED)
+        return;
+    control = titlebar_control_at(app, app->pointer_x, app->pointer_y);
+    if (control == 't') {
+        xdg_toplevel_move(app->toplevel, app->seat, serial);
+    } else if (control) {
+        activate_titlebar_control(app, control);
+    }
+}
+
+static void pointer_axis(void *data, struct wl_pointer *pointer,
+                         uint32_t time, uint32_t axis, wl_fixed_t value)
+{
+    (void)data; (void)pointer; (void)time; (void)axis; (void)value;
+}
+
+static void pointer_frame(void *data, struct wl_pointer *pointer)
+{
+    (void)data; (void)pointer;
+}
+
+static void pointer_axis_source(void *data, struct wl_pointer *pointer,
+                                uint32_t axis_source)
+{
+    (void)data; (void)pointer; (void)axis_source;
+}
+
+static void pointer_axis_stop(void *data, struct wl_pointer *pointer,
+                              uint32_t time, uint32_t axis)
+{
+    (void)data; (void)pointer; (void)time; (void)axis;
+}
+
+static void pointer_axis_discrete(void *data, struct wl_pointer *pointer,
+                                  uint32_t axis, int32_t discrete)
+{
+    (void)data; (void)pointer; (void)axis; (void)discrete;
+}
+
+static const struct wl_pointer_listener pointer_listener = {
+    .enter = pointer_enter,
+    .leave = pointer_leave,
+    .motion = pointer_motion,
+    .button = pointer_button,
+    .axis = pointer_axis,
+    .frame = pointer_frame,
+    .axis_source = pointer_axis_source,
+    .axis_stop = pointer_axis_stop,
+    .axis_discrete = pointer_axis_discrete,
+};
+
+static void seat_capabilities(void *data, struct wl_seat *seat,
+                              uint32_t capabilities)
+{
+    struct app_state *app = data;
+
+    if ((capabilities & WL_SEAT_CAPABILITY_POINTER) && !app->pointer) {
+        app->pointer = wl_seat_get_pointer(seat);
+        wl_pointer_add_listener(app->pointer, &pointer_listener, app);
+    }
+}
+
+static void seat_name(void *data, struct wl_seat *seat, const char *name)
+{
+    (void)data; (void)seat; (void)name;
+}
+
+static const struct wl_seat_listener seat_listener = {
+    .capabilities = seat_capabilities,
+    .name = seat_name,
 };
 
 static void wm_base_ping(void *data, struct xdg_wm_base *wm_base,
@@ -770,6 +1029,10 @@ static void registry_global(void *data, struct wl_registry *registry,
                                         &xdg_wm_base_interface,
                                         version > 2 ? 2 : version);
         xdg_wm_base_add_listener(app->wm_base, &wm_base_listener, app);
+    } else if (strcmp(interface, wl_seat_interface.name) == 0) {
+        app->seat = wl_registry_bind(registry, name, &wl_seat_interface,
+                                     version > 5 ? 5 : version);
+        wl_seat_add_listener(app->seat, &seat_listener, app);
     } else if (strcmp(interface, xv6_gpu_buffer_manager_interface.name) == 0 &&
                !app->gpu_manager) {
         app->gpu_manager = wl_registry_bind(
@@ -864,6 +1127,10 @@ static void cleanup(struct app_state *app)
         xdg_surface_destroy(app->xdg_surface);
     if (app->surface)
         wl_surface_destroy(app->surface);
+    if (app->pointer)
+        wl_pointer_destroy(app->pointer);
+    if (app->seat)
+        wl_seat_destroy(app->seat);
     if (app->gpu_manager)
         wl_proxy_destroy(app->gpu_manager);
     if (app->wm_base)
@@ -980,7 +1247,7 @@ int main(int argc, char **argv)
     int resize_seconds = 0;
     int sphere_demo = 0;
     int width = WINDOW_W;
-    int height = WINDOW_H;
+    int height = WINDOW_H + TITLEBAR_H;
     int sphere_quality = DEFAULT_SPHERE_QUALITY;
     int fixed_size = 0;
     int allow_resize = 0;
@@ -1024,7 +1291,7 @@ int main(int argc, char **argv)
             if (!width_set)
                 width = DEMO_W;
             if (!height_set)
-                height = DEMO_H;
+                height = DEMO_H + TITLEBAR_H;
             if (!quality_set)
                 sphere_quality = DEMO_SPHERE_QUALITY;
         } else if (strcmp(argv[i], "--help") == 0) {
@@ -1040,8 +1307,8 @@ int main(int argc, char **argv)
     }
     if (width < 200)
         width = 200;
-    if (height < 150)
-        height = 150;
+    if (height < 150 + TITLEBAR_H)
+        height = 150 + TITLEBAR_H;
     if (sphere_quality < 1)
         sphere_quality = 1;
     if (sphere_quality > 8)
