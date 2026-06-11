@@ -172,6 +172,8 @@ static int webkit_feature_gate_smoke_enabled_by_cmdline(void);
 static int webkit_idle_browse_smoke_enabled_by_cmdline(void);
 static int webkit_compat_gate_smoke_enabled_by_cmdline(void);
 static int webkit_js_disabled_by_cmdline(void);
+static int webkit_private_disabled_by_cmdline(void);
+static int webkit_exit_after_load_enabled_by_cmdline(void);
 static int webkit_disable_gdk_gl_by_cmdline(void);
 static int webkit_dmabuf_enabled_by_cmdline(void);
 static int webkit_gst_gl_enabled_by_cmdline(void);
@@ -188,6 +190,7 @@ static int cmdline_int_value(const char *cmdline, const char *key,
                              int fallback);
 static int cmdline_copy_value(const char *cmdline, const char *key, char *dst,
                               size_t dst_size);
+static void argv_remove_arg(char **argv, const char *arg);
 static int token_is_enabled(const char *cmdline, const char *key);
 static int read_cmdline(char *buf, size_t buf_size);
 static int write_all_fd(int fd, const void *buf, size_t len);
@@ -2528,6 +2531,27 @@ static void wait_for_gst_registry_warmup(int wait_us)
             wait_us / 1000);
 }
 
+static void prepare_gst_registry_for_webkit(int wait_us)
+{
+    if (gst_registry_ready)
+        return;
+    if (access("/share/gstreamer-1.0/registry.x86_64.bin", R_OK) == 0) {
+        gst_registry_ready = 1;
+        fprintf(stderr, "[desktop] using staged GStreamer registry\n");
+        return;
+    }
+    if (gst_warmup_pid <= 0) {
+        gst_warmup_pid = launch_gst_registry_warmup();
+        if (gst_warmup_pid > 0)
+            fprintf(stderr, "[desktop] GStreamer registry warmup pid=%d\n",
+                    gst_warmup_pid);
+        else
+            fprintf(stderr,
+                    "[desktop] failed to start GStreamer registry warmup\n");
+    }
+    wait_for_gst_registry_warmup(wait_us);
+}
+
 static pid_t launch_client(const char *path, const char *name, const char *arg1,
                            const char *arg2, const char *arg3)
 {
@@ -2653,6 +2677,9 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
         char *webkit_uri_log_env =
             webkit_logging_enabled_by_cmdline() ? "XV6_WEBKIT_URI_LOG=1" :
                                                   "XV6_WEBKIT_URI_LOG=0";
+        char *webkit_helper_log_env =
+            webkit_logging_enabled_by_cmdline() ?
+            "XV6_WEBKIT_HELPER_LOG=1" : "XV6_WEBKIT_HELPER_LOG=0";
         char *webkit_gdk_gl_env =
             webkit_disable_gdk_gl_by_cmdline() ? "GDK_GL=disable" :
                                                  "GDK_GL=gles";
@@ -2678,7 +2705,11 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
         char webkit_require_gpu_contract_env[40] =
             "WEBKIT_XV6_REQUIRE_GPU_CONTRACT=1";
         char webkit_force_compositing_mode_env[40] =
-            "WEBKIT_XV6_FORCE_COMPOSITING_MODE=1";
+            "WEBKIT_FORCE_COMPOSITING_MODE=1";
+        char webkit_disable_compositing_mode_env[48] =
+            "WEBKIT_XV6_DISABLE_COMPOSITING_MODE=0";
+        char webkit_force_vblank_timer_env[32] =
+            "WEBKIT_FORCE_VBLANK_TIMER=1";
         char mesa_capture_env[] = "XV6_MESAWLEGL_CAPTURE=0";
         char mesa_capture_seconds_env[48];
         char mesa_wayland_color_buffers_env[48] =
@@ -2739,10 +2770,23 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             snprintf(webkit_require_gpu_contract_env,
                      sizeof(webkit_require_gpu_contract_env),
                      "WEBKIT_XV6_REQUIRE_GPU_CONTRACT=0");
+        }
+        if (have_webkit_cmdline &&
+            cmdline_int_value(webkit_cmdline_buf,
+                              "webkit_disable_compositing", 0) != 0) {
             snprintf(webkit_force_compositing_mode_env,
                      sizeof(webkit_force_compositing_mode_env),
-                     "WEBKIT_XV6_FORCE_COMPOSITING_MODE=0");
+                     "WEBKIT_FORCE_COMPOSITING_MODE=0");
+            snprintf(webkit_disable_compositing_mode_env,
+                     sizeof(webkit_disable_compositing_mode_env),
+                     "WEBKIT_DISABLE_COMPOSITING_MODE=1");
         }
+        if (have_webkit_cmdline &&
+            cmdline_int_value(webkit_cmdline_buf,
+                              "webkit_force_vblank_timer", 1) == 0)
+            snprintf(webkit_force_vblank_timer_env,
+                     sizeof(webkit_force_vblank_timer_env),
+                     "WEBKIT_FORCE_VBLANK_TIMER=0");
         if (have_webkit_cmdline &&
             cmdline_copy_value(webkit_cmdline_buf, "webkit_gst_debug",
                                webkit_gst_debug_value,
@@ -2918,6 +2962,7 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             (char *)name,
             "--autoplay-policy=allow",
             "--private",
+            "--exit-after-load",
             "--enable-sandbox=false",
             "--enable-webgl=false",
             "--enable-webaudio=true",
@@ -2934,6 +2979,7 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             (char *)name,
             "--autoplay-policy=allow",
             "--private",
+            "--exit-after-load",
             webkit_youtube_geometry_arg,
             (char *)webkit_youtube_compat_user_agent,
             "--enable-sandbox=false",
@@ -2952,6 +2998,7 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             (char *)name,
             "--autoplay-policy=allow",
             "--private",
+            "--exit-after-load",
             "--enable-sandbox=false",
             "--enable-webgl=false",
             "--enable-webaudio=true",
@@ -2968,6 +3015,7 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             (char *)name,
             "--autoplay-policy=allow",
             "--private",
+            "--exit-after-load",
             webkit_youtube_geometry_arg,
             (char *)webkit_youtube_compat_user_agent,
             "--enable-sandbox=false",
@@ -2986,6 +3034,7 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             (char *)name,
             "--autoplay-policy=allow",
             "--private",
+            "--exit-after-load",
             "--enable-sandbox=false",
             "--enable-webgl=false",
             "--enable-webaudio=true",
@@ -3002,6 +3051,7 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             (char *)name,
             "--autoplay-policy=allow",
             "--private",
+            "--exit-after-load",
             webkit_youtube_geometry_arg,
             (char *)webkit_youtube_compat_user_agent,
             "--enable-sandbox=false",
@@ -3020,6 +3070,7 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             (char *)name,
             "--autoplay-policy=allow",
             "--private",
+            "--exit-after-load",
             "--enable-sandbox=false",
             "--enable-webgl=true",
             "--enable-webaudio=true",
@@ -3036,6 +3087,7 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             (char *)name,
             "--autoplay-policy=allow",
             "--private",
+            "--exit-after-load",
             webkit_youtube_geometry_arg,
             (char *)webkit_youtube_compat_user_agent,
             "--enable-sandbox=false",
@@ -3054,6 +3106,7 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             (char *)name,
             "--autoplay-policy=allow",
             "--private",
+            "--exit-after-load",
             "--enable-sandbox=false",
             "--enable-webgl=true",
             "--enable-webaudio=true",
@@ -3070,6 +3123,7 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             (char *)name,
             "--autoplay-policy=allow",
             "--private",
+            "--exit-after-load",
             webkit_youtube_geometry_arg,
             (char *)webkit_youtube_compat_user_agent,
             "--enable-sandbox=false",
@@ -3139,6 +3193,7 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             webkit_gpu_validate_run_id_env,
             webkit_d3d12_run_id_env,
             webkit_uri_log_env,
+            webkit_helper_log_env,
             "WEBKIT_EXEC_PATH=/libexec/webkit2gtk-4.1",
             "WEBKIT_INJECTED_BUNDLE_PATH=/lib/webkit2gtk-4.1/injected-bundle",
             "WEBKIT_DISABLE_NETWORK_CACHE=1",
@@ -3148,6 +3203,7 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             webkit_gst_use_videoconvert_env,
             webkit_gst_max_avc1_resolution_env,
             "WEBKIT_DISABLE_COMPOSITING_MODE=1",
+            webkit_force_vblank_timer_env,
             "WEBKIT_XV6_DISABLE_COMPOSITING_UPDATE=1",
             "LIBGL_ALWAYS_SOFTWARE=1",
             "EGL_PLATFORM=wayland",
@@ -3199,6 +3255,7 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             webkit_gpu_validate_run_id_env,
             webkit_d3d12_run_id_env,
             webkit_uri_log_env,
+            webkit_helper_log_env,
             "WEBKIT_EXEC_PATH=/libexec/webkit2gtk-4.1",
             "WEBKIT_INJECTED_BUNDLE_PATH=/lib/webkit2gtk-4.1/injected-bundle",
             "WEBKIT_DISABLE_NETWORK_CACHE=1",
@@ -3212,6 +3269,8 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             "WEBKIT_XV6_GPU_CONTRACT=virgl-opengl-submit",
             webkit_require_gpu_contract_env,
             webkit_force_compositing_mode_env,
+            webkit_disable_compositing_mode_env,
+            webkit_force_vblank_timer_env,
             "LIBGL_ALWAYS_SOFTWARE=0",
             "LIBGL_DRIVERS_PATH=/lib/dri",
             "GALLIUM_DRIVER=virgl",
@@ -3277,13 +3336,15 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             webkit_gpu_validate_run_id_env,
             webkit_d3d12_run_id_env,
             webkit_uri_log_env,
+            webkit_helper_log_env,
             "WEBKIT_EXEC_PATH=/libexec/webkit2gtk-4.1",
             "WEBKIT_INJECTED_BUNDLE_PATH=/lib/webkit2gtk-4.1/injected-bundle",
             "WEBKIT_DISABLE_NETWORK_CACHE=1",
             "WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS=1",
             "WEBKIT_DMABUF_RENDERER_DISABLE_GBM=1",
             "WEBKIT_XV6_GPU_CONTRACT=d3d12-gpu-render",
-            "WEBKIT_XV6_FORCE_COMPOSITING_MODE=1",
+            webkit_force_compositing_mode_env,
+            webkit_force_vblank_timer_env,
             "LIBGL_ALWAYS_SOFTWARE=0",
             "LIBGL_DRIVERS_PATH=/lib/dri",
             "GALLIUM_DRIVER=d3d12",
@@ -3333,6 +3394,7 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             webkit_gpu_validate_run_id_env,
             webkit_d3d12_run_id_env,
             webkit_uri_log_env,
+            webkit_helper_log_env,
             "WEBKIT_EXEC_PATH=/libexec/webkit2gtk-4.1",
             "WEBKIT_INJECTED_BUNDLE_PATH=/lib/webkit2gtk-4.1/injected-bundle",
             "WEBKIT_DISABLE_NETWORK_CACHE=1",
@@ -3341,6 +3403,7 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             webkit_gst_dmabuf_sink_disabled_env,
             webkit_gst_use_videoconvert_env,
             webkit_gst_max_avc1_resolution_env,
+            webkit_force_vblank_timer_env,
             "LIBGL_ALWAYS_SOFTWARE=1",
             "EGL_PLATFORM=wayland",
             "LIBGL_DRIVERS_PATH=/lib/dri",
@@ -3391,10 +3454,12 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             webkit_gpu_validate_run_id_env,
             webkit_d3d12_run_id_env,
             webkit_uri_log_env,
+            webkit_helper_log_env,
             "WEBKIT_EXEC_PATH=/libexec/webkit2gtk-4.1",
             "WEBKIT_INJECTED_BUNDLE_PATH=/lib/webkit2gtk-4.1/injected-bundle",
             "WEBKIT_DISABLE_NETWORK_CACHE=1",
             "WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS=1",
+            webkit_force_vblank_timer_env,
             "LIBGL_ALWAYS_SOFTWARE=1",
             "EGL_PLATFORM=wayland",
             "LIBGL_DRIVERS_PATH=/lib/dri",
@@ -3568,6 +3633,11 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
                                          minibrowser_dmabuf, &contract);
         }
         if (is_minibrowser) {
+            int minibrowser_private =
+                !webkit_private_disabled_by_cmdline();
+            int minibrowser_exit_after_load =
+                webkit_exit_after_load_enabled_by_cmdline();
+
             if (minibrowser_accel) {
                 if (minibrowser_js) {
                     if (minibrowser_webgl_smoke)
@@ -3592,11 +3662,17 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
                          argv_minibrowser_youtube :
                          argv_minibrowser);
             }
+            if (!minibrowser_private)
+                argv_remove_arg(argv_exec, "--private");
+            if (!minibrowser_exit_after_load)
+                argv_remove_arg(argv_exec, "--exit-after-load");
             fprintf(stderr,
                     "[desktop] MiniBrowser argv js=%d accel=%d dmabuf=%d "
-                    "webgl=%d youtube_compat=%d arg4=%s url=%s\n",
+                    "webgl=%d youtube_compat=%d private=%d exit_after_load=%d "
+                    "arg4=%s url=%s\n",
                     minibrowser_js, minibrowser_accel, minibrowser_dmabuf,
                     minibrowser_webgl_smoke, minibrowser_youtube_compat,
+                    minibrowser_private, minibrowser_exit_after_load,
                     argv_exec[4] ? argv_exec[4] : "(none)",
                     minibrowser_url);
         }
@@ -3954,6 +4030,22 @@ static void cleanup(void)
     kill_and_reap(&gst_warmup_pid);
     kill_and_reap(&httpd_pid);
     kill_and_reap(&compositor_pid);
+}
+
+static void argv_remove_arg(char **argv, const char *arg)
+{
+    int read_i = 0;
+    int write_i = 0;
+
+    if (!argv || !arg)
+        return;
+
+    while (argv[read_i]) {
+        if (strcmp(argv[read_i], arg) != 0)
+            argv[write_i++] = argv[read_i];
+        read_i++;
+    }
+    argv[write_i] = NULL;
 }
 
 static int token_is_disabled(const char *cmdline, const char *key)
@@ -4360,6 +4452,26 @@ static int webkit_js_disabled_by_cmdline(void)
     return token_is_disabled(buf, "webkit_js");
 }
 
+static int webkit_private_disabled_by_cmdline(void)
+{
+    char buf[CMDLINE_BUF_MAX];
+
+    if (read_cmdline(buf, sizeof(buf)) < 0)
+        return 0;
+
+    return token_is_disabled(buf, "webkit_private");
+}
+
+static int webkit_exit_after_load_enabled_by_cmdline(void)
+{
+    char buf[CMDLINE_BUF_MAX];
+
+    if (read_cmdline(buf, sizeof(buf)) < 0)
+        return 0;
+
+    return token_is_enabled(buf, "webkit_exit_after_load");
+}
+
 static int webkit_disable_gdk_gl_by_cmdline(void)
 {
     char buf[CMDLINE_BUF_MAX];
@@ -4696,9 +4808,50 @@ static void glsmoke_args_from_cmdline(char *seconds_arg, size_t seconds_size,
         resize_arg[0] = '\0';
 }
 
-int main(void)
+/*
+ * Single-client launch mode used by desktop icons (weston-desktop-shell).
+ * Runs the same validated MiniBrowser launch path (curated argv + env,
+ * GPU-contract accel decision, resolv.conf sync) as the webkit autostart
+ * flow, then waits for the client and propagates its exit status.
+ */
+static int run_webkit_launch_mode(const char *url_arg)
+{
+    char webkit_url[WEBKIT_URL_MAX];
+    pid_t pid;
+    int status = 0;
+
+    if (url_arg && url_arg[0])
+        normalize_webkit_url(url_arg, webkit_url, sizeof(webkit_url));
+    else
+        webkit_url_from_cmdline(webkit_url, sizeof(webkit_url));
+
+    if (url_needs_network_wait(webkit_url))
+        sync_resolv_conf_from_netconf(WEBKIT_NET_WAIT_US);
+
+    prepare_gst_registry_for_webkit(WEBKIT_GST_WAIT_US);
+
+    pid = launch_client("/libexec/webkit2gtk-4.1/MiniBrowser", "MiniBrowser",
+                        webkit_url, NULL, NULL);
+    if (pid < 0) {
+        fprintf(stderr, "[desktop] launch-webkit fork failed: %s\n",
+                strerror(errno));
+        return 127;
+    }
+    fprintf(stderr, "[desktop] launch-webkit MiniBrowser pid=%d url=%s\n",
+            pid, webkit_url);
+    while (waitpid(pid, &status, 0) < 0) {
+        if (errno != EINTR)
+            return 1;
+    }
+    return WIFEXITED(status) ? WEXITSTATUS(status) : 1;
+}
+
+int main(int argc, char **argv)
 {
     const char *compositor_name;
+
+    if (argc >= 2 && strcmp(argv[1], "--launch-webkit") == 0)
+        return run_webkit_launch_mode(argc >= 3 ? argv[2] : NULL);
 
     install_signal_handlers();
 

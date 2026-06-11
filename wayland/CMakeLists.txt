@@ -104,6 +104,7 @@ set(_drmgpuprobe_installed ${XV6_SYSROOT}/bin/drmgpuprobe)
 set(_webkitgpusmoke_installed ${XV6_SYSROOT}/bin/webkitgpusmoke)
 set(_fault_trace_installed ${XV6_SYSROOT}/lib/xv6_glibc_fault_trace.so)
 set(_webkit_preload_wrapper_bin ${_wl_build}/webkit-preload-wrapper)
+set(_webkit_stage_stamp ${XV6_SYSROOT}/libexec/webkit2gtk-4.1/.webkit-stage.stamp)
 set(_adwaita_cursor_dir ${XV6_SYSROOT}/share/icons/Adwaita/cursors)
 set(_dnd_move_cursor ${_adwaita_cursor_dir}/dnd-move)
 set(_dnd_copy_cursor ${_adwaita_cursor_dir}/dnd-copy)
@@ -766,6 +767,7 @@ add_custom_command(
             ${_d3d12sharedsmoke_bin}
             ${_drmgpuprobe_bin} ${_webkitgpusmoke_bin}
             ${_fault_trace_lib} ${_webkit_preload_wrapper_bin}
+            ${_webkit_stage_stamp}
             ${WAYLAND_SRC_DIR}/install_webkit_preload_wrappers.sh
     COMMENT "Installing GUI session into ${XV6_SYSROOT}/bin"
     VERBATIM)

@@ -927,6 +927,12 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
         char webkit_gst_disable_gl_sink_env[40];
         char webkit_gst_dmabuf_sink_disabled_env[44];
         char webkit_gst_use_videoconvert_env[48];
+        char webkit_force_compositing_mode_env[40] =
+            "WEBKIT_FORCE_COMPOSITING_MODE=1";
+        char webkit_disable_compositing_mode_env[48] =
+            "WEBKIT_XV6_DISABLE_COMPOSITING_MODE=0";
+        char webkit_force_vblank_timer_env[32] =
+            "WEBKIT_FORCE_VBLANK_TIMER=1";
         char webkit_dmabuf_renderer_disable_gbm_env[48];
         char webkit_force_dmabuf_renderer_env[36];
         char mesa_wayland_color_buffers_env[48] =
@@ -946,6 +952,27 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
                  sizeof(webkit_gst_use_videoconvert_env),
                  "WEBKIT_GST_USE_VIDEOCONVERT_SCALE=%d",
                  webkit_gst_gl_enabled_by_cmdline() ? 0 : 1);
+        {
+            char webkit_cmdline_buf[CMDLINE_BUF_MAX];
+
+            if (read_cmdline(webkit_cmdline_buf,
+                             sizeof(webkit_cmdline_buf)) == 0) {
+                if (cmdline_int_value(webkit_cmdline_buf,
+                                      "webkit_disable_compositing", 0) != 0) {
+                    snprintf(webkit_force_compositing_mode_env,
+                             sizeof(webkit_force_compositing_mode_env),
+                             "WEBKIT_FORCE_COMPOSITING_MODE=0");
+                    snprintf(webkit_disable_compositing_mode_env,
+                             sizeof(webkit_disable_compositing_mode_env),
+                             "WEBKIT_DISABLE_COMPOSITING_MODE=1");
+                }
+                if (cmdline_int_value(webkit_cmdline_buf,
+                                      "webkit_force_vblank_timer", 1) == 0)
+                    snprintf(webkit_force_vblank_timer_env,
+                             sizeof(webkit_force_vblank_timer_env),
+                             "WEBKIT_FORCE_VBLANK_TIMER=0");
+            }
+        }
         snprintf(webkit_dmabuf_renderer_disable_gbm_env,
                  sizeof(webkit_dmabuf_renderer_disable_gbm_env),
                  "WEBKIT_DMABUF_RENDERER_DISABLE_GBM=%d",
@@ -1199,6 +1226,7 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             webkit_gst_use_videoconvert_env,
             "WEBKIT_GST_MAX_AVC1_RESOLUTION=720P",
             "WEBKIT_DISABLE_COMPOSITING_MODE=1",
+            webkit_force_vblank_timer_env,
             "WEBKIT_XV6_DISABLE_COMPOSITING_UPDATE=1",
             "LIBGL_ALWAYS_SOFTWARE=1",
             "EGL_PLATFORM=wayland",
@@ -1247,7 +1275,9 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             webkit_force_dmabuf_renderer_env,
             "WEBKIT_XV6_GPU_CONTRACT=virgl-opengl-submit",
             "WEBKIT_XV6_REQUIRE_GPU_CONTRACT=1",
-            "WEBKIT_XV6_FORCE_COMPOSITING_MODE=1",
+            webkit_force_compositing_mode_env,
+            webkit_disable_compositing_mode_env,
+            webkit_force_vblank_timer_env,
             "LIBGL_ALWAYS_SOFTWARE=0",
             "LIBGL_DRIVERS_PATH=/lib/dri",
             "GALLIUM_DRIVER=virgl",
@@ -1293,7 +1323,8 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             webkit_force_dmabuf_renderer_env,
             "WEBKIT_XV6_GPU_CONTRACT=d3d12-shared-surface",
             "WEBKIT_XV6_REQUIRE_GPU_CONTRACT=1",
-            "WEBKIT_XV6_FORCE_COMPOSITING_MODE=1",
+            webkit_force_compositing_mode_env,
+            webkit_force_vblank_timer_env,
             "LIBGL_ALWAYS_SOFTWARE=0",
             "LIBGL_DRIVERS_PATH=/lib/dri",
             "MESA_LOADER_DRIVER_OVERRIDE=d3d12",
@@ -1349,6 +1380,7 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             webkit_gst_dmabuf_sink_disabled_env,
             webkit_gst_use_videoconvert_env,
             "WEBKIT_GST_MAX_AVC1_RESOLUTION=720P",
+            webkit_force_vblank_timer_env,
             "LIBGL_ALWAYS_SOFTWARE=1",
             "EGL_PLATFORM=wayland",
             "LIBGL_DRIVERS_PATH=/lib/dri",
