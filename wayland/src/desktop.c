@@ -2139,6 +2139,19 @@ static void webkit_print_runtime_probe(void)
     webkit_read_line("/tmp/http-smoke-count", count, sizeof(count));
     if (stat("/tmp/webkit_log.txt", &log_st) == 0)
         log_size = (long)log_st.st_size;
+    {
+        int fd = open("/webkit-runtime-probe.log",
+                      O_WRONLY | O_CREAT | O_APPEND, 0644);
+        if (fd >= 0) {
+            dprintf(fd,
+                    "ms=%lld title='%s' media='%s' http_requests=%s "
+                    "log_bytes=%ld\n",
+                    monotonic_ms(), title[0] ? title : "(none)",
+                    media[0] ? media : "(none)",
+                    count[0] ? count : "(none)", log_size);
+            close(fd);
+        }
+    }
     fprintf(stderr,
             "[desktop] WebKit probe title='%s' media='%s' "
             "http_requests=%s log_bytes=%ld\n",
@@ -2691,6 +2704,8 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
         char webkit_gst_dmabuf_sink_disabled_env[44];
         char webkit_gst_use_videoconvert_env[48];
         char webkit_gst_debug_env[256] = "GST_DEBUG=1";
+        char webkit_gst_debug_file_env[64] =
+            "GST_DEBUG_FILE=/tmp/gst-debug.log";
         char webkit_gst_debug_value[224];
         char webkit_gst_feature_rank_env[96] = "GST_PLUGIN_FEATURE_RANK=";
         char webkit_gst_max_avc1_resolution_env[48] =
@@ -2735,8 +2750,9 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
         int webkit_gst_max_avc1_480p =
             have_webkit_cmdline ?
                 cmdline_int_value(webkit_cmdline_buf,
-                                  "webkit_gst_max_avc1_480p", 0) :
-                0;
+                                  "webkit_gst_max_avc1_480p",
+                                  minibrowser_youtube_compat ? 1 : 0) :
+                (minibrowser_youtube_compat ? 1 : 0);
         int webkit_use_gst_gl = webkit_gst_gl_enabled_by_cmdline();
 
         mesa_size_arg[0] = '\0';
@@ -2802,6 +2818,12 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             fprintf(stderr, "[desktop] WebKit GST debug override %s\n",
                     webkit_gst_debug_env);
         }
+        if (have_webkit_cmdline &&
+            cmdline_int_value(webkit_cmdline_buf,
+                              "webkit_gst_debug_persist", 0) != 0)
+            snprintf(webkit_gst_debug_file_env,
+                     sizeof(webkit_gst_debug_file_env),
+                     "GST_DEBUG_FILE=/webkit-gst-debug.log");
         if (webkit_gst_disable_vp9)
             snprintf(webkit_gst_feature_rank_env,
                      sizeof(webkit_gst_feature_rank_env),
@@ -3191,7 +3213,7 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             gst_registry_update_env,
             webkit_gst_debug_env,
             webkit_gst_feature_rank_env,
-            "GST_DEBUG_FILE=/tmp/gst-debug.log",
+            webkit_gst_debug_file_env,
             "GST_DEBUG_NO_COLOR=1",
             "XV6_GUI_SESSION=1",
             webkit_youtube_probe_seconds_env,
@@ -3253,7 +3275,7 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             gst_registry_update_env,
             webkit_gst_debug_env,
             webkit_gst_feature_rank_env,
-            "GST_DEBUG_FILE=/tmp/gst-debug.log",
+            webkit_gst_debug_file_env,
             "GST_DEBUG_NO_COLOR=1",
             "XV6_GUI_SESSION=1",
             webkit_youtube_probe_seconds_env,
@@ -3334,7 +3356,7 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             gst_registry_update_env,
             webkit_gst_debug_env,
             webkit_gst_feature_rank_env,
-            "GST_DEBUG_FILE=/tmp/gst-debug.log",
+            webkit_gst_debug_file_env,
             "GST_DEBUG_NO_COLOR=1",
             "XV6_GUI_SESSION=1",
             webkit_youtube_probe_seconds_env,
@@ -3392,7 +3414,7 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             gst_registry_update_env,
             webkit_gst_debug_env,
             webkit_gst_feature_rank_env,
-            "GST_DEBUG_FILE=/tmp/gst-debug.log",
+            webkit_gst_debug_file_env,
             "GST_DEBUG_NO_COLOR=1",
             "XV6_GUI_SESSION=1",
             webkit_youtube_probe_seconds_env,
@@ -3452,7 +3474,7 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             gst_registry_update_env,
             webkit_gst_debug_env,
             webkit_gst_feature_rank_env,
-            "GST_DEBUG_FILE=/tmp/gst-debug.log",
+            webkit_gst_debug_file_env,
             "GST_DEBUG_NO_COLOR=1",
             "XV6_GUI_SESSION=1",
             webkit_youtube_probe_seconds_env,
@@ -3675,10 +3697,11 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             fprintf(stderr,
                     "[desktop] MiniBrowser argv js=%d accel=%d dmabuf=%d "
                     "webgl=%d youtube_compat=%d private=%d exit_after_load=%d "
-                    "arg4=%s url=%s\n",
+                    "gst_gl=%d max_avc1_480p=%d arg4=%s url=%s\n",
                     minibrowser_js, minibrowser_accel, minibrowser_dmabuf,
                     minibrowser_webgl_smoke, minibrowser_youtube_compat,
                     minibrowser_private, minibrowser_exit_after_load,
+                    webkit_use_gst_gl, webkit_gst_max_avc1_480p,
                     argv_exec[4] ? argv_exec[4] : "(none)",
                     minibrowser_url);
         }
@@ -4825,6 +4848,7 @@ static int run_webkit_launch_mode(const char *url_arg)
     char webkit_url[WEBKIT_URL_MAX];
     pid_t pid;
     int status = 0;
+    long long next_probe_ms = 0;
 
     if (url_arg && url_arg[0])
         normalize_webkit_url(url_arg, webkit_url, sizeof(webkit_url));
@@ -4845,9 +4869,22 @@ static int run_webkit_launch_mode(const char *url_arg)
     }
     fprintf(stderr, "[desktop] launch-webkit MiniBrowser pid=%d url=%s\n",
             pid, webkit_url);
-    while (waitpid(pid, &status, 0) < 0) {
-        if (errno != EINTR)
+    next_probe_ms = monotonic_ms() + 5000;
+    while (1) {
+        pid_t exited = waitpid(pid, &status, WNOHANG);
+        long long now_ms;
+
+        if (exited == pid)
+            break;
+        if (exited < 0 && errno != EINTR)
             return 1;
+
+        usleep(100000);
+        now_ms = monotonic_ms();
+        if (now_ms >= next_probe_ms) {
+            webkit_print_runtime_probe();
+            next_probe_ms = now_ms + 5000;
+        }
     }
     return WIFEXITED(status) ? WEXITSTATUS(status) : 1;
 }
