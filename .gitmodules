@@ -169,4 +169,4 @@
 	url = https://gitlab.freedesktop.org/emersion/drm_info.git
 [submodule "weston/src"]
 	path = weston/src
-	url = https://gitlab.freedesktop.org/wayland/weston.git
+	url = https://github.com/ElectronSpark/v6-weston.git
