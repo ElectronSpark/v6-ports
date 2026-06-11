@@ -11,12 +11,14 @@
 #include <wayland-client.h>
 #include <wayland-egl.h>
 
+#include "font8x16.h"
 #include "xdg-shell-client-protocol.h"
 #include "xv6_present_buffer.h"
 
 #include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <linux/input.h>
 #include <math.h>
 #include <poll.h>
 #include <stddef.h>
@@ -45,6 +47,9 @@
 #define KEY_RIGHT 106
 #define KEY_UP 103
 #define KEY_DOWN 108
+#define TITLEBAR_H 30
+#define TITLEBAR_CONTROL_W 34
+#define TITLEBAR_TITLE "GL Maze"
 
 #ifndef GL_BGRA_EXT
 #define GL_BGRA_EXT 0x80E1
@@ -72,6 +77,7 @@ struct app {
     struct wl_compositor *compositor;
     struct wl_shm *shm;
     struct wl_seat *seat;
+    struct wl_pointer *pointer;
     struct wl_keyboard *keyboard;
     struct xdg_wm_base *wm_base;
     struct wl_surface *surface;
@@ -86,6 +92,9 @@ struct app {
     int height;
     int configured;
     int running;
+    int maximized;
+    int pointer_x;
+    int pointer_y;
     int keys[256];
 
     GLuint program;
@@ -114,6 +123,8 @@ struct app {
     int frames;
     char renderer[64];
 };
+
+static void draw_titlebar(struct app *app);
 
 static uint64_t now_ms(void)
 {
@@ -780,10 +791,112 @@ static int present_via_shm(struct app *app)
                      ((rgba & 0x00ff0000u) >> 16);
         }
     }
+    draw_titlebar(app);
     wl_surface_attach(app->surface, app->present_buf.wl_buffer, 0, 0);
     wl_surface_damage(app->surface, 0, 0, app->width, app->height);
     wl_surface_commit(app->surface);
     return 0;
+}
+
+static void draw_rect(uint32_t *pixels, int width, int height, int stride,
+                      int x, int y, int w, int h, uint32_t color)
+{
+    if (x < 0) {
+        w += x;
+        x = 0;
+    }
+    if (y < 0) {
+        h += y;
+        y = 0;
+    }
+    if (x + w > width)
+        w = width - x;
+    if (y + h > height)
+        h = height - y;
+    if (w <= 0 || h <= 0)
+        return;
+    for (int yy = y; yy < y + h; yy++) {
+        uint32_t *row = (uint32_t *)((uint8_t *)pixels +
+                                     (size_t)yy * (size_t)stride);
+        for (int xx = x; xx < x + w; xx++)
+            row[xx] = color;
+    }
+}
+
+static void draw_char(uint32_t *pixels, int width, int height, int stride,
+                      int x, int y, char ch, uint32_t color)
+{
+    const uint8_t *glyph;
+
+    if (ch < 0x20 || ch > 0x7e)
+        ch = '?';
+    glyph = font8x16_data[ch - 0x20];
+    for (int row = 0; row < 16; row++) {
+        uint8_t bits = glyph[row];
+
+        for (int col = 0; col < 8; col++) {
+            if (bits & (0x80u >> col))
+                draw_rect(pixels, width, height, stride, x + col, y + row,
+                          1, 1, color);
+        }
+    }
+}
+
+static void draw_text_fit(uint32_t *pixels, int width, int height, int stride,
+                          int x, int y, int max_w, const char *text,
+                          uint32_t color)
+{
+    int used = 0;
+
+    if (max_w <= 0)
+        return;
+    for (const char *p = text; *p && used + 8 <= max_w; p++, used += 8)
+        draw_char(pixels, width, height, stride, x + used, y, *p, color);
+}
+
+static void draw_title_button(uint32_t *pixels, int width, int height,
+                              int stride, int x, const char *label,
+                              uint32_t bg, uint32_t fg)
+{
+    int tx = x + (TITLEBAR_CONTROL_W - (int)strlen(label) * 8) / 2;
+
+    draw_rect(pixels, width, height, stride, x, 0, TITLEBAR_CONTROL_W,
+              TITLEBAR_H, bg);
+    draw_rect(pixels, width, height, stride, x, TITLEBAR_H - 1,
+              TITLEBAR_CONTROL_W, 1, 0xff677789u);
+    draw_text_fit(pixels, width, height, stride, tx, 7,
+                  TITLEBAR_CONTROL_W - 4, label, fg);
+}
+
+static void draw_titlebar(struct app *app)
+{
+    uint32_t *pixels = app->present_buf.pixels;
+    int close_x = app->width - TITLEBAR_CONTROL_W;
+    int max_x = close_x - TITLEBAR_CONTROL_W;
+    int min_x = max_x - TITLEBAR_CONTROL_W;
+    int title_limit = min_x - 18;
+
+    if (!pixels || app->width <= TITLEBAR_CONTROL_W * 3 ||
+        app->height < TITLEBAR_H)
+        return;
+    draw_rect(pixels, app->width, app->height, app->present_buf.stride,
+              0, 0, app->width, TITLEBAR_H, 0xff1b2836u);
+    draw_rect(pixels, app->width, app->height, app->present_buf.stride,
+              0, TITLEBAR_H - 1, app->width, 1, 0xff5f7183u);
+    if (title_limit > 0)
+        draw_text_fit(pixels, app->width, app->height,
+                      app->present_buf.stride, 10, 7, title_limit,
+                      TITLEBAR_TITLE, 0xfff3f7fbu);
+    draw_title_button(pixels, app->width, app->height,
+                      app->present_buf.stride, min_x, "-", 0xff26384bu,
+                      0xfff3f7fbu);
+    draw_title_button(pixels, app->width, app->height,
+                      app->present_buf.stride, max_x,
+                      app->maximized ? "[]" : "+", 0xff26384bu,
+                      0xfff3f7fbu);
+    draw_title_button(pixels, app->width, app->height,
+                      app->present_buf.stride, close_x, "x", 0xff78343au,
+                      0xffffffffu);
 }
 
 static void draw_frame(struct app *app)
@@ -794,12 +907,16 @@ static void draw_frame(struct app *app)
     float center[3] = { eye[0] + dir[0], eye[1] - 0.18f,
                         eye[2] + dir[2] };
     float up[3] = { 0.0f, 1.0f, 0.0f };
+    int content_h = app->height - TITLEBAR_H;
 
+    if (content_h < 1)
+        content_h = 1;
     build_world(app);
     glViewport(0, 0, app->width, app->height);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    glViewport(0, 0, app->width, content_h);
     mat4_perspective(proj, 65.0f * 0.0174532925f,
-                     (float)app->width / (float)app->height, 0.05f, 80.0f);
+                     (float)app->width / (float)content_h, 0.05f, 80.0f);
     mat4_look_at(view, eye, center, up);
     mat4_mul(mvp, proj, view);
 
@@ -949,10 +1066,128 @@ static const struct wl_keyboard_listener keyboard_listener = {
     .repeat_info = keyboard_repeat_info,
 };
 
+static int titlebar_control_at(const struct app *app, int x, int y)
+{
+    if (y < 0 || y >= TITLEBAR_H || app->width <= TITLEBAR_CONTROL_W * 3)
+        return 0;
+    if (x >= app->width - TITLEBAR_CONTROL_W)
+        return 'x';
+    if (x >= app->width - TITLEBAR_CONTROL_W * 2)
+        return 'm';
+    if (x >= app->width - TITLEBAR_CONTROL_W * 3)
+        return '-';
+    return 't';
+}
+
+static void activate_titlebar_control(struct app *app, int control)
+{
+    if (control == 'x') {
+        app->running = 0;
+    } else if (control == 'm') {
+        if (app->maximized) {
+            xdg_toplevel_unset_maximized(app->toplevel);
+            app->maximized = 0;
+        } else {
+            xdg_toplevel_set_maximized(app->toplevel);
+            app->maximized = 1;
+        }
+    } else if (control == '-') {
+        xdg_toplevel_set_minimized(app->toplevel);
+    }
+}
+
+static void pointer_enter(void *data, struct wl_pointer *pointer,
+                          uint32_t serial, struct wl_surface *surface,
+                          wl_fixed_t sx, wl_fixed_t sy)
+{
+    struct app *app = data;
+    (void)pointer; (void)serial; (void)surface;
+    app->pointer_x = wl_fixed_to_int(sx);
+    app->pointer_y = wl_fixed_to_int(sy);
+}
+
+static void pointer_leave(void *data, struct wl_pointer *pointer,
+                          uint32_t serial, struct wl_surface *surface)
+{
+    (void)data; (void)pointer; (void)serial; (void)surface;
+}
+
+static void pointer_motion(void *data, struct wl_pointer *pointer,
+                           uint32_t time, wl_fixed_t sx, wl_fixed_t sy)
+{
+    struct app *app = data;
+    (void)pointer; (void)time;
+    app->pointer_x = wl_fixed_to_int(sx);
+    app->pointer_y = wl_fixed_to_int(sy);
+}
+
+static void pointer_button(void *data, struct wl_pointer *pointer,
+                           uint32_t serial, uint32_t time, uint32_t button,
+                           uint32_t state)
+{
+    struct app *app = data;
+    int control;
+    (void)pointer; (void)time;
+
+    if (button != BTN_LEFT || state != WL_POINTER_BUTTON_STATE_PRESSED)
+        return;
+    control = titlebar_control_at(app, app->pointer_x, app->pointer_y);
+    if (control == 't') {
+        xdg_toplevel_move(app->toplevel, app->seat, serial);
+    } else if (control) {
+        activate_titlebar_control(app, control);
+    }
+}
+
+static void pointer_axis(void *data, struct wl_pointer *pointer,
+                         uint32_t time, uint32_t axis, wl_fixed_t value)
+{
+    (void)data; (void)pointer; (void)time; (void)axis; (void)value;
+}
+
+static void pointer_frame(void *data, struct wl_pointer *pointer)
+{
+    (void)data; (void)pointer;
+}
+
+static void pointer_axis_source(void *data, struct wl_pointer *pointer,
+                                uint32_t axis_source)
+{
+    (void)data; (void)pointer; (void)axis_source;
+}
+
+static void pointer_axis_stop(void *data, struct wl_pointer *pointer,
+                              uint32_t time, uint32_t axis)
+{
+    (void)data; (void)pointer; (void)time; (void)axis;
+}
+
+static void pointer_axis_discrete(void *data, struct wl_pointer *pointer,
+                                  uint32_t axis, int32_t discrete)
+{
+    (void)data; (void)pointer; (void)axis; (void)discrete;
+}
+
+static const struct wl_pointer_listener pointer_listener = {
+    .enter = pointer_enter,
+    .leave = pointer_leave,
+    .motion = pointer_motion,
+    .button = pointer_button,
+    .axis = pointer_axis,
+    .frame = pointer_frame,
+    .axis_source = pointer_axis_source,
+    .axis_stop = pointer_axis_stop,
+    .axis_discrete = pointer_axis_discrete,
+};
+
 static void seat_capabilities(void *data, struct wl_seat *seat,
                               uint32_t capabilities)
 {
     struct app *app = data;
+    if ((capabilities & WL_SEAT_CAPABILITY_POINTER) && !app->pointer) {
+        app->pointer = wl_seat_get_pointer(seat);
+        wl_pointer_add_listener(app->pointer, &pointer_listener, app);
+    }
     if ((capabilities & WL_SEAT_CAPABILITY_KEYBOARD) && !app->keyboard) {
         app->keyboard = wl_seat_get_keyboard(seat);
         wl_keyboard_add_listener(app->keyboard, &keyboard_listener, app);
@@ -986,7 +1221,13 @@ static void toplevel_configure(void *data, struct xdg_toplevel *toplevel,
                                struct wl_array *states)
 {
     struct app *app = data;
-    (void)toplevel; (void)states;
+    uint32_t *state;
+    (void)toplevel;
+    app->maximized = 0;
+    wl_array_for_each(state, states) {
+        if (*state == XDG_TOPLEVEL_STATE_MAXIMIZED)
+            app->maximized = 1;
+    }
     if (width > 0 && height > 0) {
         app->width = width;
         app->height = height;
@@ -1069,8 +1310,9 @@ static int init_wayland(struct app *app)
     xdg_surface_add_listener(app->xdg_surface, &xdg_surface_listener, app);
     app->toplevel = xdg_surface_get_toplevel(app->xdg_surface);
     xdg_toplevel_add_listener(app->toplevel, &toplevel_listener, app);
-    xdg_toplevel_set_title(app->toplevel, "glMaze");
+    xdg_toplevel_set_title(app->toplevel, TITLEBAR_TITLE);
     xdg_toplevel_set_app_id(app->toplevel, "glmaze");
+    xdg_toplevel_set_min_size(app->toplevel, 400, 300 + TITLEBAR_H);
     wl_surface_commit(app->surface);
     while (!app->configured && wl_display_dispatch(app->display) >= 0)
         ;
@@ -1134,6 +1376,8 @@ static void cleanup(struct app *app)
     }
     if (app->egl_window)
         wl_egl_window_destroy(app->egl_window);
+    if (app->pointer)
+        wl_pointer_destroy(app->pointer);
     if (app->keyboard)
         wl_keyboard_destroy(app->keyboard);
     if (app->seat)
@@ -1167,7 +1411,7 @@ int main(int argc, char **argv)
 
     memset(&app, 0, sizeof(app));
     app.width = 800;
-    app.height = 600;
+    app.height = 600 + TITLEBAR_H;
     app.running = 1;
     app.egl_display = EGL_NO_DISPLAY;
     app.egl_surface = EGL_NO_SURFACE;
