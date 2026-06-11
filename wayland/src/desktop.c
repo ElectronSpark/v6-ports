@@ -2693,6 +2693,8 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
         char *webkit_helper_log_env =
             webkit_logging_enabled_by_cmdline() ?
             "XV6_WEBKIT_HELPER_LOG=1" : "XV6_WEBKIT_HELPER_LOG=0";
+        char *webkit_ld_preload_env =
+            "LD_PRELOAD=/lib/libxv6webkituri.so:/lib/libpng16.so.16";
         char *webkit_gdk_gl_env =
             webkit_disable_gdk_gl_by_cmdline() ? "GDK_GL=disable" :
                                                  "GDK_GL=gles";
@@ -2710,6 +2712,7 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
         char webkit_gst_feature_rank_env[96] = "GST_PLUGIN_FEATURE_RANK=";
         char webkit_gst_max_avc1_resolution_env[48] =
             "WEBKIT_GST_MAX_AVC1_RESOLUTION=720P";
+        char webkit_gst_max_avc1_value[16] = "720P";
         char webkit_youtube_probe_seconds_env[48];
         char webkit_youtube_geometry_arg[40] = "--geometry=1280x800";
         char webkit_dmabuf_renderer_disable_gbm_env[48];
@@ -2747,12 +2750,9 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
                                   "webkit_gst_disable_vp9",
                                   minibrowser_youtube_compat ? 1 : 0) :
                 (minibrowser_youtube_compat ? 1 : 0);
-        int webkit_gst_max_avc1_480p =
-            have_webkit_cmdline ?
-                cmdline_int_value(webkit_cmdline_buf,
-                                  "webkit_gst_max_avc1_480p",
-                                  minibrowser_youtube_compat ? 1 : 0) :
-                (minibrowser_youtube_compat ? 1 : 0);
+        int webkit_gst_max_avc1_480p = have_webkit_cmdline ?
+            cmdline_int_value(webkit_cmdline_buf,
+                              "webkit_gst_max_avc1_480p", 0) : 0;
         int webkit_use_gst_gl = webkit_gst_gl_enabled_by_cmdline();
 
         mesa_size_arg[0] = '\0';
@@ -2780,6 +2780,8 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
                     cmdline_int_value(webkit_cmdline_buf, "webkit_gst_gl",
                                       1) != 0 :
                     1;
+            snprintf(webkit_gst_max_avc1_value,
+                     sizeof(webkit_gst_max_avc1_value), "360P");
         }
         snprintf(webkit_gst_disable_gl_sink_env,
                  sizeof(webkit_gst_disable_gl_sink_env),
@@ -2829,9 +2831,36 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
                      sizeof(webkit_gst_feature_rank_env),
                      "GST_PLUGIN_FEATURE_RANK=vp9dec:0,avdec_vp9:0,avdec_av1:0");
         if (webkit_gst_max_avc1_480p)
-            snprintf(webkit_gst_max_avc1_resolution_env,
-                     sizeof(webkit_gst_max_avc1_resolution_env),
-                     "WEBKIT_GST_MAX_AVC1_RESOLUTION=480P");
+            snprintf(webkit_gst_max_avc1_value,
+                     sizeof(webkit_gst_max_avc1_value), "480P");
+        if (have_webkit_cmdline) {
+            char max_avc1_override[sizeof(webkit_gst_max_avc1_value)];
+
+            if (cmdline_copy_value(webkit_cmdline_buf, "webkit_gst_max_avc1",
+                                   max_avc1_override,
+                                   sizeof(max_avc1_override))) {
+                size_t i;
+                int ok = 1;
+
+                for (i = 0; max_avc1_override[i]; i++) {
+                    if (!((max_avc1_override[i] >= '0' &&
+                           max_avc1_override[i] <= '9') ||
+                          (max_avc1_override[i] >= 'A' &&
+                           max_avc1_override[i] <= 'Z'))) {
+                        ok = 0;
+                        break;
+                    }
+                }
+                if (ok && max_avc1_override[0])
+                    snprintf(webkit_gst_max_avc1_value,
+                             sizeof(webkit_gst_max_avc1_value), "%s",
+                             max_avc1_override);
+            }
+        }
+        snprintf(webkit_gst_max_avc1_resolution_env,
+                 sizeof(webkit_gst_max_avc1_resolution_env),
+                 "WEBKIT_GST_MAX_AVC1_RESOLUTION=%s",
+                 webkit_gst_max_avc1_value);
         snprintf(webkit_youtube_probe_seconds_env,
                  sizeof(webkit_youtube_probe_seconds_env),
                  "XV6_WEBKIT_YOUTUBE_PROBE_SECONDS=%d",
@@ -3189,7 +3218,7 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             "HOME=/",
             "PATH=/bin:/usr/bin",
             "LD_LIBRARY_PATH=/lib:/usr/lib:/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu",
-            "LD_PRELOAD=/lib/libpng16.so.16",
+            webkit_ld_preload_env,
             "XDG_RUNTIME_DIR=/tmp",
             "XDG_CACHE_HOME=/tmp/.cache",
             "XDG_DATA_DIRS=/share:/usr/share",
@@ -3247,7 +3276,7 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             "HOME=/",
             "PATH=/bin:/usr/bin",
             "LD_LIBRARY_PATH=/lib:/usr/lib:/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu",
-            "LD_PRELOAD=/lib/libpng16.so.16",
+            webkit_ld_preload_env,
             "XDG_RUNTIME_DIR=/tmp",
             "XDG_CACHE_HOME=/tmp/.cache",
             "XDG_DATA_HOME=/tmp/.local/share",
@@ -3328,7 +3357,7 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             "HOME=/",
             "PATH=/bin:/usr/bin",
             "LD_LIBRARY_PATH=/usr/lib/wsl/lib:/lib:/usr/lib:/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu",
-            "LD_PRELOAD=/lib/libpng16.so.16",
+            webkit_ld_preload_env,
             "XDG_RUNTIME_DIR=/tmp",
             "XDG_CACHE_HOME=/tmp/.cache",
             "XDG_DATA_HOME=/tmp/.local/share",
@@ -3386,7 +3415,7 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             "HOME=/",
             "PATH=/bin:/usr/bin",
             "LD_LIBRARY_PATH=/lib:/usr/lib:/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu",
-            "LD_PRELOAD=/lib/libpng16.so.16",
+            webkit_ld_preload_env,
             "XDG_RUNTIME_DIR=/tmp",
             "XDG_CACHE_HOME=/tmp/.cache",
             "XDG_DATA_HOME=/tmp/.local/share",
@@ -3446,7 +3475,7 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             "HOME=/",
             "PATH=/bin:/usr/bin",
             "LD_LIBRARY_PATH=/lib:/usr/lib:/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu",
-            "LD_PRELOAD=/lib/libpng16.so.16",
+            webkit_ld_preload_env,
             "XDG_RUNTIME_DIR=/tmp",
             "XDG_CACHE_HOME=/tmp/.cache",
             "XDG_DATA_HOME=/tmp/.local/share",
@@ -3697,11 +3726,11 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             fprintf(stderr,
                     "[desktop] MiniBrowser argv js=%d accel=%d dmabuf=%d "
                     "webgl=%d youtube_compat=%d private=%d exit_after_load=%d "
-                    "gst_gl=%d max_avc1_480p=%d arg4=%s url=%s\n",
+                    "gst_gl=%d max_avc1=%s arg4=%s url=%s\n",
                     minibrowser_js, minibrowser_accel, minibrowser_dmabuf,
                     minibrowser_webgl_smoke, minibrowser_youtube_compat,
                     minibrowser_private, minibrowser_exit_after_load,
-                    webkit_use_gst_gl, webkit_gst_max_avc1_480p,
+                    webkit_use_gst_gl, webkit_gst_max_avc1_value,
                     argv_exec[4] ? argv_exec[4] : "(none)",
                     minibrowser_url);
         }

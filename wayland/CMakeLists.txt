@@ -17,7 +17,7 @@ set(DIRECTX_HEADERS_DIR
 set(DESKTOP_INCLUDE_SRCS
     ${WAYLAND_SRC_DIR}/desktop_clients.inc)
 
-foreach(_src desktop.c filemgr.c glsmoke.c glmaze.c peanutgb.c mesaglsmoke.c mesawlegl.c mesakmsgl.c mesademo.c gl_program.c gl_program.h gl_fps_overlay.c gl_fps_overlay.h mesawlegl_sphere.c mesawlegl_sphere.h pixel_fps_overlay.c pixel_fps_overlay.h xv6_draw.c xv6_draw.h xv6_titlebar.c xv6_titlebar.h xv6_titlebar_gl.c xv6_titlebar_gl.h xv6_icon.c xv6_icon.h xv6_icon_filemgr.c xv6_icon_glmaze.c xv6_present_buffer.c xv6_present_buffer.h mesaeglinfo.c mesaglfeature.c mesad3d12probe.c gpu_substrate_validate.c dmabufsmoke.c d3d12sharedsmoke.c drmgpuprobe.c webkitgpusmoke.c cursorsmoke.c xv6_egl_gles.c webkit_preload_wrapper.c install_webkit_preload_wrappers.sh font8x16.h)
+foreach(_src desktop.c filemgr.c glsmoke.c glmaze.c peanutgb.c mesaglsmoke.c mesawlegl.c mesakmsgl.c mesademo.c gl_program.c gl_program.h gl_fps_overlay.c gl_fps_overlay.h mesawlegl_sphere.c mesawlegl_sphere.h pixel_fps_overlay.c pixel_fps_overlay.h xv6_draw.c xv6_draw.h xv6_titlebar.c xv6_titlebar.h xv6_titlebar_gl.c xv6_titlebar_gl.h xv6_icon.c xv6_icon.h xv6_icon_filemgr.c xv6_icon_glmaze.c xv6_present_buffer.c xv6_present_buffer.h mesaeglinfo.c mesaglfeature.c mesad3d12probe.c gpu_substrate_validate.c dmabufsmoke.c d3d12sharedsmoke.c drmgpuprobe.c webkitgpusmoke.c cursorsmoke.c xv6_egl_gles.c webkit_preload_wrapper.c webkit_uri_interpose.c install_webkit_preload_wrappers.sh font8x16.h)
     if(NOT EXISTS "${WAYLAND_SRC_DIR}/${_src}")
         message(FATAL_ERROR "ports/wayland: missing ${WAYLAND_SRC_DIR}/${_src}")
     endif()
@@ -77,6 +77,7 @@ set(_d3d12sharedsmoke_bin ${_wl_build}/d3d12sharedsmoke)
 set(_drmgpuprobe_bin ${_wl_build}/drmgpuprobe)
 set(_webkitgpusmoke_bin ${_wl_build}/webkitgpusmoke)
 set(_fault_trace_lib ${_wl_build}/xv6_glibc_fault_trace.so)
+set(_webkit_uri_interpose_lib ${_wl_build}/libxv6webkituri.so)
 set(_xv6egl_obj   ${_wl_build}/xv6_egl_gles.o)
 set(_xv6egl_lib   ${_wl_build}/libEGL.a)
 set(_xv6gles_lib  ${_wl_build}/libGLESv2.a)
@@ -103,6 +104,7 @@ set(_d3d12sharedsmoke_installed ${XV6_SYSROOT}/bin/d3d12sharedsmoke)
 set(_drmgpuprobe_installed ${XV6_SYSROOT}/bin/drmgpuprobe)
 set(_webkitgpusmoke_installed ${XV6_SYSROOT}/bin/webkitgpusmoke)
 set(_fault_trace_installed ${XV6_SYSROOT}/lib/xv6_glibc_fault_trace.so)
+set(_webkit_uri_interpose_installed ${XV6_SYSROOT}/lib/libxv6webkituri.so)
 set(_webkit_preload_wrapper_bin ${_wl_build}/webkit-preload-wrapper)
 set(_webkit_stage_stamp ${XV6_SYSROOT}/libexec/webkit2gtk-4.1/.webkit-stage.stamp)
 set(_adwaita_cursor_dir ${XV6_SYSROOT}/share/icons/Adwaita/cursors)
@@ -195,6 +197,16 @@ add_custom_command(
                 -Wl,--as-needed -ldl -pthread
     DEPENDS ${WAYLAND_SRC_DIR}/webkit_preload_wrapper.c
     COMMENT "Compiling WebKit process shim wrapper"
+    VERBATIM)
+
+add_custom_command(
+    OUTPUT  ${_webkit_uri_interpose_lib}
+    COMMAND ${XV6_WEBKIT_HOST_CC} -O2 -Wall -fPIC -shared
+                -o ${_webkit_uri_interpose_lib}
+                ${WAYLAND_SRC_DIR}/webkit_uri_interpose.c
+                -ldl
+    DEPENDS ${WAYLAND_SRC_DIR}/webkit_uri_interpose.c
+    COMMENT "Compiling WebKit URI canonicalization interposer"
     VERBATIM)
 
 add_custom_command(
@@ -763,7 +775,7 @@ add_custom_command(
             ${_dmabufsmoke_installed} ${_cursorsmoke_installed}
             ${_d3d12sharedsmoke_installed}
             ${_drmgpuprobe_installed} ${_webkitgpusmoke_installed}
-            ${_fault_trace_installed}
+            ${_fault_trace_installed} ${_webkit_uri_interpose_installed}
             ${_dnd_move_cursor} ${_dnd_copy_cursor} ${_dnd_none_cursor}
     COMMAND ${CMAKE_COMMAND} -E rm -f
             ${XV6_SYSROOT}/bin/wlcomp
@@ -792,6 +804,7 @@ add_custom_command(
     COMMAND ${CMAKE_COMMAND} -E copy ${_drmgpuprobe_bin} ${_drmgpuprobe_installed}
     COMMAND ${CMAKE_COMMAND} -E copy ${_webkitgpusmoke_bin} ${_webkitgpusmoke_installed}
     COMMAND ${CMAKE_COMMAND} -E copy ${_fault_trace_lib} ${_fault_trace_installed}
+    COMMAND ${CMAKE_COMMAND} -E copy ${_webkit_uri_interpose_lib} ${_webkit_uri_interpose_installed}
     COMMAND bash ${WAYLAND_SRC_DIR}/install_webkit_preload_wrappers.sh
             ${_webkit_preload_wrapper_bin} ${XV6_SYSROOT}
     COMMAND ${CMAKE_COMMAND} -E make_directory ${_adwaita_cursor_dir}
@@ -811,7 +824,8 @@ add_custom_command(
             ${_gbmtest_bin} ${_dmabufsmoke_bin} ${_cursorsmoke_bin}
             ${_d3d12sharedsmoke_bin}
             ${_drmgpuprobe_bin} ${_webkitgpusmoke_bin}
-            ${_fault_trace_lib} ${_webkit_preload_wrapper_bin}
+            ${_fault_trace_lib} ${_webkit_uri_interpose_lib}
+            ${_webkit_preload_wrapper_bin}
             ${_webkit_stage_stamp}
             ${WAYLAND_SRC_DIR}/install_webkit_preload_wrappers.sh
     COMMENT "Installing GUI session into ${XV6_SYSROOT}/bin"
@@ -831,6 +845,7 @@ add_custom_target(port-wayland ALL DEPENDS
     ${_drmgpuprobe_installed}
     ${_webkitgpusmoke_installed}
     ${_fault_trace_installed}
+    ${_webkit_uri_interpose_installed}
     ${_dnd_move_cursor} ${_dnd_copy_cursor} ${_dnd_none_cursor})
 if(TARGET port-wayland-libs)
     add_dependencies(port-wayland port-wayland-libs)
@@ -865,6 +880,7 @@ add_custom_target(port-wayland-clean
             ${_dnd_move_cursor} ${_dnd_copy_cursor} ${_dnd_none_cursor}
             ${XV6_SYSROOT}/lib/libxv6memshim.so
             ${_webkit_preload_wrapper_bin}
+            ${_webkit_uri_interpose_installed}
             ${_egl_installed} ${_gles_installed}
             ${_host_xv6egl_obj} ${_host_xv6egl_lib} ${_host_xv6gles_lib}
     COMMENT "Removing wayland artifacts from ${XV6_SYSROOT}")
