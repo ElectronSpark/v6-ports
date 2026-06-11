@@ -24,6 +24,7 @@
 
 #include "xv6_draw.h"
 #include "xv6_icon.h"
+#include "xv6_titlebar.h"
 #include "xdg-shell-client-protocol.h"
 #include "xv6_present_buffer.h"
 
@@ -35,9 +36,7 @@
 #define APP_H 550
 #define MAX_ENTRIES 256
 #define MAX_BUTTONS 12
-#define TITLEBAR_H 30
-#define TITLE_BUTTON_W 26
-#define TITLE_BUTTON_GAP 4
+#define TITLEBAR_H XV6_TITLEBAR_HEIGHT
 #define TOOLBAR_H 34
 #define PATH_H 24
 #define HEADER_H 22
@@ -84,13 +83,6 @@ enum sort_mode {
     SORT_NAME,
     SORT_TYPE,
     SORT_SIZE,
-};
-
-enum title_action {
-    TITLE_ACTION_NONE,
-    TITLE_ACTION_MINIMIZE,
-    TITLE_ACTION_MAXIMIZE,
-    TITLE_ACTION_CLOSE,
 };
 
 struct entry {
@@ -939,30 +931,12 @@ static void draw_button(uint32_t *fb, int w, int h, const struct button *b)
                 fg, 1);
 }
 
-static void draw_title_button(uint32_t *fb, int w, int h, int x,
-                              const char *label, uint32_t bg, uint32_t fg)
-{
-    int tw = string_pixel_width(label, 1);
-
-    draw_rounded_rect(fb, w, h, x, 4, TITLE_BUTTON_W, 22, 4, bg);
-    draw_string(fb, w, h, x + (TITLE_BUTTON_W - tw) / 2, 7, label, fg, 1);
-}
-
 static void draw_titlebar(uint32_t *fb, int w, int h, struct app *app)
 {
     char title[PATH_MAX + 16];
-    int close_x = w - 10 - TITLE_BUTTON_W;
-    int max_x = close_x - TITLE_BUTTON_GAP - TITLE_BUTTON_W;
-    int min_x = max_x - TITLE_BUTTON_GAP - TITLE_BUTTON_W;
 
     snprintf(title, sizeof(title), "Files - %s", app->cwd);
-    draw_rect(fb, w, h, 0, 0, w, TITLEBAR_H, 0xFFE4E0DA);
-    draw_rect(fb, w, h, 0, TITLEBAR_H - 1, w, 1, 0xFFB7B0A8);
-    draw_text_fit(fb, w, h, 12, 7, min_x - 22, title, 0xFF20262F);
-    draw_title_button(fb, w, h, min_x, "-", 0xFFD1CCC4, 0xFF20262F);
-    draw_title_button(fb, w, h, max_x, app->maximized ? "[]" : "+",
-                      0xFFD1CCC4, 0xFF20262F);
-    draw_title_button(fb, w, h, close_x, "x", 0xFFC85454, 0xFFFFFFFF);
+    xv6_titlebar_draw(fb, w, h, title, app->maximized, NULL);
 }
 
 static void draw_sidebar(uint32_t *fb, int w, int h, struct app *app)
@@ -1200,28 +1174,12 @@ static int click_sidebar(struct app *app, int x, int y)
     return 0;
 }
 
-static enum title_action title_action_at(struct app *app, int x, int y)
+static void handle_click(struct app *app, uint32_t serial, uint32_t time)
 {
-    int close_x = app->width - 10 - TITLE_BUTTON_W;
-    int max_x = close_x - TITLE_BUTTON_GAP - TITLE_BUTTON_W;
-    int min_x = max_x - TITLE_BUTTON_GAP - TITLE_BUTTON_W;
-
-    if (y < 4 || y >= TITLEBAR_H - 4)
-        return TITLE_ACTION_NONE;
-    if (x >= close_x && x < close_x + TITLE_BUTTON_W)
-        return TITLE_ACTION_CLOSE;
-    if (x >= max_x && x < max_x + TITLE_BUTTON_W)
-        return TITLE_ACTION_MAXIMIZE;
-    if (x >= min_x && x < min_x + TITLE_BUTTON_W)
-        return TITLE_ACTION_MINIMIZE;
-    return TITLE_ACTION_NONE;
-}
-
-static void handle_click(struct app *app, uint32_t time)
-{
-    enum title_action title_action;
+    enum xv6_titlebar_action title_action;
     int btn;
     int idx;
+    (void)time;
 
     if (app->modal != MODAL_NONE) {
         if (app->modal == MODAL_PREVIEW)
@@ -1230,22 +1188,15 @@ static void handle_click(struct app *app, uint32_t time)
         return;
     }
 
-    title_action = title_action_at(app, app->pointer_x, app->pointer_y);
-    if (title_action == TITLE_ACTION_CLOSE) {
-        app->running = 0;
+    title_action = xv6_titlebar_hit_test(app->width, app->pointer_x,
+                                         app->pointer_y);
+    if (title_action == XV6_TITLEBAR_DRAG) {
+        xdg_toplevel_move(app->toplevel, app->seat, serial);
         return;
-    } else if (title_action == TITLE_ACTION_MAXIMIZE) {
-        if (app->maximized) {
-            xdg_toplevel_unset_maximized(app->toplevel);
-            app->maximized = 0;
-        } else {
-            xdg_toplevel_set_maximized(app->toplevel);
-            app->maximized = 1;
-        }
+    } else if (title_action != XV6_TITLEBAR_NONE) {
+        xv6_titlebar_activate(title_action, app->toplevel, &app->maximized,
+                              &app->running);
         app->dirty = 1;
-        return;
-    } else if (title_action == TITLE_ACTION_MINIMIZE) {
-        xdg_toplevel_set_minimized(app->toplevel);
         return;
     }
 
@@ -1456,7 +1407,7 @@ static void pointer_button(void *data, struct wl_pointer *pointer,
     (void)serial;
 
     if (button == 0x110 && state == WL_POINTER_BUTTON_STATE_PRESSED)
-        handle_click(app, time ? time : now_ms());
+        handle_click(app, serial, time ? time : now_ms());
 }
 
 static void pointer_axis(void *data, struct wl_pointer *pointer,

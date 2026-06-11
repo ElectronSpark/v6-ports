@@ -20,12 +20,12 @@
 #include <unistd.h>
 #include <wayland-client.h>
 
-#include "font8x16.h"
 #include "gl_program.h"
 #include "mesawlegl_sphere.h"
 #include "pixel_fps_overlay.h"
 #include "xv6_present_buffer.h"
 #include "xdg-shell-client-protocol.h"
+#include "xv6_titlebar.h"
 
 #ifndef EGL_PLATFORM_SURFACELESS_MESA
 #define EGL_PLATFORM_SURFACELESS_MESA 0x31DD
@@ -50,8 +50,8 @@
 #define DEMO_H 260
 #define DEFAULT_SPHERE_QUALITY 4
 #define DEMO_SPHERE_QUALITY 3
-#define TITLEBAR_H 30
-#define CONTROL_W 34
+#define TITLEBAR_H XV6_TITLEBAR_HEIGHT
+#define CONTROL_W XV6_TITLEBAR_CONTROL_W
 #define TITLEBAR_TITLE "Mesa GL Smoke"
 
 struct vertex {
@@ -134,100 +134,11 @@ static int content_height(const struct app_state *app)
     return h > 1 ? h : 1;
 }
 
-static void fill_rect(uint32_t *pixels, int width, int height, int stride,
-                      int x, int y, int w, int h, uint32_t color)
-{
-    if (!pixels || w <= 0 || h <= 0)
-        return;
-    if (x < 0) {
-        w += x;
-        x = 0;
-    }
-    if (y < 0) {
-        h += y;
-        y = 0;
-    }
-    if (x >= width || y >= height)
-        return;
-    if (x + w > width)
-        w = width - x;
-    if (y + h > height)
-        h = height - y;
-    for (int yy = y; yy < y + h; yy++) {
-        uint32_t *row = (uint32_t *)((uint8_t *)pixels +
-                                     (size_t)yy * (size_t)stride);
-
-        for (int xx = x; xx < x + w; xx++)
-            row[xx] = color;
-    }
-}
-
-static void draw_glyph(uint32_t *pixels, int width, int height, int stride,
-                       int x, int y, char ch, uint32_t color)
-{
-    const uint8_t *glyph;
-
-    if (ch < 0x20 || ch > 0x7e)
-        ch = '?';
-    glyph = font8x16_data[ch - 0x20];
-    for (int row = 0; row < 16; row++) {
-        uint8_t bits = glyph[row];
-
-        for (int col = 0; col < 8; col++) {
-            if (bits & (0x80u >> col))
-                fill_rect(pixels, width, height, stride, x + col, y + row,
-                          1, 1, color);
-        }
-    }
-}
-
-static void draw_text_clipped(uint32_t *pixels, int width, int height,
-                              int stride, int x, int y, int max_w,
-                              const char *text, uint32_t color)
-{
-    if (max_w <= 0)
-        return;
-    for (const char *p = text; *p && x + 8 <= max_w; p++, x += 8)
-        draw_glyph(pixels, width, height, stride, x, y, *p, color);
-}
-
-static void draw_title_button(uint32_t *pixels, int width, int height,
-                              int stride, int x, const char *label,
-                              uint32_t bg, uint32_t fg)
-{
-    fill_rect(pixels, width, height, stride, x, 0, CONTROL_W, TITLEBAR_H, bg);
-    fill_rect(pixels, width, height, stride, x, TITLEBAR_H - 1, CONTROL_W, 1,
-              0xff8292a5u);
-    draw_text_clipped(pixels, width, height, stride, x + 9, 7,
-                      x + CONTROL_W - 4, label, fg);
-}
-
 static void draw_titlebar(struct app_state *app)
 {
-    uint32_t *pixels = app->buffer.pixels;
-    int close_x = app->width - CONTROL_W;
-    int max_x = app->width - CONTROL_W * 2;
-    int min_x = app->width - CONTROL_W * 3;
-    int title_limit = min_x - 12;
-
-    if (!pixels || app->width <= 0 || app->height <= 0)
-        return;
-    fill_rect(pixels, app->width, app->height, app->buffer.stride, 0, 0,
-              app->width, TITLEBAR_H, 0xff243241u);
-    fill_rect(pixels, app->width, app->height, app->buffer.stride, 0,
-              TITLEBAR_H - 1, app->width, 1, 0xff6f8295u);
-    if (title_limit > 16)
-        draw_text_clipped(pixels, app->width, app->height, app->buffer.stride,
-                          10, 7, title_limit, TITLEBAR_TITLE, 0xfff2f5f8u);
-    if (app->width > CONTROL_W * 3) {
-        draw_title_button(pixels, app->width, app->height, app->buffer.stride,
-                          min_x, "-", 0xff2f4050u, 0xfff2f5f8u);
-        draw_title_button(pixels, app->width, app->height, app->buffer.stride,
-                          max_x, app->maximized ? "[]" : "+",
-                          0xff2f4050u, 0xfff2f5f8u);
-        draw_title_button(pixels, app->width, app->height, app->buffer.stride,
-                          close_x, "x", 0xff8b3438u, 0xffffffffu);
-    }
+    xv6_titlebar_draw_stride(app->buffer.pixels, app->width, app->height,
+                             app->buffer.stride, TITLEBAR_TITLE,
+                             app->maximized, NULL);
 }
 
 static void destroy_render_target(struct app_state *app)
@@ -865,36 +776,6 @@ static const struct xdg_toplevel_listener toplevel_listener = {
     .close = toplevel_close,
 };
 
-static int titlebar_control_at(struct app_state *app, int x, int y)
-{
-    if (y < 0 || y >= TITLEBAR_H || app->width <= CONTROL_W * 3)
-        return 0;
-    if (x >= app->width - CONTROL_W)
-        return 'x';
-    if (x >= app->width - CONTROL_W * 2)
-        return 'm';
-    if (x >= app->width - CONTROL_W * 3)
-        return '-';
-    return 't';
-}
-
-static void activate_titlebar_control(struct app_state *app, int control)
-{
-    if (control == 'x') {
-        app->running = 0;
-    } else if (control == 'm') {
-        if (app->maximized) {
-            xdg_toplevel_unset_maximized(app->toplevel);
-            app->maximized = 0;
-        } else {
-            xdg_toplevel_set_maximized(app->toplevel);
-            app->maximized = 1;
-        }
-    } else if (control == '-') {
-        xdg_toplevel_set_minimized(app->toplevel);
-    }
-}
-
 static void pointer_enter(void *data, struct wl_pointer *pointer,
                           uint32_t serial, struct wl_surface *surface,
                           wl_fixed_t sx, wl_fixed_t sy)
@@ -925,16 +806,18 @@ static void pointer_button(void *data, struct wl_pointer *pointer,
                            uint32_t state)
 {
     struct app_state *app = data;
-    int control;
+    enum xv6_titlebar_action control;
     (void)pointer; (void)time;
 
     if (button != BTN_LEFT || state != WL_POINTER_BUTTON_STATE_PRESSED)
         return;
-    control = titlebar_control_at(app, app->pointer_x, app->pointer_y);
-    if (control == 't') {
+    control = xv6_titlebar_hit_test(app->width, app->pointer_x,
+                                    app->pointer_y);
+    if (control == XV6_TITLEBAR_DRAG) {
         xdg_toplevel_move(app->toplevel, app->seat, serial);
-    } else if (control) {
-        activate_titlebar_control(app, control);
+    } else if (control != XV6_TITLEBAR_NONE) {
+        xv6_titlebar_activate(control, app->toplevel, &app->maximized,
+                              &app->running);
     }
 }
 

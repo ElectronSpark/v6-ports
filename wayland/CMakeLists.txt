@@ -17,7 +17,7 @@ set(DIRECTX_HEADERS_DIR
 set(DESKTOP_INCLUDE_SRCS
     ${WAYLAND_SRC_DIR}/desktop_clients.inc)
 
-foreach(_src desktop.c filemgr.c glsmoke.c glmaze.c peanutgb.c mesaglsmoke.c mesawlegl.c mesakmsgl.c mesademo.c gl_program.c gl_program.h gl_fps_overlay.c gl_fps_overlay.h mesawlegl_sphere.c mesawlegl_sphere.h pixel_fps_overlay.c pixel_fps_overlay.h xv6_draw.c xv6_draw.h xv6_icon.c xv6_icon.h xv6_icon_filemgr.c xv6_icon_glmaze.c xv6_present_buffer.c xv6_present_buffer.h mesaeglinfo.c mesaglfeature.c mesad3d12probe.c gpu_substrate_validate.c dmabufsmoke.c d3d12sharedsmoke.c drmgpuprobe.c webkitgpusmoke.c cursorsmoke.c xv6_egl_gles.c webkit_preload_wrapper.c install_webkit_preload_wrappers.sh font8x16.h)
+foreach(_src desktop.c filemgr.c glsmoke.c glmaze.c peanutgb.c mesaglsmoke.c mesawlegl.c mesakmsgl.c mesademo.c gl_program.c gl_program.h gl_fps_overlay.c gl_fps_overlay.h mesawlegl_sphere.c mesawlegl_sphere.h pixel_fps_overlay.c pixel_fps_overlay.h xv6_draw.c xv6_draw.h xv6_titlebar.c xv6_titlebar.h xv6_titlebar_gl.c xv6_titlebar_gl.h xv6_icon.c xv6_icon.h xv6_icon_filemgr.c xv6_icon_glmaze.c xv6_present_buffer.c xv6_present_buffer.h mesaeglinfo.c mesaglfeature.c mesad3d12probe.c gpu_substrate_validate.c dmabufsmoke.c d3d12sharedsmoke.c drmgpuprobe.c webkitgpusmoke.c cursorsmoke.c xv6_egl_gles.c webkit_preload_wrapper.c install_webkit_preload_wrappers.sh font8x16.h)
     if(NOT EXISTS "${WAYLAND_SRC_DIR}/${_src}")
         message(FATAL_ERROR "ports/wayland: missing ${WAYLAND_SRC_DIR}/${_src}")
     endif()
@@ -255,6 +255,9 @@ if(XV6_WAYLAND_HOST_GLIBC)
                     -I ${XV6_SYSROOT}/include/wayland
                     -o ${_glsmoke_bin}
                     ${WAYLAND_SRC_DIR}/glsmoke.c ${_xdg_client_code}
+                    ${WAYLAND_SRC_DIR}/xv6_titlebar.c
+                    ${WAYLAND_SRC_DIR}/xv6_titlebar_gl.c
+                    ${WAYLAND_SRC_DIR}/xv6_draw.c
                     ${_host_xv6gles_lib}
                     ${_host_xv6egl_lib}
                     ${_host_wayland_client_lib}
@@ -263,6 +266,12 @@ if(XV6_WAYLAND_HOST_GLIBC)
                     -lffi -lpthread -lrt -lm
         DEPENDS ${_host_wl_stamp}
                 ${WAYLAND_SRC_DIR}/glsmoke.c ${_xdg_client_header}
+                ${WAYLAND_SRC_DIR}/xv6_titlebar.c
+                ${WAYLAND_SRC_DIR}/xv6_titlebar.h
+                ${WAYLAND_SRC_DIR}/xv6_titlebar_gl.c
+                ${WAYLAND_SRC_DIR}/xv6_titlebar_gl.h
+                ${WAYLAND_SRC_DIR}/xv6_draw.c
+                ${WAYLAND_SRC_DIR}/xv6_draw.h
                 ${WAYLAND_SRC_DIR}/font8x16.h
                 ${_xdg_client_code} ${_host_xv6egl_lib} ${_host_xv6gles_lib}
         COMMENT "Compiling glsmoke Wayland client with host glibc"
@@ -279,11 +288,20 @@ else()
                     -Wl,-rpath-link,${XV6_SYSROOT}/lib
                     -o ${_glsmoke_bin}
                     ${WAYLAND_SRC_DIR}/glsmoke.c ${_xdg_client_code}
+                    ${WAYLAND_SRC_DIR}/xv6_titlebar.c
+                    ${WAYLAND_SRC_DIR}/xv6_titlebar_gl.c
+                    ${WAYLAND_SRC_DIR}/xv6_draw.c
                     ${_xv6gles_lib}
                     ${_xv6egl_lib}
                     ${XV6_SYSROOT}/lib/libwayland-client.a
                     -lffi -lpthread -lrt -lm
         DEPENDS ${WAYLAND_SRC_DIR}/glsmoke.c ${_xdg_client_header}
+                ${WAYLAND_SRC_DIR}/xv6_titlebar.c
+                ${WAYLAND_SRC_DIR}/xv6_titlebar.h
+                ${WAYLAND_SRC_DIR}/xv6_titlebar_gl.c
+                ${WAYLAND_SRC_DIR}/xv6_titlebar_gl.h
+                ${WAYLAND_SRC_DIR}/xv6_draw.c
+                ${WAYLAND_SRC_DIR}/xv6_draw.h
                 ${WAYLAND_SRC_DIR}/font8x16.h
                 ${_xdg_client_code} ${_xv6egl_lib} ${_xv6gles_lib}
                 ${XV6_SYSROOT}/lib/libwayland-client.a
@@ -366,6 +384,7 @@ add_custom_command(
                 -o ${_filemgr_bin}
                 ${WAYLAND_SRC_DIR}/filemgr.c
                 ${WAYLAND_SRC_DIR}/xv6_draw.c
+                ${WAYLAND_SRC_DIR}/xv6_titlebar.c
                 ${WAYLAND_SRC_DIR}/xv6_icon.c
                 ${WAYLAND_SRC_DIR}/xv6_icon_filemgr.c
                 ${WAYLAND_SRC_DIR}/xv6_present_buffer.c
@@ -374,6 +393,8 @@ add_custom_command(
     DEPENDS ${WAYLAND_SRC_DIR}/filemgr.c
             ${WAYLAND_SRC_DIR}/xv6_draw.c
             ${WAYLAND_SRC_DIR}/xv6_draw.h
+            ${WAYLAND_SRC_DIR}/xv6_titlebar.c
+            ${WAYLAND_SRC_DIR}/xv6_titlebar.h
             ${WAYLAND_SRC_DIR}/xv6_icon.c
             ${WAYLAND_SRC_DIR}/xv6_icon.h
             ${WAYLAND_SRC_DIR}/xv6_icon_filemgr.c
@@ -399,6 +420,8 @@ add_custom_command(
                 ${WAYLAND_SRC_DIR}/gl_program.c
                 ${WAYLAND_SRC_DIR}/mesawlegl_sphere.c
                 ${WAYLAND_SRC_DIR}/pixel_fps_overlay.c
+                ${WAYLAND_SRC_DIR}/xv6_titlebar.c
+                ${WAYLAND_SRC_DIR}/xv6_draw.c
                 ${WAYLAND_SRC_DIR}/xv6_present_buffer.c
                 ${_xdg_client_code}
                 -lEGL -lGLESv2 -lwayland-client
@@ -412,6 +435,10 @@ add_custom_command(
             ${WAYLAND_SRC_DIR}/mesawlegl_sphere.h
             ${WAYLAND_SRC_DIR}/pixel_fps_overlay.c
             ${WAYLAND_SRC_DIR}/pixel_fps_overlay.h
+            ${WAYLAND_SRC_DIR}/xv6_titlebar.c
+            ${WAYLAND_SRC_DIR}/xv6_titlebar.h
+            ${WAYLAND_SRC_DIR}/xv6_draw.c
+            ${WAYLAND_SRC_DIR}/xv6_draw.h
             ${WAYLAND_SRC_DIR}/xv6_present_buffer.c
             ${WAYLAND_SRC_DIR}/xv6_present_buffer.h
             ${_xdg_client_header} ${_xdg_client_code}
@@ -429,12 +456,18 @@ add_custom_command(
                 -Wl,-rpath,/lib
                 -o ${_glmaze_bin}
                 ${WAYLAND_SRC_DIR}/glmaze.c
+                ${WAYLAND_SRC_DIR}/xv6_titlebar.c
+                ${WAYLAND_SRC_DIR}/xv6_draw.c
                 ${WAYLAND_SRC_DIR}/xv6_icon_glmaze.c
                 ${WAYLAND_SRC_DIR}/xv6_present_buffer.c
                 ${_xdg_client_code}
                 -lEGL -lGLESv2 -lwayland-egl -lwayland-client
                 -lffi -lpthread -ldl -lrt -lm
     DEPENDS ${WAYLAND_SRC_DIR}/glmaze.c
+            ${WAYLAND_SRC_DIR}/xv6_titlebar.c
+            ${WAYLAND_SRC_DIR}/xv6_titlebar.h
+            ${WAYLAND_SRC_DIR}/xv6_draw.c
+            ${WAYLAND_SRC_DIR}/xv6_draw.h
             ${WAYLAND_SRC_DIR}/xv6_icon.h
             ${WAYLAND_SRC_DIR}/xv6_icon_glmaze.c
             ${WAYLAND_SRC_DIR}/xv6_present_buffer.c
@@ -458,6 +491,7 @@ add_custom_command(
                 ${WAYLAND_SRC_DIR}/peanutgb.c
                 ${WAYLAND_SRC_DIR}/xv6_icon_peanutgb.c
                 ${WAYLAND_SRC_DIR}/xv6_draw.c
+                ${WAYLAND_SRC_DIR}/xv6_titlebar.c
                 ${WAYLAND_SRC_DIR}/xv6_present_buffer.c
                 ${_xdg_client_code}
                 -lwayland-client
@@ -467,6 +501,8 @@ add_custom_command(
             ${WAYLAND_SRC_DIR}/xv6_icon_peanutgb.c
             ${WAYLAND_SRC_DIR}/xv6_draw.c
             ${WAYLAND_SRC_DIR}/xv6_draw.h
+            ${WAYLAND_SRC_DIR}/xv6_titlebar.c
+            ${WAYLAND_SRC_DIR}/xv6_titlebar.h
             ${PEANUT_GB_SRC_DIR}/peanut_gb.h
             ${WAYLAND_SRC_DIR}/xv6_present_buffer.c
             ${WAYLAND_SRC_DIR}/xv6_present_buffer.h
@@ -489,6 +525,9 @@ add_custom_command(
                 ${WAYLAND_SRC_DIR}/gl_program.c
                 ${WAYLAND_SRC_DIR}/gl_fps_overlay.c
                 ${WAYLAND_SRC_DIR}/mesawlegl_sphere.c
+                ${WAYLAND_SRC_DIR}/xv6_titlebar.c
+                ${WAYLAND_SRC_DIR}/xv6_titlebar_gl.c
+                ${WAYLAND_SRC_DIR}/xv6_draw.c
                 ${WAYLAND_SRC_DIR}/xv6_present_buffer.c
                 ${_xdg_client_code}
                 -lEGL -lGLESv2 -lwayland-egl -lwayland-client
@@ -502,6 +541,12 @@ add_custom_command(
             ${WAYLAND_SRC_DIR}/mesawlegl_sphere.c
             ${WAYLAND_SRC_DIR}/mesawlegl_sphere.h
             ${WAYLAND_SRC_DIR}/font8x16.h
+            ${WAYLAND_SRC_DIR}/xv6_titlebar.c
+            ${WAYLAND_SRC_DIR}/xv6_titlebar.h
+            ${WAYLAND_SRC_DIR}/xv6_titlebar_gl.c
+            ${WAYLAND_SRC_DIR}/xv6_titlebar_gl.h
+            ${WAYLAND_SRC_DIR}/xv6_draw.c
+            ${WAYLAND_SRC_DIR}/xv6_draw.h
             ${WAYLAND_SRC_DIR}/xv6_present_buffer.c
             ${WAYLAND_SRC_DIR}/xv6_present_buffer.h
             ${_xdg_client_header}

@@ -20,9 +20,10 @@
 #include <wayland-client.h>
 #include <wayland-egl.h>
 
-#include "font8x16.h"
 #include "xdg-shell-client-protocol.h"
 #include "xv6_present_buffer.h"
+#include "xv6_titlebar.h"
+#include "xv6_titlebar_gl.h"
 
 #ifndef EGL_PLATFORM_WAYLAND_KHR
 #define EGL_PLATFORM_WAYLAND_KHR 0x31D8
@@ -42,8 +43,8 @@
 
 #define WINDOW_W 480
 #define WINDOW_H 360
-#define TITLEBAR_H 30
-#define TITLEBAR_CONTROL_W 34
+#define TITLEBAR_H XV6_TITLEBAR_HEIGHT
+#define TITLEBAR_CONTROL_W XV6_TITLEBAR_CONTROL_W
 #define SOFTWARE_DEMO_W 180
 #define SOFTWARE_DEMO_H 135
 #define FPS_TEXT_MAX 16
@@ -1513,79 +1514,6 @@ static void overlay_emit_rect(struct vertex *vertices, int *count,
     *count += 6;
 }
 
-static void titlebar_emit_rect_px(const struct app_state *app,
-                                  struct vertex *vertices, int *count,
-                                  float x0, float y0, float x1, float y1,
-                                  float r, float g, float b, float a)
-{
-    float nx0;
-    float nx1;
-    float ny0;
-    float ny1;
-
-    if (*count + 6 >= 8192 || app->width <= 0 || app->height <= 0)
-        return;
-    nx0 = x0 * 2.0f / (float)app->width - 1.0f;
-    nx1 = x1 * 2.0f / (float)app->width - 1.0f;
-    ny0 = 1.0f - y0 * 2.0f / (float)app->height;
-    ny1 = 1.0f - y1 * 2.0f / (float)app->height;
-    overlay_emit_rect(vertices, count, nx0, ny0, nx1, ny1, r, g, b, a);
-}
-
-static void titlebar_emit_char(struct app_state *app, struct vertex *vertices,
-                               int *count, int x, int y, char ch,
-                               float r, float g, float b, float a)
-{
-    const uint8_t *glyph;
-
-    if (ch < 0x20 || ch > 0x7e)
-        ch = '?';
-    glyph = font8x16_data[(int)(ch - 0x20)];
-    for (int row = 0; row < 16; row++) {
-        uint8_t bits = glyph[row];
-
-        for (int col = 0; col < 8; col++) {
-            if (!(bits & (uint8_t)(1u << (7 - col))))
-                continue;
-            titlebar_emit_rect_px(app, vertices, count,
-                                  (float)(x + col), (float)(y + row),
-                                  (float)(x + col + 1),
-                                  (float)(y + row + 1),
-                                  r, g, b, a);
-        }
-    }
-}
-
-static void titlebar_emit_text_fit(struct app_state *app,
-                                   struct vertex *vertices, int *count,
-                                   int x, int y, int max_w,
-                                   const char *text,
-                                   float r, float g, float b, float a)
-{
-    int limit = max_w / 8;
-    int chars = 0;
-
-    if (limit <= 0)
-        return;
-    for (const char *p = text; *p && chars < limit; p++, chars++)
-        titlebar_emit_char(app, vertices, count, x + chars * 8, y, *p,
-                           r, g, b, a);
-}
-
-static void titlebar_emit_button_text(struct app_state *app,
-                                      struct vertex *vertices, int *count,
-                                      int x, const char *text)
-{
-    int len = (int)strlen(text);
-    int tx = x + (TITLEBAR_CONTROL_W - len * 8) / 2;
-
-    if (tx < x + 2)
-        tx = x + 2;
-    titlebar_emit_text_fit(app, vertices, count, tx, 7,
-                           TITLEBAR_CONTROL_W - 4, text,
-                           0.96f, 0.98f, 1.00f, 1.0f);
-}
-
 static const char *window_title(const struct app_state *app)
 {
     return app->sphere_demo ? "Mesa 3D Demo" : "Mesa Native Wayland EGL";
@@ -1593,36 +1521,9 @@ static const char *window_title(const struct app_state *app)
 
 static void render_titlebar(struct app_state *app)
 {
-    struct vertex vertices[8192];
-    int count = 0;
-    int close_x = app->width - TITLEBAR_CONTROL_W;
-    int max_x = close_x - TITLEBAR_CONTROL_W;
-    int min_x = max_x - TITLEBAR_CONTROL_W;
-    int title_limit = min_x - 20;
-
     if (!app->program || app->width <= TITLEBAR_CONTROL_W * 3 ||
         app->height <= TITLEBAR_H)
         return;
-
-    titlebar_emit_rect_px(app, vertices, &count, 0, 0, app->width,
-                          TITLEBAR_H, 0.12f, 0.17f, 0.22f, 1.0f);
-    titlebar_emit_rect_px(app, vertices, &count, 0, TITLEBAR_H - 1,
-                          app->width, TITLEBAR_H, 0.42f, 0.52f, 0.62f,
-                          1.0f);
-    titlebar_emit_rect_px(app, vertices, &count, min_x, 0, max_x,
-                          TITLEBAR_H, 0.17f, 0.24f, 0.31f, 1.0f);
-    titlebar_emit_rect_px(app, vertices, &count, max_x, 0, close_x,
-                          TITLEBAR_H, 0.17f, 0.24f, 0.31f, 1.0f);
-    titlebar_emit_rect_px(app, vertices, &count, close_x, 0, app->width,
-                          TITLEBAR_H, 0.47f, 0.18f, 0.20f, 1.0f);
-    if (title_limit > 10)
-        titlebar_emit_text_fit(app, vertices, &count, 10, 7, title_limit,
-                               window_title(app),
-                               0.94f, 0.97f, 1.0f, 1.0f);
-    titlebar_emit_button_text(app, vertices, &count, min_x, "-");
-    titlebar_emit_button_text(app, vertices, &count, max_x,
-                              app->maximized ? "[]" : "+");
-    titlebar_emit_button_text(app, vertices, &count, close_x, "X");
 
     glViewport(0, 0, app->width, app->height);
     glDisable(GL_DEPTH_TEST);
@@ -1630,15 +1531,10 @@ static void render_titlebar(struct app_state *app)
     glDisable(GL_SCISSOR_TEST);
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-    glUseProgram(app->program);
     glBindBuffer(GL_ARRAY_BUFFER, 0);
-    glVertexAttribPointer((GLuint)app->attr_pos, 3, GL_FLOAT, GL_FALSE,
-                          sizeof(vertices[0]), &vertices[0].x);
-    glVertexAttribPointer((GLuint)app->attr_color, 4, GL_FLOAT, GL_FALSE,
-                          sizeof(vertices[0]), &vertices[0].r);
-    glEnableVertexAttribArray((GLuint)app->attr_pos);
-    glEnableVertexAttribArray((GLuint)app->attr_color);
-    glDrawArrays(GL_TRIANGLES, 0, count);
+    xv6_titlebar_gl_draw(app->width, app->height, window_title(app),
+                         app->maximized, (GLuint)app->program,
+                         app->attr_pos, app->attr_color, 3);
     glDisable(GL_BLEND);
 }
 
@@ -2388,41 +2284,6 @@ static const struct xdg_toplevel_listener toplevel_listener = {
     .close = toplevel_close,
 };
 
-static int titlebar_control_at(const struct app_state *app, int x, int y)
-{
-    int close_x;
-    int max_x;
-    int min_x;
-
-    if (y < 0 || y >= TITLEBAR_H || app->width <= TITLEBAR_CONTROL_W * 3)
-        return -1;
-    close_x = app->width - TITLEBAR_CONTROL_W;
-    max_x = close_x - TITLEBAR_CONTROL_W;
-    min_x = max_x - TITLEBAR_CONTROL_W;
-    if (x >= close_x)
-        return 3;
-    if (x >= max_x)
-        return 2;
-    if (x >= min_x)
-        return 1;
-    return 0;
-}
-
-static void activate_titlebar_control(struct app_state *app, int control)
-{
-    if (control == 3) {
-        app->close_requested = 1;
-        app->running = 0;
-    } else if (control == 2) {
-        if (app->maximized)
-            xdg_toplevel_unset_maximized(app->toplevel);
-        else
-            xdg_toplevel_set_maximized(app->toplevel);
-    } else if (control == 1) {
-        xdg_toplevel_set_minimized(app->toplevel);
-    }
-}
-
 static void pointer_enter(void *data, struct wl_pointer *pointer,
                           uint32_t serial, struct wl_surface *surface,
                           wl_fixed_t sx, wl_fixed_t sy)
@@ -2455,20 +2316,25 @@ static void pointer_button(void *data, struct wl_pointer *pointer,
                            uint32_t state)
 {
     struct app_state *app = data;
-    int control;
+    enum xv6_titlebar_action control;
 
     (void)pointer; (void)time;
     if (button != BTN_LEFT || state != WL_POINTER_BUTTON_STATE_PRESSED)
         return;
-    control = titlebar_control_at(app, app->pointer_x, app->pointer_y);
-    if (control >= 0)
+    control = xv6_titlebar_hit_test(app->width, app->pointer_x,
+                                    app->pointer_y);
+    if (control != XV6_TITLEBAR_NONE)
         fprintf(stderr, "mesawlegl: titlebar click x=%d y=%d control=%d\n",
                 app->pointer_x, app->pointer_y, control);
-    if (control == 0 && app->toplevel && app->seat) {
+    if (control == XV6_TITLEBAR_DRAG && app->toplevel && app->seat) {
         xdg_toplevel_move(app->toplevel, app->seat, serial);
         return;
     }
-    activate_titlebar_control(app, control);
+    if (control == XV6_TITLEBAR_CLOSE)
+        app->close_requested = 1;
+    if (control != XV6_TITLEBAR_NONE)
+        xv6_titlebar_activate(control, app->toplevel, &app->maximized,
+                              &app->running);
 }
 
 static void pointer_axis(void *data, struct wl_pointer *pointer,

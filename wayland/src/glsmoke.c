@@ -20,8 +20,9 @@
 #include <wayland-client.h>
 #include <wayland-egl.h>
 
-#include "font8x16.h"
 #include "xdg-shell-client-protocol.h"
+#include "xv6_titlebar.h"
+#include "xv6_titlebar_gl.h"
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -29,8 +30,8 @@
 
 #define GL_WINDOW_W 480
 #define GL_WINDOW_H 360
-#define TITLEBAR_H 30
-#define CONTROL_W 34
+#define TITLEBAR_H XV6_TITLEBAR_HEIGHT
+#define CONTROL_W XV6_TITLEBAR_CONTROL_W
 #define TITLEBAR_TITLE "xv6 GL Smoke"
 
 struct vec2 {
@@ -101,124 +102,12 @@ static struct vec2 rotate_point(float x, float y, float angle, float cx, float c
     return out;
 }
 
-static void emit_rect_px(struct vertex *vertices, int *count, int max_count,
-                         int surface_w, int surface_h, int x0, int y0,
-                         int x1, int y1, GLfloat r, GLfloat g, GLfloat b,
-                         GLfloat a)
-{
-    GLfloat nx0, nx1, ny0, ny1;
-    struct vertex rect[6];
-
-    if (*count + 6 > max_count || surface_w <= 0 || surface_h <= 0)
-        return;
-    if (x0 < 0)
-        x0 = 0;
-    if (y0 < 0)
-        y0 = 0;
-    if (x1 > surface_w)
-        x1 = surface_w;
-    if (y1 > surface_h)
-        y1 = surface_h;
-    if (x0 >= x1 || y0 >= y1)
-        return;
-
-    nx0 = (2.0f * (GLfloat)x0 / (GLfloat)surface_w) - 1.0f;
-    nx1 = (2.0f * (GLfloat)x1 / (GLfloat)surface_w) - 1.0f;
-    ny0 = 1.0f - (2.0f * (GLfloat)y0 / (GLfloat)surface_h);
-    ny1 = 1.0f - (2.0f * (GLfloat)y1 / (GLfloat)surface_h);
-
-    rect[0] = (struct vertex){ nx0, ny0, r, g, b, a };
-    rect[1] = (struct vertex){ nx1, ny0, r, g, b, a };
-    rect[2] = (struct vertex){ nx0, ny1, r, g, b, a };
-    rect[3] = (struct vertex){ nx1, ny0, r, g, b, a };
-    rect[4] = (struct vertex){ nx1, ny1, r, g, b, a };
-    rect[5] = (struct vertex){ nx0, ny1, r, g, b, a };
-    memcpy(&vertices[*count], rect, sizeof(rect));
-    *count += 6;
-}
-
-static void emit_glyph_px(struct vertex *vertices, int *count, int max_count,
-                          int surface_w, int surface_h, int x, int y, char ch,
-                          GLfloat r, GLfloat g, GLfloat b, GLfloat a)
-{
-    const uint8_t *glyph;
-
-    if (ch < 0x20 || ch > 0x7e)
-        ch = '?';
-    glyph = font8x16_data[ch - 0x20];
-    for (int row = 0; row < 16; row++) {
-        uint8_t bits = glyph[row];
-
-        for (int col = 0; col < 8; col++) {
-            if (bits & (0x80u >> col)) {
-                emit_rect_px(vertices, count, max_count, surface_w, surface_h,
-                             x + col, y + row, x + col + 1, y + row + 1,
-                             r, g, b, a);
-            }
-        }
-    }
-}
-
-static void emit_text_px(struct vertex *vertices, int *count, int max_count,
-                         int surface_w, int surface_h, int x, int y,
-                         const char *text, GLfloat r, GLfloat g, GLfloat b,
-                         GLfloat a)
-{
-    for (const char *p = text; *p; p++) {
-        if (x + 8 >= surface_w)
-            break;
-        emit_glyph_px(vertices, count, max_count, surface_w, surface_h, x, y,
-                      *p, r, g, b, a);
-        x += 8;
-    }
-}
-
 static void draw_titlebar(struct app_state *app)
 {
-    struct vertex vertices[8192];
-    int count = 0;
-    int close_x = app->width - CONTROL_W;
-    int max_x = app->width - CONTROL_W * 2;
-    int min_x = app->width - CONTROL_W * 3;
-
     glViewport(0, 0, app->width, app->height);
-    emit_rect_px(vertices, &count, (int)(sizeof(vertices) / sizeof(vertices[0])),
-                 app->width, app->height, 0, 0, app->width, TITLEBAR_H,
-                 0.14f, 0.20f, 0.28f, 1.0f);
-    emit_rect_px(vertices, &count, (int)(sizeof(vertices) / sizeof(vertices[0])),
-                 app->width, app->height, 0, TITLEBAR_H - 1, app->width,
-                 TITLEBAR_H, 0.37f, 0.46f, 0.56f, 1.0f);
-    emit_text_px(vertices, &count, (int)(sizeof(vertices) / sizeof(vertices[0])),
-                 app->width, app->height, 10, 7, TITLEBAR_TITLE,
-                 0.96f, 0.97f, 0.98f, 1.0f);
-
-    emit_rect_px(vertices, &count, (int)(sizeof(vertices) / sizeof(vertices[0])),
-                 app->width, app->height, min_x, 0, max_x, TITLEBAR_H,
-                 0.18f, 0.26f, 0.35f, 1.0f);
-    emit_rect_px(vertices, &count, (int)(sizeof(vertices) / sizeof(vertices[0])),
-                 app->width, app->height, max_x, 0, close_x, TITLEBAR_H,
-                 0.18f, 0.26f, 0.35f, 1.0f);
-    emit_rect_px(vertices, &count, (int)(sizeof(vertices) / sizeof(vertices[0])),
-                 app->width, app->height, close_x, 0, app->width, TITLEBAR_H,
-                 0.44f, 0.22f, 0.24f, 1.0f);
-    emit_text_px(vertices, &count, (int)(sizeof(vertices) / sizeof(vertices[0])),
-                 app->width, app->height, min_x + 13, 7, "-", 0.96f, 0.97f,
-                 0.98f, 1.0f);
-    emit_text_px(vertices, &count, (int)(sizeof(vertices) / sizeof(vertices[0])),
-                 app->width, app->height, max_x + 9, 7,
-                 app->maximized ? "[]" : "+", 0.96f, 0.97f, 0.98f, 1.0f);
-    emit_text_px(vertices, &count, (int)(sizeof(vertices) / sizeof(vertices[0])),
-                 app->width, app->height, close_x + 13, 7, "x", 0.96f,
-                 0.97f, 0.98f, 1.0f);
-
-    glUseProgram(app->program);
-    glVertexAttribPointer((GLuint)app->attr_pos, 2, GL_FLOAT, GL_FALSE,
-                          sizeof(vertices[0]), &vertices[0].x);
-    glVertexAttribPointer((GLuint)app->attr_color, 4, GL_FLOAT, GL_FALSE,
-                          sizeof(vertices[0]), &vertices[0].r);
-    glEnableVertexAttribArray((GLuint)app->attr_pos);
-    glEnableVertexAttribArray((GLuint)app->attr_color);
-    glDrawArrays(GL_TRIANGLES, 0, count);
+    xv6_titlebar_gl_draw(app->width, app->height, TITLEBAR_TITLE,
+                         app->maximized, (GLuint)app->program,
+                         app->attr_pos, app->attr_color, 2);
 }
 
 static void render_frame(struct app_state *app)
@@ -316,36 +205,6 @@ static void frame_done(void *data, struct wl_callback *cb, uint32_t time)
     draw_and_commit(app);
 }
 
-static int titlebar_control_at(struct app_state *app, int x, int y)
-{
-    if (y < 0 || y >= TITLEBAR_H || app->width <= CONTROL_W * 3)
-        return 0;
-    if (x >= app->width - CONTROL_W)
-        return 'x';
-    if (x >= app->width - CONTROL_W * 2)
-        return 'm';
-    if (x >= app->width - CONTROL_W * 3)
-        return '-';
-    return 't';
-}
-
-static void activate_titlebar_control(struct app_state *app, int control)
-{
-    if (control == 'x') {
-        app->running = 0;
-    } else if (control == 'm') {
-        if (app->maximized) {
-            xdg_toplevel_unset_maximized(app->toplevel);
-            app->maximized = 0;
-        } else {
-            xdg_toplevel_set_maximized(app->toplevel);
-            app->maximized = 1;
-        }
-    } else if (control == '-') {
-        xdg_toplevel_set_minimized(app->toplevel);
-    }
-}
-
 static void pointer_enter(void *data, struct wl_pointer *pointer,
                           uint32_t serial, struct wl_surface *surface,
                           wl_fixed_t sx, wl_fixed_t sy)
@@ -376,16 +235,18 @@ static void pointer_button(void *data, struct wl_pointer *pointer,
                            uint32_t state)
 {
     struct app_state *app = data;
-    int control;
+    enum xv6_titlebar_action control;
     (void)pointer; (void)time;
 
     if (button != BTN_LEFT || state != WL_POINTER_BUTTON_STATE_PRESSED)
         return;
-    control = titlebar_control_at(app, app->pointer_x, app->pointer_y);
-    if (control == 't') {
+    control = xv6_titlebar_hit_test(app->width, app->pointer_x,
+                                    app->pointer_y);
+    if (control == XV6_TITLEBAR_DRAG) {
         xdg_toplevel_move(app->toplevel, app->seat, serial);
-    } else if (control) {
-        activate_titlebar_control(app, control);
+    } else if (control != XV6_TITLEBAR_NONE) {
+        xv6_titlebar_activate(control, app->toplevel, &app->maximized,
+                              &app->running);
     }
 }
 

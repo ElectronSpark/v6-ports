@@ -11,6 +11,7 @@
 #include "xdg-shell-client-protocol.h"
 #include "xv6_draw.h"
 #include "xv6_present_buffer.h"
+#include "xv6_titlebar.h"
 
 #include <ctype.h>
 #include <errno.h>
@@ -33,8 +34,8 @@
 #define WINDOW_SCALE 4
 #define DEFAULT_W (LCD_WIDTH * WINDOW_SCALE)
 #define DEFAULT_H (LCD_HEIGHT * WINDOW_SCALE)
-#define TITLEBAR_H 30
-#define CONTROL_W 34
+#define TITLEBAR_H XV6_TITLEBAR_HEIGHT
+#define CONTROL_W XV6_TITLEBAR_CONTROL_W
 #define KEY_ESC 1
 #define KEY_BACKSPACE 14
 #define KEY_ENTER 28
@@ -288,30 +289,12 @@ static int ensure_present(struct frontend *fe)
 
 static void draw_titlebar(struct frontend *fe)
 {
-    uint32_t *fb = fe->present.pixels;
-    int w = fe->present.width;
-    int h = fe->present.height;
-    int close_x = w - CONTROL_W;
-    int max_x = w - CONTROL_W * 2;
-    int min_x = w - CONTROL_W * 3;
     char title[80];
 
-    if (!fb || w <= 0 || h <= 0)
-        return;
-
-    draw_rect(fb, w, h, 0, 0, w, TITLEBAR_H, 0x243447);
-    draw_rect(fb, w, h, 0, TITLEBAR_H - 1, w, 1, 0x5e768e);
     snprintf(title, sizeof(title), "Peanut-GB - %s",
              fe->rom_title[0] ? fe->rom_title : "Game Boy");
-    draw_string(fb, w, h, 10, 7, title, 0xf4f7fb, 1);
-
-    draw_rect(fb, w, h, min_x, 0, CONTROL_W, TITLEBAR_H, 0x2f4358);
-    draw_rect(fb, w, h, max_x, 0, CONTROL_W, TITLEBAR_H, 0x2f4358);
-    draw_rect(fb, w, h, close_x, 0, CONTROL_W, TITLEBAR_H, 0x70383d);
-    draw_string(fb, w, h, min_x + 13, 7, "-", 0xf4f7fb, 1);
-    draw_string(fb, w, h, max_x + 13, 7, fe->maximized ? "[]" : "+",
-                0xf4f7fb, 1);
-    draw_string(fb, w, h, close_x + 13, 7, "x", 0xf4f7fb, 1);
+    xv6_titlebar_draw(fe->present.pixels, fe->present.width,
+                      fe->present.height, title, fe->maximized, NULL);
 }
 
 static void present_frame(struct frontend *fe)
@@ -356,38 +339,6 @@ static void present_frame(struct frontend *fe)
     wl_surface_damage(fe->surface, 0, 0, fe->present.width,
                       fe->present.height);
     wl_surface_commit(fe->surface);
-}
-
-static int titlebar_control_at(struct frontend *fe, int x, int y)
-{
-    int w = fe->present_ready ? fe->present.width : fe->width;
-
-    if (y < 0 || y >= TITLEBAR_H || w <= CONTROL_W * 3)
-        return 0;
-    if (x >= w - CONTROL_W)
-        return 'x';
-    if (x >= w - CONTROL_W * 2)
-        return 'm';
-    if (x >= w - CONTROL_W * 3)
-        return '-';
-    return 't';
-}
-
-static void activate_titlebar_control(struct frontend *fe, int control)
-{
-    if (control == 'x') {
-        fe->running = 0;
-    } else if (control == 'm') {
-        if (fe->maximized) {
-            xdg_toplevel_unset_maximized(fe->toplevel);
-            fe->maximized = 0;
-        } else {
-            xdg_toplevel_set_maximized(fe->toplevel);
-            fe->maximized = 1;
-        }
-    } else if (control == '-') {
-        xdg_toplevel_set_minimized(fe->toplevel);
-    }
 }
 
 static void write_status(struct frontend *fe, int status)
@@ -490,16 +441,18 @@ static void pointer_button(void *data, struct wl_pointer *pointer,
                            uint32_t state)
 {
     struct frontend *fe = data;
-    int control;
+    enum xv6_titlebar_action control;
     (void)pointer; (void)time;
 
     if (button != BTN_LEFT || state != WL_POINTER_BUTTON_STATE_PRESSED)
         return;
-    control = titlebar_control_at(fe, fe->pointer_x, fe->pointer_y);
-    if (control == 't') {
+    control = xv6_titlebar_hit_test(fe->present_ready ? fe->present.width :
+                                    fe->width, fe->pointer_x, fe->pointer_y);
+    if (control == XV6_TITLEBAR_DRAG) {
         xdg_toplevel_move(fe->toplevel, fe->seat, serial);
-    } else if (control) {
-        activate_titlebar_control(fe, control);
+    } else if (control != XV6_TITLEBAR_NONE) {
+        xv6_titlebar_activate(control, fe->toplevel, &fe->maximized,
+                              &fe->running);
     }
 }
 
