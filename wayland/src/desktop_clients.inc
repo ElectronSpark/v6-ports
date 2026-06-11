@@ -939,24 +939,18 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             "XV6_MESA_WAYLAND_COLOR_BUFFERS=0";
         char mesa_perf_log_env[32] = "XV6_MESA_PERF_LOG=0";
         char mesa_wayland_throttle_env[40] = "XV6_MESA_WAYLAND_THROTTLE=1";
+        int webkit_use_gst_gl =
+            webkit_gst_gl_enabled_by_cmdline() || minibrowser_youtube_compat;
 
-        snprintf(webkit_gst_disable_gl_sink_env,
-                 sizeof(webkit_gst_disable_gl_sink_env),
-                 "WEBKIT_GST_DISABLE_GL_SINK=%d",
-                 webkit_gst_gl_enabled_by_cmdline() ? 0 : 1);
-        snprintf(webkit_gst_dmabuf_sink_disabled_env,
-                 sizeof(webkit_gst_dmabuf_sink_disabled_env),
-                 "WEBKIT_GST_DMABUF_SINK_DISABLED=%d",
-                 webkit_gst_dmabuf_sink_enabled_by_cmdline() ? 0 : 1);
-        snprintf(webkit_gst_use_videoconvert_env,
-                 sizeof(webkit_gst_use_videoconvert_env),
-                 "WEBKIT_GST_USE_VIDEOCONVERT_SCALE=%d",
-                 webkit_gst_gl_enabled_by_cmdline() ? 0 : 1);
         {
             char webkit_cmdline_buf[CMDLINE_BUF_MAX];
 
             if (read_cmdline(webkit_cmdline_buf,
                              sizeof(webkit_cmdline_buf)) == 0) {
+                if (minibrowser_youtube_compat)
+                    webkit_use_gst_gl =
+                        cmdline_int_value(webkit_cmdline_buf,
+                                          "webkit_gst_gl", 1) != 0;
                 if (cmdline_int_value(webkit_cmdline_buf,
                                       "webkit_disable_compositing", 0) != 0) {
                     snprintf(webkit_force_compositing_mode_env,
@@ -973,6 +967,18 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
                              "WEBKIT_FORCE_VBLANK_TIMER=0");
             }
         }
+        snprintf(webkit_gst_disable_gl_sink_env,
+                 sizeof(webkit_gst_disable_gl_sink_env),
+                 "WEBKIT_GST_DISABLE_GL_SINK=%d",
+                 webkit_use_gst_gl ? 0 : 1);
+        snprintf(webkit_gst_dmabuf_sink_disabled_env,
+                 sizeof(webkit_gst_dmabuf_sink_disabled_env),
+                 "WEBKIT_GST_DMABUF_SINK_DISABLED=%d",
+                 webkit_gst_dmabuf_sink_enabled_by_cmdline() ? 0 : 1);
+        snprintf(webkit_gst_use_videoconvert_env,
+                 sizeof(webkit_gst_use_videoconvert_env),
+                 "WEBKIT_GST_USE_VIDEOCONVERT_SCALE=%d",
+                 webkit_use_gst_gl ? 0 : 1);
         snprintf(webkit_dmabuf_renderer_disable_gbm_env,
                  sizeof(webkit_dmabuf_renderer_disable_gbm_env),
                  "WEBKIT_DMABUF_RENDERER_DISABLE_GBM=%d",

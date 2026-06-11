@@ -2737,6 +2737,7 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
                 cmdline_int_value(webkit_cmdline_buf,
                                   "webkit_gst_max_avc1_480p", 0) :
                 0;
+        int webkit_use_gst_gl = webkit_gst_gl_enabled_by_cmdline();
 
         mesa_size_arg[0] = '\0';
         mesa_present_arg[0] = '\0';
@@ -2752,10 +2753,22 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
         snprintf(webkit_d3d12_run_id_env,
                  sizeof(webkit_d3d12_run_id_env),
                  "XV6_WLCOMP_D3D12_RUN_ID=%s", webkit_gpu_run_id_value);
+        if (minibrowser_youtube_compat) {
+            snprintf(webkit_gst_debug_env, sizeof(webkit_gst_debug_env),
+                     "GST_DEBUG=2");
+            snprintf(webkit_require_gpu_contract_env,
+                     sizeof(webkit_require_gpu_contract_env),
+                     "WEBKIT_XV6_REQUIRE_GPU_CONTRACT=0");
+            webkit_use_gst_gl =
+                have_webkit_cmdline ?
+                    cmdline_int_value(webkit_cmdline_buf, "webkit_gst_gl",
+                                      1) != 0 :
+                    1;
+        }
         snprintf(webkit_gst_disable_gl_sink_env,
                  sizeof(webkit_gst_disable_gl_sink_env),
                  "WEBKIT_GST_DISABLE_GL_SINK=%d",
-                 webkit_gst_gl_enabled_by_cmdline() ? 0 : 1);
+                 webkit_use_gst_gl ? 0 : 1);
         snprintf(webkit_gst_dmabuf_sink_disabled_env,
                  sizeof(webkit_gst_dmabuf_sink_disabled_env),
                  "WEBKIT_GST_DMABUF_SINK_DISABLED=%d",
@@ -2763,14 +2776,7 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
         snprintf(webkit_gst_use_videoconvert_env,
                  sizeof(webkit_gst_use_videoconvert_env),
                  "WEBKIT_GST_USE_VIDEOCONVERT_SCALE=%d",
-                 webkit_gst_gl_enabled_by_cmdline() ? 0 : 1);
-        if (minibrowser_youtube_compat) {
-            snprintf(webkit_gst_debug_env, sizeof(webkit_gst_debug_env),
-                     "GST_DEBUG=2");
-            snprintf(webkit_require_gpu_contract_env,
-                     sizeof(webkit_require_gpu_contract_env),
-                     "WEBKIT_XV6_REQUIRE_GPU_CONTRACT=0");
-        }
+                 webkit_use_gst_gl ? 0 : 1);
         if (have_webkit_cmdline &&
             cmdline_int_value(webkit_cmdline_buf,
                               "webkit_disable_compositing", 0) != 0) {
