@@ -56,6 +56,7 @@ static const char *webkit_feature_flags_no_idle =
 static const char *webkit_youtube_compat_user_agent =
     "--user-agent=Mozilla/5.0 (X11; xv6 x86_64) AppleWebKit/605.1.15 "
     "(KHTML, like Gecko) Version/17.0 Safari/605.1.15";
+static pid_t supervised_host_chromium_pid = -1;
 
 struct drm_virtgpu_getparam_compat {
     uint64_t param;
@@ -181,6 +182,15 @@ static int webkit_gst_dmabuf_sink_enabled_by_cmdline(void);
 static int webkit_gbm_enabled_by_cmdline(void);
 static int webkit_reopen_count_from_cmdline(void);
 static int webkit_timeout_ms_from_cmdline(int fallback);
+static int host_chromium_enabled_by_cmdline(void);
+static void host_chromium_url_from_cmdline(char *out, size_t out_size);
+static void host_chromium_backend_from_cmdline(char *out, size_t out_size);
+static int host_chromium_multiprocess_enabled_by_cmdline(void);
+static void host_chromium_extra_flags_from_cmdline(char *out, size_t out_size);
+static int host_chromium_evidence_enabled_by_cmdline(void);
+static int host_chromium_fbstat_enabled_by_cmdline(void);
+static int host_chromium_fbstat_timer_from_cmdline(void);
+static void run_host_chromium_fbstat_capture(const char *reason);
 static int gpu_validate_enabled_by_cmdline(void);
 static int glmaze_enabled_by_cmdline(void);
 static void glmaze_args_from_cmdline(char *seconds_arg, size_t seconds_size);
@@ -2206,6 +2216,160 @@ static void desktop_dump_text_log_tail(const char *path, const char *tag,
     }
 }
 
+static void desktop_dump_chromium_process_snapshot(const char *reason);
+
+static void desktop_dump_chromium_evidence(const char *reason)
+{
+    char buf[CMDLINE_BUF_MAX];
+    int lines = 24;
+
+    if (read_cmdline(buf, sizeof(buf)) == 0)
+        lines = cmdline_int_value(buf, "host_chromium_evidence_lines", lines);
+    if (lines < 1)
+        lines = 1;
+    if (lines > 240)
+        lines = 240;
+    fprintf(stderr, "[desktop] Chromium evidence begin reason=%s\n",
+            reason ? reason : "(none)");
+    desktop_dump_chromium_process_snapshot(reason);
+    desktop_dump_text_log_tail("/tmp/host-gui-wayland-chromium.log",
+                               "CHROMIUM-LAUNCHER", reason, lines);
+    desktop_dump_text_log_tail("/tmp/chrome_debug.log",
+                               "CHROMIUM-DEBUG", reason, lines);
+    desktop_dump_text_log_tail("/tmp/weston.log", "WESTON", reason, lines);
+    fprintf(stderr, "[desktop] Chromium evidence end reason=%s\n",
+            reason ? reason : "(none)");
+}
+
+static void desktop_dump_chromium_process_snapshot(const char *reason)
+{
+    int alive = 0;
+    int probe_errno = 0;
+
+    fprintf(stderr, "[desktop] Chromium process snapshot begin reason=%s\n",
+            reason ? reason : "(none)");
+    if (supervised_host_chromium_pid > 0) {
+        if (kill(supervised_host_chromium_pid, 0) == 0) {
+            alive = 1;
+        } else {
+            probe_errno = errno;
+        }
+    }
+    fprintf(stderr,
+            "[desktop] Chromium process snapshot end reason=%s pid=%d "
+            "alive=%d errno=%d (%s)\n",
+            reason ? reason : "(none)", (int)supervised_host_chromium_pid,
+            alive, probe_errno,
+            probe_errno ? strerror(probe_errno) : "no errno from kernel");
+}
+
+static int host_chromium_fbstat_timeout_ms_from_cmdline(void)
+{
+    char buf[CMDLINE_BUF_MAX];
+    int timeout_ms = 8000;
+
+    if (read_cmdline(buf, sizeof(buf)) == 0)
+        timeout_ms = cmdline_int_value(buf, "host_chromium_fbstat_timeout_ms",
+                                       timeout_ms);
+    if (timeout_ms < 1000)
+        timeout_ms = 1000;
+    if (timeout_ms > 30000)
+        timeout_ms = 30000;
+    return timeout_ms;
+}
+
+static void host_chromium_fbstat_path_from_cmdline(char *out, size_t out_size)
+{
+    char buf[CMDLINE_BUF_MAX];
+    char path[128];
+
+    if (out_size == 0)
+        return;
+    if (read_cmdline(buf, sizeof(buf)) == 0 &&
+        cmdline_copy_value(buf, "host_chromium_fbstat_path", path,
+                           sizeof(path)) &&
+        path[0] == '/') {
+        snprintf(out, out_size, "%s", path);
+        return;
+    }
+    snprintf(out, out_size, "/wayland-chromium-supervisor.ppm");
+}
+
+static void run_host_chromium_fbstat_capture(const char *reason)
+{
+    char path[128];
+    pid_t pid;
+    int status = 0;
+    int waited_ms = 0;
+    int timeout_ms = host_chromium_fbstat_timeout_ms_from_cmdline();
+
+    host_chromium_fbstat_path_from_cmdline(path, sizeof(path));
+    fprintf(stderr,
+            "[desktop] Chromium fbstat capture begin reason=%s path=%s "
+            "timeout_ms=%d\n",
+            reason ? reason : "(none)", path, timeout_ms);
+    pid = fork();
+    if (pid == 0) {
+        char *argv[] = {
+            "fbstat",
+            "ppm-current",
+            path,
+            "0",
+            "0",
+            "1280",
+            "800",
+            NULL,
+        };
+        char *envp[] = {
+            "HOME=/",
+            "PATH=/bin:/usr/bin",
+            NULL,
+        };
+
+        execve("/bin/fbstat", argv, envp);
+        fprintf(stderr, "fbstat: execve failed errno=%d (%s)\n", errno,
+                errno ? strerror(errno) : "no errno from kernel");
+        _exit(127);
+    }
+    if (pid < 0) {
+        fprintf(stderr,
+                "[desktop] Chromium fbstat fork failed errno=%d (%s)\n",
+                errno, errno ? strerror(errno) : "no errno from kernel");
+        return;
+    }
+
+    while (waited_ms <= timeout_ms) {
+        pid_t done = waitpid(pid, &status, WNOHANG);
+
+        if (done == pid) {
+            sync();
+            fprintf(stderr,
+                    "[desktop] Chromium fbstat capture end reason=%s "
+                    "path=%s status=%d waited_ms=%d\n",
+                    reason ? reason : "(none)", path,
+                    WIFEXITED(status) ? WEXITSTATUS(status) : status,
+                    waited_ms);
+            return;
+        }
+        if (done < 0 && errno != EINTR) {
+            fprintf(stderr,
+                    "[desktop] Chromium fbstat wait failed errno=%d (%s)\n",
+                    errno, errno ? strerror(errno) : "no errno from kernel");
+            return;
+        }
+        usleep(100000);
+        waited_ms += 100;
+    }
+
+    kill(pid, SIGKILL);
+    while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {
+    }
+    fprintf(stderr,
+            "[desktop] Chromium fbstat capture timeout reason=%s path=%s "
+            "timeout_ms=%d\n",
+            reason ? reason : "(none)", path, timeout_ms);
+}
+
 static void webkit_print_runtime_probe(void)
 {
     char title[1024];
@@ -2654,6 +2818,7 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
     int is_netsurf = strcmp(name, "netsurf") == 0;
     int is_minibrowser = strcmp(name, "MiniBrowser") == 0;
     int is_webkitgpusmoke = strcmp(name, "webkitgpusmoke") == 0;
+    int is_host_chromium = strcmp(name, "wayland-chromium") == 0;
     int is_mesa_gl = strcmp(name, "mesademo") == 0 ||
                      strcmp(name, "mesawlegl") == 0 ||
                      strcmp(name, "mesaglsmoke") == 0 ||
@@ -2818,6 +2983,12 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
         char mesa_perf_log_env[32] = "XV6_MESA_PERF_LOG=0";
         char mesa_client_perf_log_env[36] = "XV6_MESAWLEGL_PERF_LOG=0";
         char mesa_wayland_throttle_env[40] = "XV6_MESA_WAYLAND_THROTTLE=1";
+        char chromium_backend_value[16] = "wayland";
+        char chromium_backend_env[48] = "WAYLAND_CHROMIUM_BACKEND=wayland";
+        char chromium_multiprocess_env[48] =
+            "WAYLAND_CHROMIUM_MULTIPROCESS=0";
+        char chromium_extra_value[192];
+        char chromium_extra_flags_env[224] = "WAYLAND_CHROMIUM_EXTRA_FLAGS=";
         char mesa_cmdline_buf[CMDLINE_BUF_MAX];
         char webkit_cmdline_buf[CMDLINE_BUF_MAX];
         char mesa_size_arg[32];
@@ -3097,6 +3268,27 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
                     "[desktop] Mesa env perf=%s throttle=%s color_buffers=%s\n",
                     mesa_perf_log_env, mesa_wayland_throttle_env,
                     mesa_wayland_color_buffers_env);
+        }
+        if (is_host_chromium) {
+            host_chromium_backend_from_cmdline(chromium_backend_value,
+                                               sizeof(chromium_backend_value));
+            snprintf(chromium_backend_env, sizeof(chromium_backend_env),
+                     "WAYLAND_CHROMIUM_BACKEND=%s", chromium_backend_value);
+            snprintf(chromium_multiprocess_env,
+                     sizeof(chromium_multiprocess_env),
+                     "WAYLAND_CHROMIUM_MULTIPROCESS=%d",
+                     host_chromium_multiprocess_enabled_by_cmdline() ? 1 : 0);
+            host_chromium_extra_flags_from_cmdline(chromium_extra_value,
+                                                   sizeof(chromium_extra_value));
+            if (chromium_extra_value[0])
+                snprintf(chromium_extra_flags_env,
+                         sizeof(chromium_extra_flags_env),
+                         "WAYLAND_CHROMIUM_EXTRA_FLAGS=%s",
+                         chromium_extra_value);
+            fprintf(stderr,
+                    "[desktop] Chromium env %s %s extra_flags=%s\n",
+                    chromium_backend_env, chromium_multiprocess_env,
+                    chromium_extra_value[0] ? chromium_extra_value : "(none)");
         }
         char *argv_minibrowser[] = {
             (char *)name,
@@ -3675,6 +3867,18 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             mesa_wayland_color_buffers_env,
             NULL
         };
+        char *envp_host_chromium[] = {
+            "HOME=/",
+            "PATH=/bin:/usr/bin",
+            "XDG_RUNTIME_DIR=/tmp",
+            "WAYLAND_DISPLAY=wayland-0",
+            "DISPLAY=:0",
+            "XV6_GUI_SESSION=1",
+            chromium_backend_env,
+            chromium_multiprocess_env,
+            chromium_extra_flags_env,
+            NULL
+        };
         int minibrowser_accel =
             is_minibrowser && webkit_accel_enabled_by_cmdline();
         int minibrowser_dmabuf =
@@ -3820,7 +4024,8 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
         errno = 0;
         execve(path,
                argv_exec,
-               is_webkit ?
+               is_host_chromium ? envp_host_chromium :
+               (is_webkit ?
                     (webkit_accel ?
                          (minibrowser_dmabuf ? envp_minibrowser_dmabuf_sw :
                      (opengl_submit_available ? envp_minibrowser_accel :
@@ -3831,7 +4036,7 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
                     (opengl_submit_available ? envp_mesa_accel :
                      (dxg_transport_available ? envp_mesa_d3d12 :
                                           envp_mesa_accel_sw)) :
-                         envp_default));
+                         envp_default)));
         fprintf(stderr, "%s: execve failed errno=%d (%s)\n", path, errno,
                 errno ? strerror(errno) : "no errno from kernel");
         _exit(127);
@@ -4817,6 +5022,118 @@ static void webkit_url_from_cmdline(char *out, size_t out_size)
     normalize_webkit_url(WEBKIT_DEFAULT_URL, out, out_size);
 }
 
+static int host_chromium_enabled_by_cmdline(void)
+{
+    char buf[CMDLINE_BUF_MAX];
+
+    if (read_cmdline(buf, sizeof(buf)) < 0)
+        return 0;
+
+    return token_is_enabled(buf, "host_chromium");
+}
+
+static int host_chromium_fbstat_enabled_by_cmdline(void)
+{
+    char buf[CMDLINE_BUF_MAX];
+
+    if (read_cmdline(buf, sizeof(buf)) < 0)
+        return 0;
+
+    return token_is_enabled(buf, "host_chromium_fbstat");
+}
+
+static int host_chromium_evidence_enabled_by_cmdline(void)
+{
+    char buf[CMDLINE_BUF_MAX];
+
+    if (read_cmdline(buf, sizeof(buf)) < 0)
+        return 1;
+
+    return cmdline_int_value(buf, "host_chromium_evidence", 1) != 0;
+}
+
+static int host_chromium_fbstat_timer_from_cmdline(void)
+{
+    char buf[CMDLINE_BUF_MAX];
+    int timer = 0;
+
+    if (read_cmdline(buf, sizeof(buf)) == 0)
+        timer = cmdline_int_value(buf, "host_chromium_fbstat_timer", timer);
+    if (timer < 0)
+        timer = 0;
+    if (timer > 3)
+        timer = 3;
+    return timer;
+}
+
+static int host_chromium_evidence_timers_from_cmdline(void)
+{
+    char buf[CMDLINE_BUF_MAX];
+    int timers = 4;
+
+    if (read_cmdline(buf, sizeof(buf)) == 0)
+        timers = cmdline_int_value(buf, "host_chromium_evidence_timers",
+                                   timers);
+    if (timers < 0)
+        timers = 0;
+    if (timers > 20)
+        timers = 20;
+    return timers;
+}
+
+static void host_chromium_url_from_cmdline(char *out, size_t out_size)
+{
+    char buf[CMDLINE_BUF_MAX];
+    char url[WEBKIT_URL_MAX];
+
+    if (out_size == 0)
+        return;
+    if (read_cmdline(buf, sizeof(buf)) == 0 &&
+        cmdline_copy_value(buf, "host_chromium_url", url, sizeof(url)) &&
+        url[0]) {
+        normalize_webkit_url(url, out, out_size);
+        return;
+    }
+    snprintf(out, out_size, "about:blank");
+}
+
+static void host_chromium_backend_from_cmdline(char *out, size_t out_size)
+{
+    char buf[CMDLINE_BUF_MAX];
+    char backend[16];
+
+    if (out_size == 0)
+        return;
+    snprintf(out, out_size, "wayland");
+    if (read_cmdline(buf, sizeof(buf)) != 0 ||
+        !cmdline_copy_value(buf, "host_chromium_backend", backend,
+                            sizeof(backend)))
+        return;
+    if (strcmp(backend, "x11") == 0)
+        snprintf(out, out_size, "x11");
+}
+
+static int host_chromium_multiprocess_enabled_by_cmdline(void)
+{
+    char buf[CMDLINE_BUF_MAX];
+
+    if (read_cmdline(buf, sizeof(buf)) < 0)
+        return 0;
+
+    return token_is_enabled(buf, "host_chromium_multiprocess");
+}
+
+static void host_chromium_extra_flags_from_cmdline(char *out, size_t out_size)
+{
+    char buf[CMDLINE_BUF_MAX];
+
+    if (out_size == 0)
+        return;
+    out[0] = '\0';
+    if (read_cmdline(buf, sizeof(buf)) == 0)
+        cmdline_copy_value(buf, "host_chromium_extra_flags", out, out_size);
+}
+
 static int glsmoke_enabled_by_cmdline(void)
 {
     char buf[CMDLINE_BUF_MAX];
@@ -5004,6 +5321,11 @@ static int run_webkit_launch_mode(const char *url_arg)
 int main(int argc, char **argv)
 {
     const char *compositor_name;
+    int host_chromium_mode = 0;
+    int host_chromium_diag_count = 0;
+    int host_chromium_diag_limit = 4;
+    int host_chromium_fbstat_done = 0;
+    long long host_chromium_next_diag_ms = 0;
 
     if (argc >= 2 && strcmp(argv[1], "--launch-webkit") == 0)
         return run_webkit_launch_mode(argc >= 3 ? argv[2] : NULL);
@@ -5310,19 +5632,14 @@ int main(int argc, char **argv)
         while (g_running) {
             int status;
             long long now_ms;
-            pid_t exited = waitpid(-1, &status, WNOHANG);
+            pid_t exited = client_pid > 0 ?
+                waitpid(client_pid, &status, WNOHANG) : 0;
 
             desktop_process_pending_signals();
             if (!g_running)
                 break;
 
             if (exited > 0) {
-                if (exited == compositor_pid) {
-                    fprintf(stderr, "[desktop] compositor exited (status %d)\n",
-                            WEXITSTATUS(status));
-                    compositor_pid = 0;
-                    break;
-                }
                 if (exited == client_pid) {
                     int ok = WIFEXITED(status) && WEXITSTATUS(status) == 0;
 
@@ -5359,6 +5676,27 @@ int main(int argc, char **argv)
                         fprintf(stderr, "__WEBKIT_API_SMOKE_DONE_0__\n");
                         break;
                     }
+                }
+            } else if (exited < 0 && errno != EINTR && errno != ECHILD) {
+                fprintf(stderr,
+                        "[desktop] waitpid WebKit failed errno=%d (%s)\n",
+                        errno, errno ? strerror(errno) : "no errno from kernel");
+                webkit_failed = 1;
+                break;
+            }
+
+            if (compositor_pid > 0) {
+                int compositor_status;
+                pid_t compositor_exited =
+                    waitpid(compositor_pid, &compositor_status, WNOHANG);
+
+                if (compositor_exited == compositor_pid) {
+                    fprintf(stderr, "[desktop] compositor exited (status %d)\n",
+                            WIFEXITED(compositor_status) ?
+                                WEXITSTATUS(compositor_status) :
+                                compositor_status);
+                    compositor_pid = 0;
+                    break;
                 }
             }
             usleep(100000);
@@ -5423,6 +5761,27 @@ int main(int argc, char **argv)
                     "Weston desktop session\n");
         fprintf(stderr,
                 "[desktop] desktop icons are provided by weston-desktop-shell\n");
+        if (host_chromium_enabled_by_cmdline()) {
+            char chromium_url[WEBKIT_URL_MAX];
+
+            host_chromium_url_from_cmdline(chromium_url,
+                                           sizeof(chromium_url));
+            client_pid = launch_client("/bin/wayland-chromium",
+                                       "wayland-chromium",
+                                       chromium_url, NULL, NULL);
+            if (client_pid < 0) {
+                perror("[desktop] fork wayland-chromium");
+                cleanup();
+                return 1;
+            }
+            supervised_host_chromium_pid = client_pid;
+            fprintf(stderr, "[desktop] wayland-chromium pid=%d url=%s\n",
+                    client_pid, chromium_url);
+            host_chromium_mode = 1;
+            host_chromium_diag_limit =
+                host_chromium_evidence_timers_from_cmdline();
+            host_chromium_next_diag_ms = monotonic_ms() + 15000;
+        }
     }
 
     /* 4. Supervise compositor and client */
@@ -5456,7 +5815,31 @@ int main(int argc, char **argv)
                     fprintf(stderr, "[desktop] client exited (status %d)\n",
                             WIFEXITED(status) ? WEXITSTATUS(status) : status);
                 }
+                if (host_chromium_mode)
+                    desktop_dump_chromium_evidence("client-exit");
                 client_pid = 0;
+            }
+        }
+        if (host_chromium_mode && client_pid > 0 &&
+            host_chromium_diag_count < host_chromium_diag_limit) {
+            long long now_ms = monotonic_ms();
+
+            if (now_ms >= host_chromium_next_diag_ms) {
+                char reason[32];
+
+                snprintf(reason, sizeof(reason), "timer-%d",
+                         host_chromium_diag_count);
+                if (!host_chromium_fbstat_done &&
+                    host_chromium_diag_count >=
+                        host_chromium_fbstat_timer_from_cmdline() &&
+                    host_chromium_fbstat_enabled_by_cmdline()) {
+                    run_host_chromium_fbstat_capture(reason);
+                    host_chromium_fbstat_done = 1;
+                }
+                if (host_chromium_evidence_enabled_by_cmdline())
+                    desktop_dump_chromium_evidence(reason);
+                host_chromium_diag_count++;
+                host_chromium_next_diag_ms = now_ms + 15000;
             }
         }
         usleep(100000);  /* 100 ms poll */
