@@ -3035,7 +3035,7 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
                                       1) != 0 :
                     1;
             snprintf(webkit_gst_max_avc1_value,
-                     sizeof(webkit_gst_max_avc1_value), "360P");
+                     sizeof(webkit_gst_max_avc1_value), "480P");
         }
         snprintf(webkit_gst_disable_gl_sink_env,
                  sizeof(webkit_gst_disable_gl_sink_env),

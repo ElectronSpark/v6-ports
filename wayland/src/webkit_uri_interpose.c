@@ -129,7 +129,7 @@ apply_youtube_media_env(const char *uri)
     current_avc1 = getenv("WEBKIT_GST_MAX_AVC1_RESOLUTION");
     if (!current_avc1 || current_avc1[0] == '\0' ||
         strcmp(current_avc1, "720P") == 0)
-        setenv("WEBKIT_GST_MAX_AVC1_RESOLUTION", "360P", 1);
+        setenv("WEBKIT_GST_MAX_AVC1_RESOLUTION", "480P", 1);
     if (!getenv("GST_PLUGIN_FEATURE_RANK") ||
         getenv("GST_PLUGIN_FEATURE_RANK")[0] == '\0')
         setenv("GST_PLUGIN_FEATURE_RANK",
