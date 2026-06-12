@@ -1123,21 +1123,34 @@ static pid_t launch_weston(void)
 
     if (pid == 0) {
         char shell_arg[32] = "--shell=desktop";
+        char logger_scopes[128] = "";
+        char logger_arg[sizeof("--logger-scopes=") + sizeof(logger_scopes)];
+        char *argv[12];
+        int argc = 0;
 
         if (have_cmdline && token_is_enabled(cmdline_buf, "weston_kiosk"))
             snprintf(shell_arg, sizeof(shell_arg), "--shell=kiosk");
+        if (have_cmdline &&
+            cmdline_copy_value(cmdline_buf, "weston_logger_scopes",
+                               logger_scopes, sizeof(logger_scopes)))
+            snprintf(logger_arg, sizeof(logger_arg), "--logger-scopes=%s",
+                     logger_scopes);
+        else
+            logger_arg[0] = '\0';
 
-        char *argv[] = {
-            "weston",
-            "--backend=drm",
-            "--renderer=gl",
-            shell_arg,
-            "--socket=wayland-0",
-            "--idle-time=0",
-            "--log=/tmp/weston.log",
-            "--config=/etc/xdg/weston/weston.ini",
-            NULL,
-        };
+        argv[argc++] = "weston";
+        argv[argc++] = "--backend=drm";
+        argv[argc++] = "--renderer=gl";
+        argv[argc++] = shell_arg;
+        argv[argc++] = "--socket=wayland-0";
+        argv[argc++] = "--idle-time=0";
+        if (!have_cmdline || !token_is_enabled(cmdline_buf, "weston_log_stderr"))
+            argv[argc++] = "--log=/tmp/weston.log";
+        argv[argc++] = "--config=/etc/xdg/weston/weston.ini";
+        if (logger_arg[0])
+            argv[argc++] = logger_arg;
+        argv[argc] = NULL;
+
         char *envp_base[] = {
             "HOME=/",
             "PATH=/bin:/usr/bin:/libexec",
