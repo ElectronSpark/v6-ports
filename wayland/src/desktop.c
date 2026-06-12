@@ -199,6 +199,8 @@ static int http_try_serve_webkit_file(int cfd, const char *path,
                                       const char *extra, const char *range);
 static void http_smoke_self_probe(const char *path);
 static void webkit_print_runtime_probe(void);
+static void desktop_dump_text_log_tail(const char *path, const char *tag,
+                                       const char *reason, int max_lines);
 static void webkit_dump_gst_debug_evidence(void);
 static void webkit_dump_gst_debug_tail(const char *reason, int max_lines);
 static void webkit_print_log_evidence(const char *reason);
@@ -2120,6 +2122,87 @@ static void webkit_dump_gst_debug_tail(const char *reason, int max_lines)
         line[len] = '\0';
         if (len > 0)
             fprintf(stderr, "[desktop] GSTTAIL: %s\n", line);
+    }
+}
+
+static void desktop_dump_text_log_tail(const char *path, const char *tag,
+                                       const char *reason, int max_lines)
+{
+    enum { TAIL_BUF = 64 * 1024, LINE_MAX = 768 };
+    static char buf[TAIL_BUF + 1];
+    char line[LINE_MAX];
+    struct stat st;
+    int fd;
+    off_t start_off = 0;
+    ssize_t total = 0;
+    char *start;
+    char *end;
+    char *p;
+    int lines = 0;
+
+    if (!path || !tag)
+        return;
+    if (max_lines <= 0 || max_lines > 256)
+        max_lines = 80;
+    if (stat(path, &st) != 0 || st.st_size <= 0) {
+        fprintf(stderr,
+                "[desktop] %s tail unavailable reason=%s errno=%d (%s)\n",
+                tag, reason ? reason : "(none)", errno, strerror(errno));
+        return;
+    }
+    fd = open(path, O_RDONLY);
+    if (fd < 0) {
+        fprintf(stderr,
+                "[desktop] %s tail open failed reason=%s errno=%d (%s)\n",
+                tag, reason ? reason : "(none)", errno, strerror(errno));
+        return;
+    }
+    if (st.st_size > TAIL_BUF) {
+        start_off = st.st_size - TAIL_BUF;
+        lseek(fd, start_off, SEEK_SET);
+    }
+    while (total < TAIL_BUF) {
+        ssize_t n = read(fd, buf + total, TAIL_BUF - (size_t)total);
+
+        if (n < 0) {
+            if (errno == EINTR)
+                continue;
+            break;
+        }
+        if (n == 0)
+            break;
+        total += n;
+    }
+    close(fd);
+    if (total <= 0)
+        return;
+    buf[total] = '\0';
+    end = buf + total;
+    start = buf;
+    for (p = end - 1; p >= buf; p--) {
+        if (*p == '\n' && ++lines > max_lines) {
+            start = p + 1;
+            break;
+        }
+    }
+
+    fprintf(stderr,
+            "[desktop] %s tail reason=%s bytes=%ld scanned=%ld lines=%d\n",
+            tag, reason ? reason : "(none)", (long)st.st_size,
+            (long)total, lines < max_lines ? lines : max_lines);
+    while (start < end) {
+        size_t len = 0;
+
+        while (start < end && (*start == '\n' || *start == '\r'))
+            start++;
+        while (start < end && *start != '\n' && *start != '\r') {
+            if (len + 1 < sizeof(line))
+                line[len++] = *start;
+            start++;
+        }
+        line[len] = '\0';
+        if (len > 0)
+            fprintf(stderr, "[desktop] %sTAIL: %s\n", tag, line);
     }
 }
 
@@ -5355,6 +5438,8 @@ int main(int argc, char **argv)
             if (exited == compositor_pid) {
                 fprintf(stderr, "[desktop] compositor exited (status %d)\n",
                         WEXITSTATUS(status));
+                desktop_dump_text_log_tail("/tmp/weston.log", "WESTON",
+                                           "compositor-exit", 80);
                 compositor_pid = 0;
                 break;  /* compositor gone → session over */
             } else if (exited == glsmoke_pid) {
