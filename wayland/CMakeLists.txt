@@ -17,7 +17,7 @@ set(DIRECTX_HEADERS_DIR
 set(DESKTOP_INCLUDE_SRCS
     ${WAYLAND_SRC_DIR}/desktop_clients.inc)
 
-foreach(_src desktop.c filemgr.c glsmoke.c glmaze.c peanutgb.c mesaglsmoke.c mesawlegl.c mesakmsgl.c mesademo.c gl_program.c gl_program.h gl_fps_overlay.c gl_fps_overlay.h mesawlegl_sphere.c mesawlegl_sphere.h pixel_fps_overlay.c pixel_fps_overlay.h xv6_draw.c xv6_draw.h xv6_titlebar.c xv6_titlebar.h xv6_titlebar_gl.c xv6_titlebar_gl.h xv6_icon.c xv6_icon.h xv6_icon_filemgr.c xv6_icon_glmaze.c xv6_present_buffer.c xv6_present_buffer.h mesaeglinfo.c mesaglfeature.c mesad3d12probe.c gpu_substrate_validate.c dmabufsmoke.c d3d12sharedsmoke.c drmgpuprobe.c webkitgpusmoke.c cursorsmoke.c xv6_egl_gles.c webkit_preload_wrapper.c webkit_uri_interpose.c install_webkit_preload_wrappers.sh font8x16.h)
+foreach(_src desktop.c desktop_launchers.c filemgr.c glsmoke.c glmaze.c peanutgb.c mesaglsmoke.c mesawlegl.c mesakmsgl.c mesademo.c gl_program.c gl_program.h gl_fps_overlay.c gl_fps_overlay.h mesawlegl_sphere.c mesawlegl_sphere.h pixel_fps_overlay.c pixel_fps_overlay.h xv6_draw.c xv6_draw.h xv6_titlebar.c xv6_titlebar.h xv6_titlebar_gl.c xv6_titlebar_gl.h xv6_icon.c xv6_icon.h xv6_icon_filemgr.c xv6_icon_glmaze.c xv6_present_buffer.c xv6_present_buffer.h mesaeglinfo.c mesaglfeature.c mesad3d12probe.c gpu_substrate_validate.c dmabufsmoke.c d3d12sharedsmoke.c drmgpuprobe.c webkitgpusmoke.c cursorsmoke.c xv6_egl_gles.c webkit_preload_wrapper.c webkit_uri_interpose.c install_webkit_preload_wrappers.sh font8x16.h)
     if(NOT EXISTS "${WAYLAND_SRC_DIR}/${_src}")
         message(FATAL_ERROR "ports/wayland: missing ${WAYLAND_SRC_DIR}/${_src}")
     endif()
@@ -76,6 +76,7 @@ set(_cursorsmoke_bin ${_wl_build}/cursorsmoke)
 set(_d3d12sharedsmoke_bin ${_wl_build}/d3d12sharedsmoke)
 set(_drmgpuprobe_bin ${_wl_build}/drmgpuprobe)
 set(_webkitgpusmoke_bin ${_wl_build}/webkitgpusmoke)
+set(_desktop_launcher_bin ${_wl_build}/xv6-desktop-launcher)
 set(_fault_trace_lib ${_wl_build}/xv6_glibc_fault_trace.so)
 set(_webkit_uri_interpose_lib ${_wl_build}/libxv6webkituri.so)
 set(_xv6egl_obj   ${_wl_build}/xv6_egl_gles.o)
@@ -103,6 +104,16 @@ set(_cursorsmoke_installed ${XV6_SYSROOT}/bin/cursorsmoke)
 set(_d3d12sharedsmoke_installed ${XV6_SYSROOT}/bin/d3d12sharedsmoke)
 set(_drmgpuprobe_installed ${XV6_SYSROOT}/bin/drmgpuprobe)
 set(_webkitgpusmoke_installed ${XV6_SYSROOT}/bin/webkitgpusmoke)
+set(_desktop_launcher_installed
+    ${XV6_SYSROOT}/bin/xv6-open-files-root
+    ${XV6_SYSROOT}/bin/xv6-open-files-proc
+    ${XV6_SYSROOT}/bin/xv6-open-files-etc
+    ${XV6_SYSROOT}/bin/xv6-open-python
+    ${XV6_SYSROOT}/bin/xv6-open-editor
+    ${XV6_SYSROOT}/bin/xv6-open-gl-sphere
+    ${XV6_SYSROOT}/bin/xv6-open-egl-demo
+    ${XV6_SYSROOT}/bin/xv6-open-game-boy
+    ${XV6_SYSROOT}/bin/xv6-open-webkit)
 set(_fault_trace_installed ${XV6_SYSROOT}/lib/xv6_glibc_fault_trace.so)
 set(_webkit_uri_interpose_installed ${XV6_SYSROOT}/lib/libxv6webkituri.so)
 set(_webkit_preload_wrapper_bin ${_wl_build}/webkit-preload-wrapper)
@@ -207,6 +218,15 @@ add_custom_command(
                 -ldl
     DEPENDS ${WAYLAND_SRC_DIR}/webkit_uri_interpose.c
     COMMENT "Compiling WebKit URI canonicalization interposer"
+    VERBATIM)
+
+add_custom_command(
+    OUTPUT  ${_desktop_launcher_bin}
+    COMMAND ${CMAKE_C_COMPILER} ${_wayland_opt_cflags} -Wall
+                -o ${_desktop_launcher_bin}
+                ${WAYLAND_SRC_DIR}/desktop_launchers.c
+    DEPENDS ${WAYLAND_SRC_DIR}/desktop_launchers.c
+    COMMENT "Compiling desktop ELF launchers"
     VERBATIM)
 
 add_custom_command(
@@ -775,6 +795,7 @@ add_custom_command(
             ${_dmabufsmoke_installed} ${_cursorsmoke_installed}
             ${_d3d12sharedsmoke_installed}
             ${_drmgpuprobe_installed} ${_webkitgpusmoke_installed}
+            ${_desktop_launcher_installed}
             ${_fault_trace_installed} ${_webkit_uri_interpose_installed}
             ${_dnd_move_cursor} ${_dnd_copy_cursor} ${_dnd_none_cursor}
     COMMAND ${CMAKE_COMMAND} -E rm -f
@@ -803,6 +824,15 @@ add_custom_command(
     COMMAND ${CMAKE_COMMAND} -E copy ${_d3d12sharedsmoke_bin} ${_d3d12sharedsmoke_installed}
     COMMAND ${CMAKE_COMMAND} -E copy ${_drmgpuprobe_bin} ${_drmgpuprobe_installed}
     COMMAND ${CMAKE_COMMAND} -E copy ${_webkitgpusmoke_bin} ${_webkitgpusmoke_installed}
+    COMMAND ${CMAKE_COMMAND} -E copy ${_desktop_launcher_bin} ${XV6_SYSROOT}/bin/xv6-open-files-root
+    COMMAND ${CMAKE_COMMAND} -E copy ${_desktop_launcher_bin} ${XV6_SYSROOT}/bin/xv6-open-files-proc
+    COMMAND ${CMAKE_COMMAND} -E copy ${_desktop_launcher_bin} ${XV6_SYSROOT}/bin/xv6-open-files-etc
+    COMMAND ${CMAKE_COMMAND} -E copy ${_desktop_launcher_bin} ${XV6_SYSROOT}/bin/xv6-open-python
+    COMMAND ${CMAKE_COMMAND} -E copy ${_desktop_launcher_bin} ${XV6_SYSROOT}/bin/xv6-open-editor
+    COMMAND ${CMAKE_COMMAND} -E copy ${_desktop_launcher_bin} ${XV6_SYSROOT}/bin/xv6-open-gl-sphere
+    COMMAND ${CMAKE_COMMAND} -E copy ${_desktop_launcher_bin} ${XV6_SYSROOT}/bin/xv6-open-egl-demo
+    COMMAND ${CMAKE_COMMAND} -E copy ${_desktop_launcher_bin} ${XV6_SYSROOT}/bin/xv6-open-game-boy
+    COMMAND ${CMAKE_COMMAND} -E copy ${_desktop_launcher_bin} ${XV6_SYSROOT}/bin/xv6-open-webkit
     COMMAND ${CMAKE_COMMAND} -E copy ${_fault_trace_lib} ${_fault_trace_installed}
     COMMAND ${CMAKE_COMMAND} -E copy ${_webkit_uri_interpose_lib} ${_webkit_uri_interpose_installed}
     COMMAND bash ${WAYLAND_SRC_DIR}/install_webkit_preload_wrappers.sh
@@ -824,6 +854,7 @@ add_custom_command(
             ${_gbmtest_bin} ${_dmabufsmoke_bin} ${_cursorsmoke_bin}
             ${_d3d12sharedsmoke_bin}
             ${_drmgpuprobe_bin} ${_webkitgpusmoke_bin}
+            ${_desktop_launcher_bin}
             ${_fault_trace_lib} ${_webkit_uri_interpose_lib}
             ${_webkit_preload_wrapper_bin}
             ${_webkit_stage_stamp}
@@ -844,6 +875,7 @@ add_custom_target(port-wayland ALL DEPENDS
     ${_d3d12sharedsmoke_installed}
     ${_drmgpuprobe_installed}
     ${_webkitgpusmoke_installed}
+    ${_desktop_launcher_installed}
     ${_fault_trace_installed}
     ${_webkit_uri_interpose_installed}
     ${_dnd_move_cursor} ${_dnd_copy_cursor} ${_dnd_none_cursor})
@@ -877,6 +909,7 @@ add_custom_target(port-wayland-clean
             ${_dmabufsmoke_installed} ${_cursorsmoke_installed}
             ${_d3d12sharedsmoke_installed}
             ${_drmgpuprobe_installed} ${_webkitgpusmoke_installed}
+            ${_desktop_launcher_installed}
             ${_dnd_move_cursor} ${_dnd_copy_cursor} ${_dnd_none_cursor}
             ${XV6_SYSROOT}/lib/libxv6memshim.so
             ${_webkit_preload_wrapper_bin}

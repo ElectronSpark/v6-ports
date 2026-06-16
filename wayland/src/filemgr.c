@@ -54,6 +54,9 @@ enum file_type {
     FT_DESKTOP,
     FT_HTML,
     FT_TEXT,
+    FT_IMAGE,
+    FT_ARCHIVE,
+    FT_MEDIA,
 };
 
 enum action {
@@ -203,6 +206,30 @@ static int is_html_name(const char *name)
     return has_suffix(name, ".html") || has_suffix(name, ".htm");
 }
 
+static int is_image_name(const char *name)
+{
+    return has_suffix(name, ".png") || has_suffix(name, ".jpg") ||
+           has_suffix(name, ".jpeg") || has_suffix(name, ".gif") ||
+           has_suffix(name, ".bmp") || has_suffix(name, ".ppm") ||
+           has_suffix(name, ".svg") || has_suffix(name, ".ico");
+}
+
+static int is_archive_name(const char *name)
+{
+    return has_suffix(name, ".zip") || has_suffix(name, ".tar") ||
+           has_suffix(name, ".tgz") || has_suffix(name, ".gz") ||
+           has_suffix(name, ".bz2") || has_suffix(name, ".xz") ||
+           has_suffix(name, ".7z");
+}
+
+static int is_media_name(const char *name)
+{
+    return has_suffix(name, ".mp4") || has_suffix(name, ".webm") ||
+           has_suffix(name, ".mkv") || has_suffix(name, ".mov") ||
+           has_suffix(name, ".mp3") || has_suffix(name, ".wav") ||
+           has_suffix(name, ".ogg");
+}
+
 static void path_join(char *out, size_t out_sz, const char *dir,
                       const char *name)
 {
@@ -269,6 +296,12 @@ static enum file_type classify_entry(const char *name, const struct stat *st)
         return FT_HTML;
     if (is_text_name(name))
         return FT_TEXT;
+    if (is_image_name(name))
+        return FT_IMAGE;
+    if (is_archive_name(name))
+        return FT_ARCHIVE;
+    if (is_media_name(name))
+        return FT_MEDIA;
     if (st->st_mode & (S_IXUSR | S_IXGRP | S_IXOTH))
         return FT_EXEC;
     return FT_FILE;
@@ -282,21 +315,11 @@ static const char *type_label(enum file_type type)
     case FT_DESKTOP: return "Shortcut";
     case FT_HTML: return "Web page";
     case FT_TEXT: return "Text";
+    case FT_IMAGE: return "Image";
+    case FT_ARCHIVE: return "Archive";
+    case FT_MEDIA: return "Media";
     case FT_FILE:
     default: return "File";
-    }
-}
-
-static char type_glyph(enum file_type type)
-{
-    switch (type) {
-    case FT_DIR: return 'D';
-    case FT_EXEC: return 'X';
-    case FT_DESKTOP: return 'A';
-    case FT_HTML: return 'W';
-    case FT_TEXT: return 'T';
-    case FT_FILE:
-    default: return 'F';
     }
 }
 
@@ -308,8 +331,80 @@ static uint32_t type_color(enum file_type type)
     case FT_DESKTOP: return 0xFF6EA63D;
     case FT_HTML: return 0xFF3D6E9E;
     case FT_TEXT: return 0xFFA65C3D;
+    case FT_IMAGE: return 0xFF3D8A6E;
+    case FT_ARCHIVE: return 0xFF8A6A3D;
+    case FT_MEDIA: return 0xFF7A5CAD;
     case FT_FILE:
     default: return 0xFF607080;
+    }
+}
+
+static void draw_file_icon_base(uint32_t *fb, int w, int h, int x, int y,
+                                uint32_t body, uint32_t fold)
+{
+    draw_rect(fb, w, h, x + 3, y + 1, 8, 14, body);
+    draw_rect(fb, w, h, x + 11, y + 5, 2, 10, body);
+    draw_rect(fb, w, h, x + 11, y + 2, 1, 1, fold);
+    draw_rect(fb, w, h, x + 10, y + 3, 2, 1, fold);
+    draw_rect(fb, w, h, x + 9, y + 4, 3, 1, fold);
+}
+
+static void draw_type_icon(uint32_t *fb, int w, int h, int x, int y,
+                           enum file_type type)
+{
+    uint32_t color = type_color(type);
+
+    switch (type) {
+    case FT_DIR:
+        draw_rounded_rect(fb, w, h, x + 1, y + 5, 14, 10, 2, 0xFFB98A43);
+        draw_rect(fb, w, h, x + 3, y + 3, 6, 3, 0xFFD5AA62);
+        draw_rect(fb, w, h, x + 3, y + 8, 10, 1, 0xFFE8C77A);
+        break;
+    case FT_EXEC:
+        draw_rounded_rect(fb, w, h, x + 1, y + 1, 14, 14, 3, 0xFF263449);
+        draw_char(fb, w, h, x + 4, y + 4, '>', 0xFFC7D7F0, 1);
+        draw_rect(fb, w, h, x + 10, y + 11, 4, 1, 0xFFC7D7F0);
+        break;
+    case FT_DESKTOP:
+        draw_rounded_rect(fb, w, h, x + 1, y + 1, 14, 14, 3, color);
+        draw_rect(fb, w, h, x + 4, y + 4, 7, 2, 0xFFEAF6DC);
+        draw_rect(fb, w, h, x + 9, y + 4, 2, 7, 0xFFEAF6DC);
+        draw_rect(fb, w, h, x + 7, y + 9, 4, 2, 0xFFEAF6DC);
+        break;
+    case FT_HTML:
+        draw_file_icon_base(fb, w, h, x, y, 0xFFE9F2FF, 0xFF9EC5F0);
+        draw_char(fb, w, h, x + 5, y + 6, 'W', 0xFF275D94, 1);
+        break;
+    case FT_TEXT:
+        draw_file_icon_base(fb, w, h, x, y, 0xFFFFF1DE, 0xFFE2AE79);
+        draw_rect(fb, w, h, x + 5, y + 6, 6, 1, 0xFFA65C3D);
+        draw_rect(fb, w, h, x + 5, y + 9, 7, 1, 0xFFA65C3D);
+        draw_rect(fb, w, h, x + 5, y + 12, 5, 1, 0xFFA65C3D);
+        break;
+    case FT_IMAGE:
+        draw_file_icon_base(fb, w, h, x, y, 0xFFE5FFF4, 0xFF9AD8BE);
+        draw_rect(fb, w, h, x + 5, y + 10, 2, 2, 0xFF3D8A6E);
+        draw_rect(fb, w, h, x + 7, y + 8, 2, 4, 0xFF3D8A6E);
+        draw_rect(fb, w, h, x + 9, y + 6, 3, 6, 0xFF3D8A6E);
+        draw_rect(fb, w, h, x + 6, y + 5, 2, 2, 0xFFF0C84B);
+        break;
+    case FT_ARCHIVE:
+        draw_rounded_rect(fb, w, h, x + 2, y + 2, 12, 12, 2, 0xFFD5A34C);
+        draw_rect(fb, w, h, x + 3, y + 5, 10, 2, 0xFF8A6A3D);
+        draw_rect(fb, w, h, x + 7, y + 2, 2, 12, 0xFFF2D28A);
+        draw_rect(fb, w, h, x + 7, y + 4, 2, 1, 0xFF8A6A3D);
+        draw_rect(fb, w, h, x + 7, y + 8, 2, 1, 0xFF8A6A3D);
+        break;
+    case FT_MEDIA:
+        draw_rounded_rect(fb, w, h, x + 1, y + 2, 14, 12, 3, color);
+        draw_rect(fb, w, h, x + 6, y + 5, 2, 6, 0xFFF0EAFE);
+        draw_rect(fb, w, h, x + 8, y + 6, 2, 4, 0xFFF0EAFE);
+        draw_rect(fb, w, h, x + 10, y + 7, 2, 2, 0xFFF0EAFE);
+        break;
+    case FT_FILE:
+    default:
+        draw_file_icon_base(fb, w, h, x, y, 0xFFE1E8F0, 0xFFAEBBCA);
+        break;
     }
 }
 
@@ -1000,8 +1095,7 @@ static void draw_entries(uint32_t *fb, int w, int h, struct app *app)
         if (e->has_icon)
             xv6_icon_draw(fb, w, h, x0 + 10, y + 5, 12, 12, &e->icon);
         else
-            draw_char(fb, w, h, x0 + 12, y + 3, type_glyph(e->type),
-                      0xFFFFFFFF, 1);
+            draw_type_icon(fb, w, h, x0 + 8, y + 3, e->type);
         draw_text_fit(fb, w, h, x0 + 34, y + 3, list_w - 270, e->name,
                       0xFFE5ECF4);
         draw_text_fit(fb, w, h, x0 + list_w - 220, y + 3, 110,

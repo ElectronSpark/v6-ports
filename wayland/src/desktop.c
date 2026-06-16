@@ -5076,8 +5076,8 @@ static int host_chromium_fbstat_timer_from_cmdline(void)
         timer = cmdline_int_value(buf, "host_chromium_fbstat_timer", timer);
     if (timer < 0)
         timer = 0;
-    if (timer > 3)
-        timer = 3;
+    if (timer > 20)
+        timer = 20;
     return timer;
 }
 

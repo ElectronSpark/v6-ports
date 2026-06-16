@@ -1,0 +1,72 @@
+#include <errno.h>
+#include <stdio.h>
+#include <string.h>
+#include <unistd.h>
+
+static const char *
+base_name(const char *path)
+{
+    const char *slash = strrchr(path, '/');
+    return slash ? slash + 1 : path;
+}
+
+static int
+run(char *const argv[])
+{
+    execv(argv[0], argv);
+    fprintf(stderr, "%s: exec %s failed: %s\n",
+            base_name(argv[0]), argv[0], strerror(errno));
+    return 127;
+}
+
+int
+main(int argc, char **argv)
+{
+    const char *name = (argc > 0 && argv[0]) ? base_name(argv[0]) : "";
+
+    if (strcmp(name, "xv6-open-files-root") == 0) {
+        char *const args[] = { "/bin/filemgr", "/root", NULL };
+        return run(args);
+    }
+    if (strcmp(name, "xv6-open-files-proc") == 0) {
+        char *const args[] = { "/bin/filemgr", "/proc", NULL };
+        return run(args);
+    }
+    if (strcmp(name, "xv6-open-files-etc") == 0) {
+        char *const args[] = { "/bin/filemgr", "/etc", NULL };
+        return run(args);
+    }
+    if (strcmp(name, "xv6-open-python") == 0) {
+        char *const args[] = { "/bin/weston-terminal",
+                               "--shell=/bin/python3.12", NULL };
+        return run(args);
+    }
+    if (strcmp(name, "xv6-open-editor") == 0) {
+        char *const args[] = { "/bin/weston-terminal",
+                               "--shell=/bin/vim", NULL };
+        return run(args);
+    }
+    if (strcmp(name, "xv6-open-gl-sphere") == 0) {
+        char *const args[] = { "/bin/mesaglsmoke", "--demo", NULL };
+        return run(args);
+    }
+    if (strcmp(name, "xv6-open-egl-demo") == 0) {
+        char *const args[] = { "/bin/mesawlegl", "--demo", NULL };
+        return run(args);
+    }
+    if (strcmp(name, "xv6-open-game-boy") == 0) {
+        char *const args[] = {
+            "/bin/peanutgb",
+            "/root/roms/Pokemon_Blue_Version_USA_Europe_SGB_Enhanced.gb",
+            NULL
+        };
+        return run(args);
+    }
+    if (strcmp(name, "xv6-open-webkit") == 0) {
+        char *const args[] = { "/bin/weston-session", "--launch-webkit", NULL };
+        return run(args);
+    }
+
+    fprintf(stderr, "%s: unknown desktop launcher name\n", name);
+    return 127;
+}
