@@ -27,6 +27,9 @@ xv6_port(
                     lib/libweston-15/xwayland.so
                     lib/weston/desktop-shell.so
                     lib/weston/kiosk-shell.so
+                    lib/weston/libexec_weston.so
+                    lib/weston/libexec_weston.so.0
+                    lib/weston/libexec_weston.so.0.0.0
                     libexec/weston-desktop-shell
     CMAKE_ARGS
         -Dbackend-drm=true
@@ -116,3 +119,24 @@ add_custom_command(
     VERBATIM)
 add_custom_target(port-weston-xwayland-runtime DEPENDS ${_xwayland_runtime_stamp})
 add_dependencies(port-weston port-weston-xwayland-runtime)
+
+set(_weston_build "${CMAKE_BINARY_DIR}/weston-build")
+set(_weston_meson_env
+    "PATH=${XV6_SYSROOT}/host-tools/bin:$ENV{PATH}"
+    "PKG_CONFIG_SYSROOT_DIR=${XV6_SYSROOT}"
+    "PKG_CONFIG_LIBDIR=${XV6_SYSROOT}/lib/pkgconfig:${XV6_SYSROOT}/share/pkgconfig"
+    "PKG_CONFIG_PATH="
+    "PKG_CONFIG_PATH_FOR_BUILD=${XV6_SYSROOT}/host-tools/lib/pkgconfig:${XV6_SYSROOT}/host-tools/lib/x86_64-linux-gnu/pkgconfig:${XV6_SYSROOT}/host-tools/share/pkgconfig")
+add_custom_target(port-weston-runtime-refresh
+    COMMAND ${CMAKE_COMMAND} -E env
+            ${_weston_meson_env}
+            meson compile -C "${_weston_build}"
+    COMMAND ${CMAKE_COMMAND} -E env
+            ${_weston_meson_env}
+            "DESTDIR=${XV6_SYSROOT}"
+            meson install -C "${_weston_build}" --no-rebuild
+    COMMENT "Rebuilding/restaging Weston without the aggregate port dependency graph"
+    VERBATIM)
+add_dependencies(port-weston-runtime-refresh
+    port-weston-config
+    port-weston-xwayland-runtime)
