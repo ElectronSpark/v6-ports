@@ -1126,6 +1126,7 @@ static pid_t launch_weston(void)
         char logger_scopes[128] = "";
         char logger_arg[sizeof("--logger-scopes=") + sizeof(logger_scopes)];
         char *argv[12];
+        char software_cursor_env[] = "XV6_WESTON_SOFTWARE_CURSOR=0";
         int argc = 0;
 
         if (have_cmdline && token_is_enabled(cmdline_buf, "weston_kiosk"))
@@ -1137,6 +1138,12 @@ static pid_t launch_weston(void)
                      logger_scopes);
         else
             logger_arg[0] = '\0';
+        if (have_cmdline &&
+            token_is_enabled(cmdline_buf, "weston_hardware_cursor"))
+            software_cursor_env[sizeof(software_cursor_env) - 2] = '0';
+        if (have_cmdline &&
+            token_is_enabled(cmdline_buf, "weston_software_cursor"))
+            software_cursor_env[sizeof(software_cursor_env) - 2] = '1';
 
         argv[argc++] = "weston";
         argv[argc++] = "--backend=drm";
@@ -1161,6 +1168,7 @@ static pid_t launch_weston(void)
             "XCURSOR_PATH=/share/icons",
             "XCURSOR_THEME=Adwaita",
             "XCURSOR_SIZE=24",
+            software_cursor_env,
             "LIBGL_ALWAYS_SOFTWARE=0",
             "GALLIUM_DRIVER=virgl",
             "MESA_LOADER_DRIVER_OVERRIDE=virtio_gpu",
@@ -1178,6 +1186,7 @@ static pid_t launch_weston(void)
             "XCURSOR_PATH=/share/icons",
             "XCURSOR_THEME=Adwaita",
             "XCURSOR_SIZE=24",
+            software_cursor_env,
             "LIBGL_ALWAYS_SOFTWARE=0",
             "GALLIUM_DRIVER=virgl",
             "MESA_LOADER_DRIVER_OVERRIDE=virtio_gpu",
@@ -3889,6 +3898,9 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             "WAYLAND_DISPLAY=wayland-0",
             "DISPLAY=:0",
             "XV6_GUI_SESSION=1",
+            "XCURSOR_PATH=/share/icons",
+            "XCURSOR_THEME=Adwaita",
+            "XCURSOR_SIZE=24",
             chromium_backend_env,
             chromium_multiprocess_env,
             chromium_extra_flags_env,
