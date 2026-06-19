@@ -103,16 +103,6 @@ chmod +x \"\${PKG_CONFIG}\"
 
 cd \"\${NS_SRC}\"
 
-python3 - <<'PY'
-from pathlib import Path
-p = Path(\"frontends/gtk/gui.c\")
-s = p.read_text()
-s = s.replace('strdup(\"Sans\")', 'strdup(\"DejaVu Sans\")')
-s = s.replace('strdup(\"Serif\")', 'strdup(\"DejaVu Sans\")')
-s = s.replace('strdup(\"Monospace\")', 'strdup(\"DejaVu Sans Mono\")')
-p.write_text(s)
-PY
-
 # Makefile.config — frontend selection + USE_* knobs
 cat > Makefile.config << EOF
 override PKGCONFIG := \${PKG_CONFIG}
