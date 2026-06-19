@@ -25,7 +25,6 @@ xv6_port(
         -Drelocatable=false
         -Dtests=false
         -Dinstalled_tests=false
-        -Dbuild-tools=false
         -Dthumbnailer=disabled
         -Dgio_sniffing=false
 )
