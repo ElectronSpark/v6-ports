@@ -17,7 +17,7 @@ set(DIRECTX_HEADERS_DIR
 set(DESKTOP_INCLUDE_SRCS
     ${WAYLAND_SRC_DIR}/desktop_clients.inc)
 
-foreach(_src desktop.c desktop_launchers.c filemgr.c settings.c glsmoke.c glmaze.c peanutgb.c mesaglsmoke.c mesawlegl.c mesakmsgl.c mesademo.c gl_program.c gl_program.h gl_fps_overlay.c gl_fps_overlay.h mesawlegl_sphere.c mesawlegl_sphere.h pixel_fps_overlay.c pixel_fps_overlay.h xv6_draw.c xv6_draw.h xv6_titlebar.c xv6_titlebar.h xv6_titlebar_gl.c xv6_titlebar_gl.h xv6_icon.c xv6_icon.h xv6_icon_filemgr.c xv6_icon_glmaze.c xv6_present_buffer.c xv6_present_buffer.h mesaeglinfo.c mesaglfeature.c mesad3d12probe.c gpu_substrate_validate.c dmabufsmoke.c d3d12sharedsmoke.c drmgpuprobe.c webkitgpusmoke.c cursorsmoke.c xv6_egl_gles.c webkit_preload_wrapper.c webkit_uri_interpose.c install_webkit_preload_wrappers.sh font8x16.h)
+foreach(_src desktop.c desktop_icons.c desktop_launchers.c filemgr.c settings.c glsmoke.c glmaze.c peanutgb.c mesaglsmoke.c mesawlegl.c mesakmsgl.c mesademo.c gl_program.c gl_program.h gl_fps_overlay.c gl_fps_overlay.h mesawlegl_sphere.c mesawlegl_sphere.h pixel_fps_overlay.c pixel_fps_overlay.h xv6_draw.c xv6_draw.h xv6_titlebar.c xv6_titlebar.h xv6_titlebar_gl.c xv6_titlebar_gl.h xv6_icon.c xv6_icon.h xv6_icon_filemgr.c xv6_icon_glmaze.c xv6_present_buffer.c xv6_present_buffer.h mesaeglinfo.c mesaglfeature.c mesad3d12probe.c gpu_substrate_validate.c dmabufsmoke.c d3d12sharedsmoke.c drmgpuprobe.c webkitgpusmoke.c cursorsmoke.c xv6_egl_gles.c webkit_preload_wrapper.c webkit_uri_interpose.c install_webkit_preload_wrappers.sh font8x16.h)
     if(NOT EXISTS "${WAYLAND_SRC_DIR}/${_src}")
         message(FATAL_ERROR "ports/wayland: missing ${WAYLAND_SRC_DIR}/${_src}")
     endif()
@@ -58,6 +58,7 @@ set(_explicit_sync_xml ${CMAKE_CURRENT_SOURCE_DIR}/../wayland-protocols/src/unst
 set(_explicit_sync_client_header ${_wl_proto_dir}/linux-explicit-synchronization-unstable-v1-client-protocol.h)
 set(_explicit_sync_client_code ${_wl_build}/linux-explicit-synchronization-unstable-v1-client-protocol.c)
 set(_weston_session_bin  ${_wl_build}/weston-session)
+set(_desktop_icons_bin ${_wl_build}/xv6-desktop-icons)
 set(_filemgr_bin  ${_wl_build}/filemgr)
 set(_settings_bin ${_wl_build}/xv6-settings)
 set(_glsmoke_bin  ${_wl_build}/glsmoke)
@@ -87,6 +88,7 @@ set(_host_xv6egl_obj  ${_wl_build}/host-xv6_egl_gles.o)
 set(_host_xv6egl_lib  ${_wl_build}/host-libEGL.a)
 set(_host_xv6gles_lib ${_wl_build}/host-libGLESv2.a)
 set(_weston_session_installed ${XV6_SYSROOT}/bin/weston-session)
+set(_desktop_icons_installed ${XV6_SYSROOT}/bin/xv6-desktop-icons)
 set(_filemgr_installed ${XV6_SYSROOT}/bin/filemgr)
 set(_settings_installed ${XV6_SYSROOT}/bin/xv6-settings)
 set(_glsmoke_installed ${XV6_SYSROOT}/bin/glsmoke)
@@ -403,6 +405,33 @@ add_custom_command(
                 ${WAYLAND_SRC_DIR}/gpu_substrate_validate.c
     DEPENDS ${WAYLAND_SRC_DIR}/gpu_substrate_validate.c
     COMMENT "Compiling pure-C GPU substrate validator"
+    VERBATIM)
+
+add_custom_command(
+    OUTPUT  ${_desktop_icons_bin}
+    COMMAND ${CMAKE_C_COMPILER} ${_wayland_opt_cflags} -Wall
+                -isystem ${XV6_SYSROOT}/include
+                -I ${_wl_proto_dir}
+                -I ${XV6_SYSROOT}/include/wayland
+                -I ${WAYLAND_SRC_DIR}
+                -L ${XV6_SYSROOT}/lib
+                -Wl,-rpath-link,${XV6_SYSROOT}/lib
+                -Wl,-rpath,/lib
+                -o ${_desktop_icons_bin}
+                ${WAYLAND_SRC_DIR}/desktop_icons.c
+                ${WAYLAND_SRC_DIR}/xv6_draw.c
+                ${WAYLAND_SRC_DIR}/xv6_present_buffer.c
+                ${_xdg_client_code}
+                -lwayland-client -lffi -lpthread -ldl -lrt -lm
+    DEPENDS ${WAYLAND_SRC_DIR}/desktop_icons.c
+            ${WAYLAND_SRC_DIR}/xv6_draw.c
+            ${WAYLAND_SRC_DIR}/xv6_draw.h
+            ${WAYLAND_SRC_DIR}/font8x16.h
+            ${WAYLAND_SRC_DIR}/xv6_present_buffer.c
+            ${WAYLAND_SRC_DIR}/xv6_present_buffer.h
+            ${_xdg_client_header}
+            ${_xdg_client_code}
+    COMMENT "Compiling xv6 desktop icon surface"
     VERBATIM)
 
 add_custom_command(
@@ -827,6 +856,7 @@ add_custom_command(
 
 add_custom_command(
     OUTPUT  ${_weston_session_installed}
+            ${_desktop_icons_installed}
             ${_filemgr_installed}
             ${_settings_installed}
             ${_glsmoke_installed} ${_glmaze_installed}
@@ -849,6 +879,7 @@ add_custom_command(
             ${XV6_SYSROOT}/bin/desktop
             ${XV6_SYSROOT}/lib/libxv6memshim.so
     COMMAND ${CMAKE_COMMAND} -E copy ${_weston_session_bin} ${_weston_session_installed}
+    COMMAND ${CMAKE_COMMAND} -E copy ${_desktop_icons_bin} ${_desktop_icons_installed}
     COMMAND ${CMAKE_COMMAND} -E copy ${_filemgr_bin} ${_filemgr_installed}
     COMMAND ${CMAKE_COMMAND} -E copy ${_settings_bin} ${_settings_installed}
     COMMAND ${CMAKE_COMMAND} -E copy ${_glsmoke_bin} ${_glsmoke_installed}
@@ -892,7 +923,8 @@ add_custom_command(
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
             ${_adwaita_cursor_dir}/no-drop ${_dnd_none_cursor}
     COMMAND ${CMAKE_COMMAND} -E rm -f ${_egl_installed} ${_gles_installed}
-    DEPENDS ${_weston_session_bin} ${_filemgr_bin} ${_settings_bin}
+    DEPENDS ${_weston_session_bin} ${_desktop_icons_bin}
+            ${_filemgr_bin} ${_settings_bin}
             ${_glsmoke_bin} ${_glmaze_bin} ${_peanutgb_bin}
             ${_mesaglsmoke_bin}
             ${_mesawlegl_bin} ${_mesakmsgl_bin} ${_mesademo_bin}
@@ -911,6 +943,7 @@ add_custom_command(
 
 add_custom_target(port-wayland ALL DEPENDS
     ${_weston_session_installed}
+    ${_desktop_icons_installed}
     ${_filemgr_installed}
     ${_settings_installed}
     ${_glsmoke_installed} ${_glmaze_installed} ${_peanutgb_installed}
@@ -946,6 +979,7 @@ add_custom_target(port-wayland-clean
             ${XV6_SYSROOT}/bin/wlcomp
             ${XV6_SYSROOT}/bin/desktop
             ${_weston_session_installed}
+            ${_desktop_icons_installed}
             ${_filemgr_installed}
             ${_settings_installed}
             ${_glsmoke_installed}

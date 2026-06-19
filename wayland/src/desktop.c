@@ -146,6 +146,7 @@ static volatile sig_atomic_t g_running = 1;
 static volatile sig_atomic_t g_shutdown_requested;
 static volatile sig_atomic_t g_pending_signals[NSIG];
 static pid_t compositor_pid;
+static pid_t desktop_icons_pid;
 static pid_t client_pid;
 static pid_t glsmoke_pid;
 static pid_t httpd_pid;
@@ -4441,6 +4442,7 @@ static void write_webkit_gpu_policy_file(const char *name, int requested_accel,
 
 static void cleanup(void)
 {
+    kill_and_reap(&desktop_icons_pid);
     kill_and_reap(&client_pid);
     kill_and_reap(&glsmoke_pid);
     kill_and_reap(&gst_warmup_pid);
@@ -5829,8 +5831,17 @@ int main(int argc, char **argv)
             fprintf(stderr,
                     "[desktop] legacy netsurf=0 ignored for default "
                     "Weston desktop session\n");
+        desktop_icons_pid = launch_client("/bin/xv6-desktop-icons",
+                                          "xv6-desktop-icons",
+                                          "/root/desktop", NULL, NULL);
+        if (desktop_icons_pid < 0) {
+            perror("[desktop] fork xv6-desktop-icons");
+            cleanup();
+            return 1;
+        }
         fprintf(stderr,
-                "[desktop] desktop icons are provided by weston-desktop-shell\n");
+                "[desktop] desktop icons pid=%d source=/root/desktop\n",
+                desktop_icons_pid);
         if (host_chromium_enabled_by_cmdline()) {
             char chromium_url[WEBKIT_URL_MAX];
 
@@ -5880,6 +5891,14 @@ int main(int argc, char **argv)
                             WIFEXITED(status) ? WEXITSTATUS(status) : status);
                 }
                 glsmoke_pid = 0;
+            } else if (exited == desktop_icons_pid) {
+                if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+                    fprintf(stderr,
+                            "[desktop] desktop icons exited (status %d)\n",
+                            WIFEXITED(status) ? WEXITSTATUS(status) :
+                                                status);
+                }
+                desktop_icons_pid = 0;
             } else if (exited == client_pid) {
                 if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
                     fprintf(stderr, "[desktop] client exited (status %d)\n",
