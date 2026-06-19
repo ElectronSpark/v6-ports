@@ -1119,12 +1119,15 @@ static pid_t launch_weston(void)
     char cmdline_buf[4096] = "";
     char cmdline_env[sizeof("XV6_KERNEL_CMDLINE=") + sizeof(cmdline_buf)];
     int have_cmdline = read_cmdline(cmdline_buf, sizeof(cmdline_buf)) == 0;
+    int use_gl_renderer = xv6_virgl_available();
     pid_t pid = fork();
 
     if (pid == 0) {
         char shell_arg[32] = "--shell=desktop";
         char logger_scopes[128] = "";
         char logger_arg[sizeof("--logger-scopes=") + sizeof(logger_scopes)];
+        const char *renderer_arg = use_gl_renderer ?
+            "--renderer=gl" : "--renderer=pixman";
         char *argv[12];
         char software_cursor_env[] = "XV6_WESTON_SOFTWARE_CURSOR=0";
         int argc = 0;
@@ -1147,7 +1150,7 @@ static pid_t launch_weston(void)
 
         argv[argc++] = "weston";
         argv[argc++] = "--backend=drm";
-        argv[argc++] = "--renderer=gl";
+        argv[argc++] = (char *)renderer_arg;
         argv[argc++] = shell_arg;
         argv[argc++] = "--socket=wayland-0";
         argv[argc++] = "--idle-time=0";
@@ -1158,7 +1161,38 @@ static pid_t launch_weston(void)
             argv[argc++] = logger_arg;
         argv[argc] = NULL;
 
-        char *envp_base[] = {
+        char *envp_pixman_base[] = {
+            "HOME=/",
+            "PATH=/bin:/usr/bin:/libexec",
+            "LD_LIBRARY_PATH=/lib:/usr/lib",
+            "XDG_RUNTIME_DIR=/tmp",
+            "XDG_DATA_DIRS=/share:/usr/share",
+            "XKB_CONFIG_ROOT=/share/X11/xkb",
+            "XCURSOR_PATH=/share/icons",
+            "XCURSOR_THEME=Adwaita",
+            "XCURSOR_SIZE=24",
+            software_cursor_env,
+            "LIBGL_ALWAYS_SOFTWARE=1",
+            "XV6_GUI_SESSION=1",
+            NULL,
+        };
+        char *envp_pixman_cmdline[] = {
+            "HOME=/",
+            "PATH=/bin:/usr/bin:/libexec",
+            "LD_LIBRARY_PATH=/lib:/usr/lib",
+            "XDG_RUNTIME_DIR=/tmp",
+            "XDG_DATA_DIRS=/share:/usr/share",
+            "XKB_CONFIG_ROOT=/share/X11/xkb",
+            "XCURSOR_PATH=/share/icons",
+            "XCURSOR_THEME=Adwaita",
+            "XCURSOR_SIZE=24",
+            software_cursor_env,
+            "LIBGL_ALWAYS_SOFTWARE=1",
+            "XV6_GUI_SESSION=1",
+            cmdline_env,
+            NULL,
+        };
+        char *envp_gl_base[] = {
             "HOME=/",
             "PATH=/bin:/usr/bin:/libexec",
             "LD_LIBRARY_PATH=/lib:/usr/lib",
@@ -1199,7 +1233,10 @@ static pid_t launch_weston(void)
         if (have_cmdline)
             snprintf(cmdline_env, sizeof(cmdline_env), "XV6_KERNEL_CMDLINE=%s",
                      cmdline_buf);
-        execve("/bin/weston", argv, have_cmdline ? envp_cmdline : envp_base);
+        execve("/bin/weston", argv,
+               use_gl_renderer ?
+                   (have_cmdline ? envp_cmdline : envp_gl_base) :
+                   (have_cmdline ? envp_pixman_cmdline : envp_pixman_base));
         fprintf(stderr, "weston: execve failed errno=%d (%s)\n", errno,
                 errno ? strerror(errno) : "no errno from kernel");
         _exit(127);
