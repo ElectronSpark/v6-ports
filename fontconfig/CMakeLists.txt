@@ -18,4 +18,10 @@ xv6_port(
         -Diconv=disabled
         -Ddefault-fonts-dirs=/usr/share/fonts,/usr/local/share/fonts,/share/fonts,/share/netsurf/fonts
         -Dadditional-fonts-dirs=/share/fonts,/share/netsurf/fonts
+    POST_INSTALL_COMMANDS
+        ${CMAKE_COMMAND} -E rm -f
+            ${XV6_SYSROOT}/share/fontconfig/conf.avail/48-guessfamily.conf
+            ${XV6_SYSROOT}/share/fontconfig/conf.avail/49-sansserif.conf
+            ${XV6_SYSROOT}/etc/fonts/conf.d/48-guessfamily.conf
+            ${XV6_SYSROOT}/etc/fonts/conf.d/49-sansserif.conf
 )

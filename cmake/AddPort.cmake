@@ -16,6 +16,8 @@
 #       BUILD_SYSTEM    cmake               # cmake | autoconf | make
 #       OUTPUT_FILES    lib/libz.a include/zlib.h
 #       CMAKE_ARGS      -DZLIB_BUILD_SHARED=OFF -DZLIB_BUILD_STATIC=ON
+#       POST_INSTALL_COMMANDS
+#           ${CMAKE_COMMAND} -E rm -f ${XV6_SYSROOT}/path/to/staged/file
 #       DEPENDS                             # other port targets
 #   )
 #
@@ -72,6 +74,7 @@ function(xv6_port)
                     CPP_LINK_ARGS
                     MAKE_ARGS
                     PATCHES
+                    POST_INSTALL_COMMANDS
                     INSTALL_ARGS)
     cmake_parse_arguments(P "${opts}" "${one_value}" "${multi_value}" ${ARGN})
 
@@ -124,6 +127,10 @@ function(xv6_port)
             ${CMAKE_COMMAND} -E chdir ${_src}
                 sh ${CMAKE_CURRENT_FUNCTION_LIST_DIR}/apply_patches.sh
                 ${_patch_stamp} ${P_PATCHES})
+    endif()
+    set(_post_install_cmd)
+    if(P_POST_INSTALL_COMMANDS)
+        set(_post_install_cmd COMMAND ${P_POST_INSTALL_COMMANDS})
     endif()
 
     # ------------------------------------------------------------------
@@ -364,6 +371,7 @@ function(xv6_port)
         COMMAND ${_cmake_configure}
         COMMAND ${_build_cmd}
         COMMAND ${_install_cmd}
+        ${_post_install_cmd}
         DEPENDS ${_dep_targets} ${_patch_deps} ${P_SOURCE_DEPENDS}
         WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
         COMMENT "Building port ${_name}"
