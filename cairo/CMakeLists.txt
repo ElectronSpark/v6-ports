@@ -8,6 +8,7 @@ xv6_port(
     BUILD_SYSTEM    meson
     MESON_DEFAULT_LIBRARY both
     DEPENDS         pixman freetype fontconfig libpng zlib glib bzip2-symlink
+    SOURCE_DEPENDS  ${CMAKE_CURRENT_LIST_FILE}
     OUTPUT_FILES    lib/libcairo.a
                     lib/libcairo.so
                     lib/libcairo.so.2
@@ -36,4 +37,22 @@ xv6_port(
         -Ddwrite=disabled
         -Dxlib-xcb=disabled
         -Dtests=disabled
+    POST_INSTALL_COMMANDS
+        ${CMAKE_COMMAND} -E rm -f
+            ${XV6_SYSROOT}/lib/libcairo.so
+            ${XV6_SYSROOT}/lib/libcairo.so.2
+            ${XV6_SYSROOT}/lib/libcairo-gobject.so
+            ${XV6_SYSROOT}/lib/libcairo-gobject.so.2
+        COMMAND ${CMAKE_COMMAND} -E create_symlink
+            libcairo.so.2.11805.5
+            ${XV6_SYSROOT}/lib/libcairo.so.2
+        COMMAND ${CMAKE_COMMAND} -E create_symlink
+            libcairo.so.2
+            ${XV6_SYSROOT}/lib/libcairo.so
+        COMMAND ${CMAKE_COMMAND} -E create_symlink
+            libcairo-gobject.so.2.11805.5
+            ${XV6_SYSROOT}/lib/libcairo-gobject.so.2
+        COMMAND ${CMAKE_COMMAND} -E create_symlink
+            libcairo-gobject.so.2
+            ${XV6_SYSROOT}/lib/libcairo-gobject.so
 )
