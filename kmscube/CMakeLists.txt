@@ -11,7 +11,4 @@ xv6_port(
     OUTPUT_FILES    bin/kmscube
     CMAKE_ARGS
         -Dgstreamer=disabled
-        -Dlibpng=disabled
-    PATCHES
-        ${CMAKE_CURRENT_LIST_DIR}/patches/0001-meson-make-libpng-optional.patch
 )

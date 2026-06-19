@@ -21,7 +21,7 @@ xv6_port(
     POST_INSTALL_COMMANDS
         ${CMAKE_COMMAND}
             -DPC_FILE=${XV6_SYSROOT}/lib/pkgconfig/libpng18.pc
-            -DEXTRA_LIBS=-lm
+            "-DEXTRA_LIBS=-lz -lm"
             -P ${CMAKE_CURRENT_LIST_DIR}/../cmake/ExposePkgConfigLibs.cmake
 )
 
