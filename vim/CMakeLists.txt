@@ -20,20 +20,11 @@ if(NOT DEFINED CMAKE_C_COMPILER OR CMAKE_C_COMPILER STREQUAL "")
     message(FATAL_ERROR "ports/vim: -DCMAKE_C_COMPILER=<host-cc> required")
 endif()
 
-get_filename_component(_default_repo_root "${CMAKE_CURRENT_SOURCE_DIR}/../.." ABSOLUTE)
-set(XV6_REPO_ROOT "${_default_repo_root}"
-    CACHE PATH "xv6-os repo root (for scripts/build/patch_vim_exit.sh)")
-
 set(_src "${CMAKE_CURRENT_SOURCE_DIR}/src")
 if(NOT EXISTS "${_src}/src/configure")
     message(FATAL_ERROR
         "ports/vim: src/src/configure missing — run\n"
         "  git submodule update --init --recursive ports/vim/src")
-endif()
-
-set(_patch_script "${XV6_REPO_ROOT}/scripts/build/patch_vim_exit.sh")
-if(NOT EXISTS "${_patch_script}")
-    message(FATAL_ERROR "ports/vim: missing ${_patch_script}")
 endif()
 
 set(_uname_m "x86_64")
@@ -162,7 +153,7 @@ add_custom_command(
     COMMENT "[vim] configure (host glibc)"
     VERBATIM)
 
-# Build: generate osdef.h, scrub conflicting decls, patch mch_exit, then make.
+# Build: generate osdef.h, scrub conflicting decls, then make.
 set(_vim_bin "${_vim_src_build}/vim")
 add_custom_command(
     OUTPUT  ${_vim_bin}
@@ -178,10 +169,20 @@ add_custom_command(
         -e "/extern.*tputs/d"
         -e "/extern.*open(/d"
         ${_vim_src_build}/auto/osdef.h
-    COMMAND ${_patch_script} ${_vim_src_build}/os_unix.c
     COMMAND make -j${XV6_PARALLEL_JOBS} vim
     DEPENDS ${_config_status}
     COMMENT "[vim] build (j=${XV6_PARALLEL_JOBS})"
+    VERBATIM)
+
+set(_vim_launcher "${CMAKE_CURRENT_BINARY_DIR}/vim-launcher")
+add_custom_command(
+    OUTPUT  ${_vim_launcher}
+    COMMAND ${CMAKE_C_COMPILER}
+            -O2 -fPIC
+            -o ${_vim_launcher}
+            ${CMAKE_CURRENT_SOURCE_DIR}/xv6-vim-launcher.c
+    DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/xv6-vim-launcher.c
+    COMMENT "[vim] build local launcher"
     VERBATIM)
 
 # xxd built separately (vim's Makefile doesn't pass full LIBS to it).
@@ -204,7 +205,9 @@ set(_install_stamp "${CMAKE_CURRENT_BINARY_DIR}/.installed")
 add_custom_command(
     OUTPUT  ${_install_stamp}
     COMMAND ${CMAKE_COMMAND} -E make_directory ${XV6_SYSROOT}/bin
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different ${_vim_bin} ${XV6_SYSROOT}/bin/vim
+    COMMAND ${CMAKE_COMMAND} -E make_directory ${XV6_SYSROOT}/libexec
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different ${_vim_bin} ${XV6_SYSROOT}/libexec/vim.real
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different ${_vim_launcher} ${XV6_SYSROOT}/bin/vim
     COMMAND ${CMAKE_COMMAND} -E copy_if_different ${_xxd_bin} ${XV6_SYSROOT}/bin/xxd
     COMMAND ${CMAKE_COMMAND} -E make_directory ${_runtime_dst}
     COMMAND ${CMAKE_COMMAND} -E copy_if_different ${_runtime_src}/defaults.vim  ${_runtime_dst}/defaults.vim
@@ -219,7 +222,7 @@ add_custom_command(
     COMMAND ${CMAKE_COMMAND} -E copy_directory ${_runtime_src}/indent   ${_runtime_dst}/indent
     COMMAND ${CMAKE_COMMAND} -E copy_directory ${_runtime_src}/autoload ${_runtime_dst}/autoload
     COMMAND ${CMAKE_COMMAND} -E touch ${_install_stamp}
-    DEPENDS ${_vim_bin} ${_xxd_bin}
+    DEPENDS ${_vim_bin} ${_vim_launcher} ${_xxd_bin}
     COMMENT "[vim] install -> ${XV6_SYSROOT}"
     VERBATIM)
 
@@ -232,5 +235,6 @@ add_custom_target(port-vim-clean
     COMMAND ${CMAKE_COMMAND} -E rm -f
                 ${_copy_stamp} ${_install_stamp}
                 ${XV6_SYSROOT}/bin/vim ${XV6_SYSROOT}/bin/xxd
+                ${XV6_SYSROOT}/libexec/vim.real
     COMMAND ${CMAKE_COMMAND} -E rm -rf ${_runtime_dst}
     COMMENT "[vim] clean")
