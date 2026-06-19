@@ -912,8 +912,13 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
         if (arg3 == NULL)
             argv_default[3] = NULL;
         const char *minibrowser_url = arg1 ? arg1 : WEBKIT_DEFAULT_URL;
+        int minibrowser_interactive_youtube_compat =
+            is_minibrowser &&
+            !webkit_youtube_compat_disabled_by_cmdline();
         int minibrowser_youtube_compat =
-            is_minibrowser && webkit_youtube_compat_url(minibrowser_url);
+            is_minibrowser &&
+            (webkit_youtube_compat_url(minibrowser_url) ||
+             minibrowser_interactive_youtube_compat);
         const char *minibrowser_feature_flags =
             webkit_request_idle_disabled_by_cmdline() ?
             webkit_feature_flags_no_idle : webkit_feature_flags;
@@ -1565,9 +1570,11 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             }
             fprintf(stderr,
                     "[desktop] MiniBrowser argv js=%d accel=%d dmabuf=%d "
-                    "webgl=%d youtube_compat=%d arg4=%s url=%s\n",
+                    "webgl=%d youtube_compat=%d interactive_yt=%d arg4=%s "
+                    "url=%s\n",
                     minibrowser_js, minibrowser_accel, minibrowser_dmabuf,
                     minibrowser_webgl_smoke, minibrowser_youtube_compat,
+                    minibrowser_interactive_youtube_compat,
                     argv_exec[4] ? argv_exec[4] : "(none)",
                     minibrowser_url);
         }

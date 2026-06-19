@@ -2953,8 +2953,15 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
         if (arg3 == NULL)
             argv_default[3] = NULL;
         const char *minibrowser_url = arg1 ? arg1 : WEBKIT_DEFAULT_URL;
+        int minibrowser_exit_after_load =
+            is_minibrowser && webkit_exit_after_load_enabled_by_cmdline();
+        int minibrowser_interactive_youtube_compat =
+            is_minibrowser && !minibrowser_exit_after_load &&
+            !webkit_youtube_compat_disabled_by_cmdline();
         int minibrowser_youtube_compat =
-            is_minibrowser && webkit_youtube_compat_url(minibrowser_url);
+            is_minibrowser &&
+            (webkit_youtube_compat_url(minibrowser_url) ||
+             minibrowser_interactive_youtube_compat);
         const char *minibrowser_feature_flags =
             webkit_request_idle_disabled_by_cmdline() ?
             webkit_feature_flags_no_idle : webkit_feature_flags;
@@ -4006,9 +4013,6 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
         if (is_minibrowser) {
             int minibrowser_private =
                 !webkit_private_disabled_by_cmdline();
-            int minibrowser_exit_after_load =
-                webkit_exit_after_load_enabled_by_cmdline();
-
             if (minibrowser_accel) {
                 if (minibrowser_js) {
                     if (minibrowser_webgl_smoke)
@@ -4039,10 +4043,12 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
                 argv_remove_arg(argv_exec, "--exit-after-load");
             fprintf(stderr,
                     "[desktop] MiniBrowser argv js=%d accel=%d dmabuf=%d "
-                    "webgl=%d youtube_compat=%d private=%d exit_after_load=%d "
-                    "gst_gl=%d max_avc1=%s arg4=%s url=%s\n",
+                    "webgl=%d youtube_compat=%d interactive_yt=%d "
+                    "private=%d exit_after_load=%d gst_gl=%d max_avc1=%s "
+                    "arg4=%s url=%s\n",
                     minibrowser_js, minibrowser_accel, minibrowser_dmabuf,
                     minibrowser_webgl_smoke, minibrowser_youtube_compat,
+                    minibrowser_interactive_youtube_compat,
                     minibrowser_private, minibrowser_exit_after_load,
                     webkit_use_gst_gl, webkit_gst_max_avc1_value,
                     argv_exec[4] ? argv_exec[4] : "(none)",

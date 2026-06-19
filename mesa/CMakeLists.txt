@@ -21,9 +21,14 @@ set(_mesa_output_files
     lib/libgbm.so.1.0.0
     lib/libgallium-26.2.0-devel.so
     lib/dri/virtio_gpu_dri.so
+    lib/dri/virtio_gpu_drv_video.so
     lib/dri/d3d12_dri.so
     lib/dri/swrast_dri.so
     lib/dri/kms_swrast_dri.so
+    include/va/va.h
+    include/va/va_drm.h
+    include/va/va_version.h
+    lib/pkgconfig/libva.pc
     lib/pkgconfig/egl.pc
     lib/pkgconfig/glesv2.pc
     lib/pkgconfig/gbm.pc
@@ -83,6 +88,28 @@ _mesa_append_existing_source_deps(
     ${CMAKE_CURRENT_SOURCE_DIR}/src/subprojects/DirectX-Headers-1.0/meson_options.txt
 )
 
+set(_mesa_libva_subproject_stamp
+    ${CMAKE_BINARY_DIR}/mesa-libva-subproject.stamp)
+add_custom_command(
+    OUTPUT  ${_mesa_libva_subproject_stamp}
+    COMMAND ${CMAKE_COMMAND} -E rm -f
+            ${XV6_SYSROOT}/lib/libva.so
+            ${XV6_SYSROOT}/lib/libva.so.2
+            ${XV6_SYSROOT}/lib/libva-drm.so
+            ${XV6_SYSROOT}/lib/libva-drm.so.2
+            ${XV6_SYSROOT}/lib/libva-x11.so
+            ${XV6_SYSROOT}/lib/libva-x11.so.2
+    COMMAND meson subprojects download
+            --sourcedir ${CMAKE_CURRENT_SOURCE_DIR}/src
+            libva
+    COMMAND ${CMAKE_COMMAND} -E touch ${_mesa_libva_subproject_stamp}
+    DEPENDS
+            ${CMAKE_CURRENT_LIST_FILE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/src/subprojects/libva.wrap
+    COMMENT "Preparing Mesa libva fallback subproject"
+    VERBATIM)
+list(APPEND _mesa_d3d12_source_deps ${_mesa_libva_subproject_stamp})
+
 if(XV6_MESA_ENABLE_NOUVEAU)
     if(NOT EXISTS "${XV6_MESA_NOUVEAU_VALIDATION_LOG}")
         message(FATAL_ERROR
@@ -138,6 +165,7 @@ xv6_port(
                     zlib
     OUTPUT_FILES    ${_mesa_output_files}
     CMAKE_ARGS
+        --force-fallback-for=libva
         -Dplatforms=wayland
         -Degl-native-platform=wayland
         -Degl=enabled
@@ -152,14 +180,14 @@ xv6_port(
         -Dllvm=disabled
         -Dshared-llvm=disabled
         -Ddraw-use-llvm=false
-        -Dgallium-va=disabled
+        -Dgallium-va=enabled
         -Dgallium-mediafoundation=disabled
         -Dgallium-mediafoundation-test=false
         -Dgallium-d3d10umd=false
         -Dgallium-rusticl=false
         -Dgallium-d3d12-video=disabled
         -Dgallium-d3d12-graphics=enabled
-        -Dvideo-codecs=
+        -Dvideo-codecs=all_free
         -Dshader-cache=disabled
         -Dxmlconfig=disabled
         -Dallow-kcmp=disabled
