@@ -1,0 +1,26 @@
+if(NOT DEFINED PC_FILE)
+    message(FATAL_ERROR "ExposePkgConfigLibs: PC_FILE is required")
+endif()
+
+if(NOT DEFINED EXTRA_LIBS)
+    message(FATAL_ERROR "ExposePkgConfigLibs: EXTRA_LIBS is required")
+endif()
+
+file(READ "${PC_FILE}" _pc_contents)
+string(REGEX MATCH "(\n|^)Libs:[^\n]*" _libs_line "${_pc_contents}")
+if(NOT _libs_line)
+    message(FATAL_ERROR "ExposePkgConfigLibs: ${PC_FILE} has no Libs line")
+endif()
+
+set(_new_libs_line "${_libs_line}")
+separate_arguments(_extra_libs UNIX_COMMAND "${EXTRA_LIBS}")
+foreach(_lib IN LISTS _extra_libs)
+    if(NOT _new_libs_line MATCHES "(^| )${_lib}( |\n|$)")
+        string(APPEND _new_libs_line " ${_lib}")
+    endif()
+endforeach()
+
+if(NOT _new_libs_line STREQUAL _libs_line)
+    string(REPLACE "${_libs_line}" "${_new_libs_line}" _pc_contents "${_pc_contents}")
+    file(WRITE "${PC_FILE}" "${_pc_contents}")
+endif()

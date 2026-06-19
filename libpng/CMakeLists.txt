@@ -18,6 +18,11 @@ xv6_port(
         -DPNG_TOOLS=OFF
         -DZLIB_LIBRARY=${XV6_SYSROOT}/lib/libz.a
         -DZLIB_INCLUDE_DIR=${XV6_SYSROOT}/include
+    POST_INSTALL_COMMANDS
+        ${CMAKE_COMMAND}
+            -DPC_FILE=${XV6_SYSROOT}/lib/pkgconfig/libpng18.pc
+            -DEXTRA_LIBS=-lm
+            -P ${CMAKE_CURRENT_LIST_DIR}/../cmake/ExposePkgConfigLibs.cmake
 )
 
 # libpng's CMake also installs a libpng.a symlink — nothing extra to do.
