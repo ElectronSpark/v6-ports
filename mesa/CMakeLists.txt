@@ -166,6 +166,7 @@ xv6_port(
     OUTPUT_FILES    ${_mesa_output_files}
     CMAKE_ARGS
         --force-fallback-for=libva
+        -Dallow-fallback-for=libva
         -Dplatforms=wayland
         -Degl-native-platform=wayland
         -Degl=enabled
