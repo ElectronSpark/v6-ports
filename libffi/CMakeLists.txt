@@ -49,7 +49,4 @@ xv6_port(
         --enable-static
         --disable-docs
         --disable-multi-os-directory
-        # tramp.c #includes <linux/limits.h>; keep the xv6 sysroot small and
-        # disable static-exec trampolines.
-        --disable-exec-static-tramp
 )
