@@ -2,6 +2,8 @@ cmake_minimum_required(VERSION 3.16)
 project(xv6-port-weston LANGUAGES NONE)
 include(${CMAKE_CURRENT_LIST_DIR}/../cmake/AddPort.cmake)
 
+set(_weston_build "${CMAKE_BINARY_DIR}/weston-build")
+
 xv6_port(
     NAME            weston
     SOURCE_DIR      ${CMAKE_CURRENT_SOURCE_DIR}/src
@@ -20,6 +22,9 @@ xv6_port(
                     wayland-libs
                     wayland-protocols
     OUTPUT_FILES    bin/weston
+                    bin/libexec_weston.so
+                    bin/libexec_weston.so.0
+                    bin/libexec_weston.so.0.0.0
                     bin/weston-terminal
                     lib/libweston-15.so.0
                     lib/libweston-15/drm-backend.so
@@ -63,6 +68,24 @@ xv6_port(
         -Dtest-junit-xml=false
         -Ddoc=false
         -Dperfetto=false
+    POST_INSTALL_COMMANDS
+        ${CMAKE_COMMAND} -E make_directory
+            ${XV6_SYSROOT}/bin
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            ${_weston_build}/frontend/weston
+            ${XV6_SYSROOT}/bin/weston
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            ${XV6_SYSROOT}/lib/weston/libexec_weston.so.0.0.0
+            ${XV6_SYSROOT}/bin/libexec_weston.so.0.0.0
+        COMMAND ${CMAKE_COMMAND} -E rm -f
+            ${XV6_SYSROOT}/bin/libexec_weston.so.0
+            ${XV6_SYSROOT}/bin/libexec_weston.so
+        COMMAND ${CMAKE_COMMAND} -E create_symlink
+            libexec_weston.so.0.0.0
+            ${XV6_SYSROOT}/bin/libexec_weston.so.0
+        COMMAND ${CMAKE_COMMAND} -E create_symlink
+            libexec_weston.so.0
+            ${XV6_SYSROOT}/bin/libexec_weston.so
 )
 
 set(_weston_xv6_config "${XV6_SYSROOT}/etc/xdg/weston/weston.ini")
@@ -120,7 +143,6 @@ add_custom_command(
 add_custom_target(port-weston-xwayland-runtime DEPENDS ${_xwayland_runtime_stamp})
 add_dependencies(port-weston port-weston-xwayland-runtime)
 
-set(_weston_build "${CMAKE_BINARY_DIR}/weston-build")
 set(_weston_meson_env
     "PATH=${XV6_SYSROOT}/host-tools/bin:$ENV{PATH}"
     "PKG_CONFIG_SYSROOT_DIR=${XV6_SYSROOT}"

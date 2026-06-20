@@ -1046,6 +1046,36 @@ stage_host_gdk_x11_if_needed() {
     ln -sf libgdk-3.so.0 "${dst}/lib/libgdk-3.so"
 }
 
+stage_host_gtk_gdk_x11_pair_if_needed() {
+    local webkit_lib="${dst}/lib/libwebkit2gtk-4.1.so.0"
+    local host_gtk
+    local host_gdk
+
+    if ! elf_has_undefined_symbol "${webkit_lib}" "gdk_x11_cursor_get_xcursor"; then
+        return 0
+    fi
+
+    host_gtk="$(find_host_library "libgtk-3.so.0" || true)"
+    host_gdk="$(find_host_library "libgdk-3.so.0" || true)"
+    if [[ -z "${host_gtk}" || -z "${host_gdk}" ]] ||
+       ! elf_exports_symbol "${host_gdk}" "gdk_x11_cursor_get_xcursor"; then
+        echo "ports/webkit: warning: WebKit needs GTK/GDK X11 ABI, but no compatible host GTK/GDK pair was found" >&2
+        return 0
+    fi
+
+    echo "ports/webkit: staging host GTK/GDK pair for WebKit GDK X11 ABI compatibility" >&2
+    rm -f \
+        "${dst}/lib/libgtk-3.so" \
+        "${dst}/lib/libgtk-3.so.0" \
+        "${dst}/lib/libgdk-3.so" \
+        "${dst}/lib/libgdk-3.so.0"
+    cp -L "${host_gtk}" "${dst}/lib/libgtk-3.so.0"
+    cp -L "${host_gdk}" "${dst}/lib/libgdk-3.so.0"
+    chmod 0755 "${dst}/lib/libgtk-3.so.0" "${dst}/lib/libgdk-3.so.0" 2>/dev/null || true
+    ln -sf libgtk-3.so.0 "${dst}/lib/libgtk-3.so"
+    ln -sf libgdk-3.so.0 "${dst}/lib/libgdk-3.so"
+}
+
 stage_host_cairo_xlib_if_needed() {
     local staged_gdk="${dst}/lib/libgdk-3.so.0"
     local staged_cairo="${dst}/lib/libcairo.so.2"
@@ -1492,6 +1522,9 @@ stage_host_needed_closure
 stage_host_png_symbol_isolation
 stage_host_needed_closure
 normalize_staged_gtk3_runtime
+stage_host_gtk_gdk_x11_pair_if_needed
+stage_host_cairo_xlib_if_needed
+stage_host_needed_closure
 
 require_staged_path() {
     local rel="$1"

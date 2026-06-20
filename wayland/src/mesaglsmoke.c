@@ -1139,9 +1139,11 @@ int main(int argc, char **argv)
     int quality_set = 0;
     int rc = 0;
 
-    setenv("LIBGL_ALWAYS_SOFTWARE", "1", 0);
-    setenv("MESA_LOADER_DRIVER_OVERRIDE", "softpipe", 0);
-    setenv("LIBGL_DRIVERS_PATH", "/usr/lib/x86_64-linux-gnu/dri", 0);
+    setenv("EGL_PLATFORM", "surfaceless", 1);
+    setenv("GALLIUM_DRIVER", "softpipe", 1);
+    setenv("LIBGL_ALWAYS_SOFTWARE", "1", 1);
+    setenv("MESA_LOADER_DRIVER_OVERRIDE", "softpipe", 1);
+    setenv("LIBGL_DRIVERS_PATH", "/usr/lib/x86_64-linux-gnu/dri", 1);
 
     for (int i = 1; i < argc; i++) {
         if (strncmp(argv[i], "--seconds=", 10) == 0) {

@@ -33,6 +33,23 @@
 #define SETTINGS_RTF_GATEWAY 0x0002
 #define MODE_CONFIRM_SECONDS 15
 
+static int baseline_trace_enabled(void)
+{
+    int fd;
+    char buf[4096];
+    ssize_t n;
+
+    fd = open("/proc/cmdline", O_RDONLY);
+    if (fd < 0)
+        return 0;
+    n = read(fd, buf, sizeof(buf) - 1);
+    close(fd);
+    if (n <= 0)
+        return 0;
+    buf[n] = '\0';
+    return strstr(buf, "baseline_desktop_entry_smoke=1") != NULL;
+}
+
 struct fb_bitfield_compat {
     uint32_t offset;
     uint32_t length;
@@ -1394,7 +1411,7 @@ static void cleanup(struct app *app)
         wl_display_disconnect(app->display);
 }
 
-static void run_event_loop(struct app *app)
+static const char *run_event_loop(struct app *app)
 {
     int fd = wl_display_get_fd(app->display);
 
@@ -1406,22 +1423,22 @@ static void run_event_loop(struct app *app)
         while ((ret = wl_display_dispatch_pending(app->display)) > 0)
             ;
         if (ret < 0)
-            break;
+            return "dispatch-pending";
 
         timeout_ms = pending_mode_timeout_ms(app);
         if (app->dirty && app->configured)
             commit_frame(app);
         if (wl_display_flush(app->display) < 0)
-            break;
+            return "flush-before-read";
 
         while (wl_display_prepare_read(app->display) != 0) {
             ret = wl_display_dispatch_pending(app->display);
             if (ret < 0)
-                return;
+                return "prepare-dispatch";
         }
         if (wl_display_flush(app->display) < 0) {
             wl_display_cancel_read(app->display);
-            break;
+            return "flush-after-prepare";
         }
 
         pfd.fd = fd;
@@ -1432,7 +1449,7 @@ static void run_event_loop(struct app *app)
             wl_display_cancel_read(app->display);
             if (errno == EINTR)
                 continue;
-            break;
+            return "poll-error";
         }
         if (ret == 0) {
             wl_display_cancel_read(app->display);
@@ -1440,18 +1457,24 @@ static void run_event_loop(struct app *app)
         }
         if (pfd.revents & (POLLIN | POLLHUP | POLLERR)) {
             if (wl_display_read_events(app->display) < 0)
-                break;
+                return "read-events";
         } else {
             wl_display_cancel_read(app->display);
         }
     }
+    return app->running ? "unknown" : "closed";
 }
 
 int main(void)
 {
     struct app app;
+    int trace;
+    const char *loop_reason;
 
     memset(&app, 0, sizeof(app));
+    trace = baseline_trace_enabled();
+    if (trace)
+        fprintf(stderr, "xv6-settings: start\n");
     app.width = APP_W;
     app.height = APP_H;
     app.running = 1;
@@ -1467,8 +1490,17 @@ int main(void)
         cleanup(&app);
         return 1;
     }
+    if (trace)
+        fprintf(stderr, "xv6-settings: wayland-ready configured=%d dirty=%d\n",
+                app.configured, app.dirty);
 
-    run_event_loop(&app);
+    loop_reason = run_event_loop(&app);
+    if (trace)
+        fprintf(stderr,
+                "xv6-settings: event-loop-exit reason=%s running=%d "
+                "configured=%d dirty=%d mode_pending=%d\n",
+                loop_reason, app.running, app.configured, app.dirty,
+                app.mode_pending);
     if (app.mode_pending)
         revert_pending_mode(&app, "Settings closed before confirmation");
 

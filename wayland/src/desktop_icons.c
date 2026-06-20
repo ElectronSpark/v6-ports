@@ -2,6 +2,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -69,6 +70,8 @@ struct app {
     int entry_count;
     time_t dir_mtime;
     int selected;
+    int hovered;
+    int pressed;
     int last_click_entry;
     uint32_t last_click_ms;
     int pointer_x;
@@ -80,6 +83,8 @@ struct app {
     int configured;
     int dirty;
     int running;
+    int trace;
+    FILE *trace_fp;
 };
 
 static uint32_t now_ms(void)
@@ -212,11 +217,42 @@ static int load_entries(struct app *app)
     qsort(app->entries, (size_t)count, sizeof(app->entries[0]), entry_cmp);
     app->entry_count = count;
     app->selected = -1;
+    app->hovered = -1;
+    app->pressed = -1;
     app->last_click_entry = -1;
     if (stat(app->dir, &dst) == 0)
         app->dir_mtime = dst.st_mtime;
     app->dirty = 1;
     return 0;
+}
+
+static int cmdline_has_token(const char *token)
+{
+    int fd;
+    char buf[4096];
+    ssize_t n;
+
+    fd = open("/proc/cmdline", O_RDONLY);
+    if (fd < 0)
+        return 0;
+    n = read(fd, buf, sizeof(buf) - 1);
+    close(fd);
+    if (n <= 0)
+        return 0;
+    buf[n] = '\0';
+    return strstr(buf, token) != NULL;
+}
+
+static void tracef(struct app *app, const char *fmt, ...)
+{
+    va_list ap;
+
+    if (!app->trace_fp)
+        return;
+    va_start(ap, fmt);
+    vfprintf(app->trace_fp, fmt, ap);
+    va_end(ap);
+    fflush(app->trace_fp);
 }
 
 static void maybe_reload_entries(struct app *app)
@@ -282,12 +318,16 @@ static int parse_desktop_exec(const char *path, char *exec_path,
     return exec_path[0] ? 0 : -1;
 }
 
-static void launch_exec(const char *path, const char *name, const char *arg)
+static void launch_exec(struct app *app, const char *path, const char *name,
+                        const char *arg)
 {
     pid_t pid = fork();
 
-    if (pid < 0)
+    if (pid < 0) {
+        tracef(app, "xv6-desktop-icons: fork failed path='%s' errno=%d\n",
+               path, errno);
         return;
+    }
     if (pid == 0) {
         int logfd;
 
@@ -305,27 +345,33 @@ static void launch_exec(const char *path, const char *name, const char *arg)
             execl(path, name ? name : base_name(path), NULL);
         _exit(127);
     }
+    tracef(app, "xv6-desktop-icons: forked pid=%d path='%s' name='%s'\n",
+           (int)pid, path, name ? name : base_name(path));
     waitpid(pid, NULL, WNOHANG);
 }
 
-static void launch_entry(const struct desktop_entry *e)
+static void launch_entry(struct app *app, const struct desktop_entry *e)
 {
+    tracef(app,
+           "xv6-desktop-icons: launch name='%s' path='%s' kind=%d "
+           "mode=%o link=%d\n",
+           e->name, e->path, e->kind, (unsigned)e->mode, e->is_link);
     if (e->kind == ENTRY_DIR) {
-        launch_exec("/bin/filemgr", "filemgr", e->path);
+        launch_exec(app, "/bin/filemgr", "filemgr", e->path);
     } else if (e->kind == ENTRY_DESKTOP) {
         char exec_path[PATH_MAX];
         char exec_arg[PATH_MAX];
 
         if (parse_desktop_exec(e->path, exec_path, sizeof(exec_path),
                                exec_arg, sizeof(exec_arg)) == 0)
-            launch_exec(exec_path, base_name(exec_path),
+            launch_exec(app, exec_path, base_name(exec_path),
                         exec_arg[0] ? exec_arg : NULL);
     } else if (e->kind == ENTRY_SCRIPT &&
                !(e->mode & (S_IXUSR | S_IXGRP | S_IXOTH))) {
-        launch_exec("/bin/sh", "sh", e->path);
+        launch_exec(app, "/bin/sh", "sh", e->path);
     } else if (e->kind == ENTRY_PROGRAM || e->kind == ENTRY_SCRIPT ||
                e->kind == ENTRY_LINK) {
-        launch_exec(e->path, base_name(e->path), NULL);
+        launch_exec(app, e->path, base_name(e->path), NULL);
     }
 }
 
@@ -373,7 +419,8 @@ static void display_label(const char *name, char *line1, size_t line1_sz,
 }
 
 static void draw_entry_icon(uint32_t *fb, int w, int h,
-                            const struct desktop_entry *e, int selected)
+                            const struct desktop_entry *e, int selected,
+                            int hovered, int pressed)
 {
     uint32_t tile = selected ? 0xFF2F6CA5 : 0xBB102033;
     uint32_t accent = 0xFF6FD6FF;
@@ -398,9 +445,19 @@ static void draw_entry_icon(uint32_t *fb, int w, int h,
         glyph = '.';
     }
 
-    if (selected)
+    if (pressed)
+        draw_rounded_rect(fb, w, h, e->x + 7, e->y, e->w - 14,
+                          e->h - 4, 8, 0xFF1F5F8F);
+    else if (selected)
         draw_rounded_rect(fb, w, h, e->x + 8, e->y, e->w - 16, e->h - 4, 8,
                           0xFF2E6FA9);
+    else if (hovered)
+        draw_rounded_rect(fb, w, h, e->x + 8, e->y, e->w - 16,
+                          e->h - 4, 8, 0x663C7FA7);
+    if (hovered && !pressed)
+        tile = selected ? 0xFF3A7EB8 : 0xDD1B4157;
+    if (pressed)
+        tile = 0xFF184966;
     draw_rounded_rect(fb, w, h, ix, iy, ICON_SIZE, ICON_SIZE, 8, tile);
     if (e->kind == ENTRY_DIR) {
         draw_rounded_rect(fb, w, h, ix + 7, iy + 14, 34, 25, 4, accent);
@@ -449,7 +506,8 @@ static void draw_app(struct app *app)
     layout_entries(app);
     for (int i = 0; i < app->entry_count; i++)
         draw_entry_icon(fb, app->width, app->height, &app->entries[i],
-                        i == app->selected);
+                        i == app->selected, i == app->hovered,
+                        i == app->pressed);
     if (app->entry_count == 0) {
         draw_string(fb, app->width, app->height, GRID_X, GRID_Y,
                     "/root/desktop is empty", 0xFFC9D8E2, 1);
@@ -496,10 +554,29 @@ static int entry_at(struct app *app, int x, int y)
     return -1;
 }
 
+static void update_hover(struct app *app)
+{
+    int idx = entry_at(app, app->pointer_x, app->pointer_y);
+
+    if (idx == app->hovered)
+        return;
+    app->hovered = idx;
+    app->dirty = 1;
+}
+
 static void handle_click(struct app *app, uint32_t time)
 {
     int idx = entry_at(app, app->pointer_x, app->pointer_y);
 
+    if (app->trace_fp) {
+        const char *name = idx >= 0 ? app->entries[idx].name : "(none)";
+        tracef(app,
+               "xv6-desktop-icons: click idx=%d name='%s' x=%d y=%d "
+               "time=%u last=%d last_time=%u delta=%u\n",
+               idx, name, app->pointer_x, app->pointer_y, time,
+               app->last_click_entry, app->last_click_ms,
+               time - app->last_click_ms);
+    }
     if (idx < 0) {
         app->selected = -1;
         app->dirty = 1;
@@ -507,7 +584,7 @@ static void handle_click(struct app *app, uint32_t time)
     }
     if (idx == app->last_click_entry &&
         time - app->last_click_ms < DOUBLE_CLICK_MS)
-        launch_entry(&app->entries[idx]);
+        launch_entry(app, &app->entries[idx]);
     app->selected = idx;
     app->last_click_entry = idx;
     app->last_click_ms = time;
@@ -524,15 +601,19 @@ static void pointer_enter(void *data, struct wl_pointer *pointer,
     (void)surface;
     app->pointer_x = wl_fixed_to_int(sx);
     app->pointer_y = wl_fixed_to_int(sy);
+    update_hover(app);
 }
 
 static void pointer_leave(void *data, struct wl_pointer *pointer,
                           uint32_t serial, struct wl_surface *surface)
 {
-    (void)data;
+    struct app *app = data;
     (void)pointer;
     (void)serial;
     (void)surface;
+    app->hovered = -1;
+    app->pressed = -1;
+    app->dirty = 1;
 }
 
 static void pointer_motion(void *data, struct wl_pointer *pointer,
@@ -543,6 +624,7 @@ static void pointer_motion(void *data, struct wl_pointer *pointer,
     (void)time;
     app->pointer_x = wl_fixed_to_int(sx);
     app->pointer_y = wl_fixed_to_int(sy);
+    update_hover(app);
 }
 
 static void pointer_button(void *data, struct wl_pointer *pointer,
@@ -553,8 +635,21 @@ static void pointer_button(void *data, struct wl_pointer *pointer,
     (void)pointer;
     (void)serial;
 
-    if (button == 0x110 && state == WL_POINTER_BUTTON_STATE_PRESSED)
+    if (button != 0x110)
+        return;
+    tracef(app,
+           "xv6-desktop-icons: button button=0x%x state=%u time=%u "
+           "x=%d y=%d hovered=%d pressed=%d\n",
+           button, state, time, app->pointer_x, app->pointer_y,
+           app->hovered, app->pressed);
+    if (state == WL_POINTER_BUTTON_STATE_PRESSED) {
+        app->pressed = entry_at(app, app->pointer_x, app->pointer_y);
+        app->dirty = 1;
         handle_click(app, time ? time : now_ms());
+    } else if (state == WL_POINTER_BUTTON_STATE_RELEASED) {
+        app->pressed = -1;
+        app->dirty = 1;
+    }
 }
 
 static void pointer_axis(void *data, struct wl_pointer *pointer,
@@ -762,6 +857,8 @@ static void cleanup(struct app *app)
 {
     if (app->display)
         wl_display_roundtrip(app->display);
+    if (app->trace_fp)
+        fclose(app->trace_fp);
     xv6_present_buffer_destroy(&app->buffer);
     if (app->pointer)
         wl_pointer_destroy(app->pointer);
@@ -798,7 +895,12 @@ int main(int argc, char **argv)
     app.width = APP_W;
     app.height = APP_H;
     app.running = 1;
+    app.trace = cmdline_has_token("baseline_desktop_entry_smoke=1");
+    if (app.trace)
+        app.trace_fp = fopen("/tmp/desktop-icons-trace.log", "w");
     app.selected = -1;
+    app.hovered = -1;
+    app.pressed = -1;
     app.last_click_entry = -1;
     app.buffer.fd = -1;
     app.buffer.fb_fd = -1;

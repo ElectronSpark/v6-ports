@@ -91,6 +91,15 @@ add_custom_command(
 add_custom_target(port-gtk3-schemas ALL
     DEPENDS ${_gtk_schemas_compiled})
 
+add_custom_target(port-gtk3-schemas-refresh
+    COMMAND ${CMAKE_COMMAND} -E env
+                "PATH=${XV6_SYSROOT}/host-tools/bin:$ENV{PATH}"
+                ${XV6_SYSROOT}/host-tools/bin/glib-compile-schemas
+                ${_gtk_schemas_dir}
+    DEPENDS port-glib-host
+    COMMENT "Refreshing GTK GSettings schema cache"
+    VERBATIM)
+
 set(_gtk_runtime_links_stamp ${CMAKE_CURRENT_BINARY_DIR}/runtime-links.stamp)
 add_custom_command(
     OUTPUT  ${_gtk_runtime_links_stamp}

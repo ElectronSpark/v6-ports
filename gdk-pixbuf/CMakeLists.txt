@@ -6,8 +6,11 @@ xv6_port(
     NAME            gdk-pixbuf
     SOURCE_DIR      ${CMAKE_CURRENT_SOURCE_DIR}/src
     BUILD_SYSTEM    meson
+    MESON_DEFAULT_LIBRARY both
     DEPENDS         glib libpng libjpeg-turbo glib-host
     OUTPUT_FILES    lib/libgdk_pixbuf-2.0.a
+                    lib/libgdk_pixbuf-2.0.so
+                    lib/libgdk_pixbuf-2.0.so.0
                     include/gdk-pixbuf-2.0/gdk-pixbuf/gdk-pixbuf.h
     CMAKE_ARGS
         -Dpng=enabled

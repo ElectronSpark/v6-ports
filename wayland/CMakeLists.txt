@@ -434,6 +434,13 @@ add_custom_command(
     COMMENT "Compiling xv6 desktop icon surface"
     VERBATIM)
 
+add_custom_target(port-wayland-desktop-icons-install
+    COMMAND ${CMAKE_COMMAND} -E copy ${_desktop_icons_bin}
+            ${_desktop_icons_installed}
+    DEPENDS ${_desktop_icons_bin}
+    COMMENT "Installing xv6 desktop icon surface"
+    VERBATIM)
+
 add_custom_command(
     OUTPUT  ${_filemgr_bin}
     COMMAND ${CMAKE_C_COMPILER} ${_wayland_opt_cflags} -Wall

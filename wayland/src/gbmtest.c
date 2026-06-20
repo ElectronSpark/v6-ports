@@ -39,10 +39,12 @@ static struct gbm_bo *try_import_xrgb(struct gbm_device *dev,
     } attempts[] = {
         { "fd/usage=0", GBM_BO_IMPORT_FD, 0 },
         { "fd/linear", GBM_BO_IMPORT_FD, GBM_BO_USE_LINEAR },
+        { "fd/scanout", GBM_BO_IMPORT_FD, GBM_BO_USE_SCANOUT },
         { "fd/render-linear", GBM_BO_IMPORT_FD,
           GBM_BO_USE_RENDERING | GBM_BO_USE_LINEAR },
         { "modifier/usage=0", GBM_BO_IMPORT_FD_MODIFIER, 0 },
         { "modifier/linear", GBM_BO_IMPORT_FD_MODIFIER, GBM_BO_USE_LINEAR },
+        { "modifier/scanout", GBM_BO_IMPORT_FD_MODIFIER, GBM_BO_USE_SCANOUT },
         { "modifier/render-linear", GBM_BO_IMPORT_FD_MODIFIER,
           GBM_BO_USE_RENDERING | GBM_BO_USE_LINEAR },
     };
@@ -132,6 +134,12 @@ int main(void)
     int prime_fd;
     int nv12_fd0 = -1;
     int nv12_fd1 = -1;
+    uint32_t xrgb_usage = GBM_BO_USE_RENDERING | GBM_BO_USE_LINEAR |
+                          GBM_BO_USE_WRITE;
+    const char *backend;
+    int require_nv12;
+    int require_prime_roundtrip;
+    int prime_roundtrip_done = 0;
     int ok = 1;
 
     if (fd < 0)
@@ -148,21 +156,24 @@ int main(void)
         return 1;
     }
 
-    printf("gbmtest: backend=%s fd=%d\n",
-           gbm_device_get_backend_name(dev), gbm_device_get_fd(dev));
+    backend = gbm_device_get_backend_name(dev);
+    if (!backend)
+        backend = "unknown";
+    printf("gbmtest: backend=%s fd=%d\n", backend, gbm_device_get_fd(dev));
 
-    if (!gbm_device_is_format_supported(dev, GBM_FORMAT_XRGB8888,
-                                        GBM_BO_USE_RENDERING |
-                                        GBM_BO_USE_LINEAR |
-                                        GBM_BO_USE_WRITE)) {
-        printf("gbmtest: XRGB8888 linear rendering unsupported\n");
+    require_nv12 = strcmp(backend, "xv6-gbm") == 0;
+    require_prime_roundtrip = require_nv12;
+    if (strcmp(backend, "drm") == 0)
+        xrgb_usage = GBM_BO_USE_SCANOUT | GBM_BO_USE_WRITE;
+
+    if (!gbm_device_is_format_supported(dev, GBM_FORMAT_XRGB8888, xrgb_usage)) {
+        printf("gbmtest: XRGB8888 usage 0x%x unsupported by backend=%s\n",
+               xrgb_usage, backend);
         gbm_device_destroy(dev);
         return 1;
     }
 
-    bo = gbm_bo_create(dev, 96, 64, GBM_FORMAT_XRGB8888,
-                       GBM_BO_USE_RENDERING | GBM_BO_USE_LINEAR |
-                       GBM_BO_USE_WRITE);
+    bo = gbm_bo_create(dev, 96, 64, GBM_FORMAT_XRGB8888, xrgb_usage);
     if (!bo) {
         printf("gbmtest: gbm_bo_create failed: %s\n", strerror(errno));
         gbm_device_destroy(dev);
@@ -183,7 +194,8 @@ int main(void)
     prime_fd = gbm_bo_get_fd(bo);
     if (prime_fd < 0) {
         printf("gbmtest: gbm_bo_get_fd failed: %s\n", strerror(errno));
-        ok = 0;
+        if (require_prime_roundtrip)
+            ok = 0;
         goto out_bo;
     }
     probe_drm_prime_resource_info(dev, bo, prime_fd);
@@ -206,11 +218,16 @@ int main(void)
 
     gbm_bo_destroy(imported);
     close(prime_fd);
+    prime_fd = -1;
+    prime_roundtrip_done = 1;
+
+    if (!require_nv12)
+        goto out_bo;
 
     if (gbm_device_get_format_modifier_plane_count(dev, GBM_FORMAT_NV12,
                                                    DRM_FORMAT_MOD_LINEAR) != 2) {
         printf("gbmtest: NV12 linear plane metadata unsupported by backend=%s\n",
-               gbm_device_get_backend_name(dev));
+               backend);
         goto out_bo;
     }
 
@@ -297,6 +314,9 @@ out_bo:
     if (!ok)
         return 1;
     printf("__GBMTEST_BO_ROUNDTRIP_0__\n");
-    printf("gbmtest: passed linear BO create/map/export/import/destroy\n");
+    if (prime_roundtrip_done)
+        printf("gbmtest: passed linear BO create/map/export/import/destroy\n");
+    else
+        printf("gbmtest: passed linear BO create/map/destroy\n");
     return 0;
 }

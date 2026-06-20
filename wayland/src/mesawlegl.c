@@ -9,8 +9,10 @@
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
 #include <GLES2/gl2.h>
+#include <errno.h>
 #include <linux/input.h>
 #include <math.h>
+#include <poll.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -45,8 +47,6 @@
 #define WINDOW_H 360
 #define TITLEBAR_H XV6_TITLEBAR_HEIGHT
 #define TITLEBAR_CONTROL_W XV6_TITLEBAR_CONTROL_W
-#define SOFTWARE_DEMO_W 180
-#define SOFTWARE_DEMO_H 135
 #define FPS_TEXT_MAX 16
 #define FPS_EVIDENCE_PATH "/tmp/mesawlegl-fps"
 #define WLCOMP_FPS_PATH "/tmp/wlcomp-fps"
@@ -2284,6 +2284,42 @@ static const struct xdg_toplevel_listener toplevel_listener = {
     .close = toplevel_close,
 };
 
+static int drain_wayland_events(struct app_state *app)
+{
+    struct pollfd pfd;
+    int ret;
+
+    if (!app->display)
+        return -1;
+
+    while (wl_display_prepare_read(app->display) != 0) {
+        ret = wl_display_dispatch_pending(app->display);
+        if (ret < 0)
+            return -1;
+    }
+
+    if (wl_display_flush(app->display) < 0 && errno != EAGAIN) {
+        wl_display_cancel_read(app->display);
+        return -1;
+    }
+
+    pfd.fd = wl_display_get_fd(app->display);
+    pfd.events = POLLIN;
+    pfd.revents = 0;
+    ret = poll(&pfd, 1, 0);
+    if (ret > 0 && (pfd.revents & POLLIN)) {
+        if (wl_display_read_events(app->display) < 0)
+            return -1;
+    } else {
+        wl_display_cancel_read(app->display);
+        if (ret < 0 && errno != EINTR)
+            return -1;
+    }
+
+    ret = wl_display_dispatch_pending(app->display);
+    return ret < 0 ? -1 : 0;
+}
+
 static void pointer_enter(void *data, struct wl_pointer *pointer,
                           uint32_t serial, struct wl_surface *surface,
                           wl_fixed_t sx, wl_fixed_t sy)
@@ -2330,8 +2366,14 @@ static void pointer_button(void *data, struct wl_pointer *pointer,
         xdg_toplevel_move(app->toplevel, app->seat, serial);
         return;
     }
-    if (control == XV6_TITLEBAR_CLOSE)
+    if (control == XV6_TITLEBAR_CLOSE) {
         app->close_requested = 1;
+        app->running = 0;
+        return;
+    }
+    if (app->sphere_demo && app->software_demo &&
+        control == XV6_TITLEBAR_MAXIMIZE)
+        return;
     if (control != XV6_TITLEBAR_NONE)
         xv6_titlebar_activate(control, app->toplevel, &app->maximized,
                               &app->running);
@@ -2811,11 +2853,6 @@ static int run_client(int loop, int seconds, int resize_seconds,
     app.present_interval = present_interval;
     app.pace_us = pace_us;
     if (sphere_demo && software_demo) {
-        if (initial_width == WINDOW_W &&
-            initial_height == WINDOW_H + TITLEBAR_H) {
-            app.width = SOFTWARE_DEMO_W;
-            app.height = SOFTWARE_DEMO_H + TITLEBAR_H;
-        }
         app.max_width = app.width;
         app.max_height = app.height;
     }
@@ -2901,7 +2938,10 @@ static int run_client(int loop, int seconds, int resize_seconds,
             rc = 1;
             break;
         }
-        wl_display_dispatch_pending(app.display);
+        if (drain_wayland_events(&app) < 0) {
+            rc = 1;
+            break;
+        }
         if (app.pace_us > 0) {
             double now = monotonic_seconds();
             double delay;

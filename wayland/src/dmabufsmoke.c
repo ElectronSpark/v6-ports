@@ -249,15 +249,22 @@ static int create_dmabuf_buffer(struct app *app)
             continue;
         }
         backend = gbm_device_get_backend_name(gbm);
-        if (app->use_nv12)
+        if (app->use_nv12) {
+            uint32_t usage = GBM_BO_USE_RENDERING | GBM_BO_USE_WRITE;
+
+            if (backend && strcmp(backend, "drm") == 0)
+                usage = GBM_BO_USE_RENDERING;
             bo = gbm_bo_create_with_modifiers2(gbm, width, height, format,
-                                               &modifier, 1,
-                                               GBM_BO_USE_RENDERING |
-                                               GBM_BO_USE_WRITE);
-        else
+                                               &modifier, 1, usage);
+        } else {
+            uint32_t usage = GBM_BO_USE_RENDERING | GBM_BO_USE_WRITE |
+                             GBM_BO_USE_LINEAR;
+
+            if (backend && strcmp(backend, "drm") == 0)
+                usage = GBM_BO_USE_RENDERING | GBM_BO_USE_LINEAR;
             bo = gbm_bo_create(gbm, width, height, format,
-                               GBM_BO_USE_RENDERING | GBM_BO_USE_WRITE |
-                               GBM_BO_USE_LINEAR);
+                               usage);
+        }
         if (bo) {
             selected_path = gpu_paths[i];
             break;
