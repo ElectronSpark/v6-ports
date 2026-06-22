@@ -13,8 +13,21 @@
 
 #define XV6_UDEV_PRIMARY_NODE "/dev/dri/card0"
 #define XV6_UDEV_RENDER_NODE "/dev/dri/renderD128"
+#define XV6_UDEV_KEYBOARD_NODE "/dev/input/event0"
+#define XV6_UDEV_POINTER_NODE "/dev/input/event1"
 #define XV6_UDEV_PRIMARY_SYSPATH "/sys/dev/char/226:0"
 #define XV6_UDEV_RENDER_SYSPATH "/sys/dev/char/226:128"
+#define XV6_UDEV_KEYBOARD_SYSPATH "/sys/dev/char/13:64"
+#define XV6_UDEV_POINTER_SYSPATH "/sys/dev/char/13:65"
+
+static const char *const xv6_subsystem_syspaths[] = {
+    "/sys/class/drm",
+    "/sys/class/input",
+    "/sys/class/block",
+    "/sys/bus/pci",
+    "/sys/bus/virtio",
+    NULL,
+};
 
 struct udev {
     int refcount;
@@ -30,6 +43,7 @@ struct udev_list_entry {
 struct udev_device {
     int refcount;
     struct udev *udev;
+    struct udev_device *parent;
     char *syspath;
     char *sysname;
     char *sysnum;
@@ -40,12 +54,14 @@ struct udev_device {
     dev_t devnum;
     struct udev_list_entry *properties;
     struct udev_list_entry *sysattrs;
+    struct udev_list_entry *tags;
 };
 
 struct udev_enumerate {
     int refcount;
     struct udev *udev;
     char *match_subsystem;
+    struct udev_list_entry *match_tags;
     struct udev_list_entry *devices;
 };
 
@@ -104,6 +120,16 @@ list_add(struct udev_list_entry **head, const char *name, const char *value)
     return 0;
 }
 
+static bool
+list_contains_name(struct udev_list_entry *head, const char *name)
+{
+    for (; head; head = head->next) {
+        if (head->name && name && strcmp(head->name, name) == 0)
+            return true;
+    }
+    return false;
+}
+
 static const char *
 node_for_syspath(const char *syspath)
 {
@@ -115,6 +141,12 @@ node_for_syspath(const char *syspath)
     if (strcmp(syspath, XV6_UDEV_RENDER_SYSPATH) == 0 ||
         strcmp(syspath, "/sys/class/drm/renderD128") == 0)
         return XV6_UDEV_RENDER_NODE;
+    if (strcmp(syspath, XV6_UDEV_KEYBOARD_SYSPATH) == 0 ||
+        strcmp(syspath, "/sys/class/input/event0") == 0)
+        return XV6_UDEV_KEYBOARD_NODE;
+    if (strcmp(syspath, XV6_UDEV_POINTER_SYSPATH) == 0 ||
+        strcmp(syspath, "/sys/class/input/event1") == 0)
+        return XV6_UDEV_POINTER_NODE;
     return NULL;
 }
 
@@ -127,7 +159,95 @@ syspath_for_node(const char *node)
         return XV6_UDEV_PRIMARY_SYSPATH;
     if (strcmp(node, XV6_UDEV_RENDER_NODE) == 0)
         return XV6_UDEV_RENDER_SYSPATH;
+    if (strcmp(node, XV6_UDEV_KEYBOARD_NODE) == 0)
+        return XV6_UDEV_KEYBOARD_SYSPATH;
+    if (strcmp(node, XV6_UDEV_POINTER_NODE) == 0)
+        return XV6_UDEV_POINTER_SYSPATH;
     return NULL;
+}
+
+static const char *
+subsystem_name_for_syspath(const char *syspath)
+{
+    const char *slash;
+
+    if (!syspath)
+        return NULL;
+    slash = strrchr(syspath, '/');
+    if (!slash || !slash[1])
+        return NULL;
+    return slash + 1;
+}
+
+static bool
+subsystem_matches_filter(const char *syspath, const char *match_subsystem)
+{
+    const char *name = subsystem_name_for_syspath(syspath);
+
+    if (!match_subsystem)
+        return true;
+    return name && strcmp(name, match_subsystem) == 0;
+}
+
+static bool
+known_subsystem_syspath(const char *syspath)
+{
+    for (int i = 0; xv6_subsystem_syspaths[i]; i++) {
+        if (strcmp(syspath, xv6_subsystem_syspaths[i]) == 0)
+            return true;
+    }
+    return false;
+}
+
+static struct udev_device *
+input_parent_new(struct udev *udev, bool keyboard)
+{
+    struct udev_device *dev;
+    const char *input_num = keyboard ? "input0" : "input1";
+    const char *name = keyboard ? "xv6 PS/2 Keyboard" : "xv6 Virtio/PS2 Pointer";
+    const char *phys = keyboard ? "xv6/input0" : "xv6/input1";
+    const char *syspath = keyboard ? "/sys/devices/virtual/input/input0" :
+                                     "/sys/devices/virtual/input/input1";
+
+    dev = calloc(1, sizeof(*dev));
+    if (!dev)
+        return NULL;
+
+    dev->refcount = 1;
+    dev->udev = udev_ref(udev);
+    dev->syspath = xstrdup(syspath);
+    dev->sysname = xstrdup(input_num);
+    dev->subsystem = xstrdup("input");
+    dev->action = xstrdup("add");
+    list_add(&dev->properties, "SUBSYSTEM", "input");
+    list_add(&dev->properties, "ID_INPUT", "1");
+    list_add(&dev->properties, "ID_BUS", "xv6");
+    if (keyboard)
+        list_add(&dev->properties, "ID_INPUT_KEYBOARD", "1");
+    else
+        list_add(&dev->properties, "ID_INPUT_MOUSE", "1");
+    list_add(&dev->sysattrs, "name", name);
+    list_add(&dev->sysattrs, "phys", phys);
+    list_add(&dev->sysattrs, "id/bustype", "0006");
+    list_add(&dev->sysattrs, "id/vendor", "5856");
+    list_add(&dev->sysattrs, "id/product", keyboard ? "0001" : "0002");
+    list_add(&dev->sysattrs, "id/version", "0001");
+    if (keyboard) {
+        list_add(&dev->sysattrs, "capabilities/ev", "120003");
+        list_add(&dev->sysattrs, "capabilities/key",
+                 "ffffffffffffffff ffffffffffffffffffffffff 0 0");
+    } else {
+        list_add(&dev->sysattrs, "capabilities/ev", "b");
+        list_add(&dev->sysattrs, "capabilities/key", "70000 0 0 0 0");
+        list_add(&dev->sysattrs, "capabilities/rel", "103");
+        list_add(&dev->sysattrs, "capabilities/abs", "3");
+        list_add(&dev->sysattrs, "capabilities/prop", "1");
+    }
+    if (!dev->syspath || !dev->sysname || !dev->subsystem || !dev->action) {
+        udev_device_unref(dev);
+        return NULL;
+    }
+    return dev;
 }
 
 static struct udev_device *
@@ -137,6 +257,10 @@ device_new(struct udev *udev, const char *node)
     char buf[64];
     const char *syspath = syspath_for_node(node);
     const char *sysname;
+    bool primary;
+    bool drm;
+    bool keyboard;
+    bool pointer;
 
     if (!udev || !node || !syspath || stat(node, &st) != 0)
         return NULL;
@@ -151,16 +275,25 @@ device_new(struct udev *udev, const char *node)
     dev->udev = udev_ref(udev);
     dev->syspath = xstrdup(syspath);
     dev->devnode = xstrdup(node);
-    dev->subsystem = xstrdup("drm");
-    dev->devtype = xstrdup("drm_minor");
     dev->action = xstrdup("add");
     dev->devnum = st.st_rdev;
     sysname = strrchr(node, '/');
     dev->sysname = xstrdup(sysname ? sysname + 1 : node);
-    dev->sysnum = xstrdup(minor(st.st_rdev) >= 128 ? "128" : "0");
+    dev->sysnum = xstrdup(strncmp(dev->sysname ? dev->sysname : "", "event", 5) == 0
+                              ? (dev->sysname + 5)
+                              : (minor(st.st_rdev) >= 128 ? "128" : "0"));
+    primary = strcmp(node, XV6_UDEV_PRIMARY_NODE) == 0;
+    drm = strncmp(node, "/dev/dri/", 9) == 0;
+    keyboard = strcmp(node, XV6_UDEV_KEYBOARD_NODE) == 0;
+    pointer = strcmp(node, XV6_UDEV_POINTER_NODE) == 0;
+    dev->subsystem = xstrdup(drm ? "drm" : "input");
+    dev->devtype = xstrdup(drm ? "drm_minor" : "input_device");
+    if (!drm)
+        dev->parent = input_parent_new(udev, keyboard);
 
     if (!dev->syspath || !dev->devnode || !dev->subsystem ||
-        !dev->devtype || !dev->action || !dev->sysname || !dev->sysnum) {
+        !dev->devtype || !dev->action || !dev->sysname || !dev->sysnum ||
+        (!drm && !dev->parent)) {
         udev_device_unref(dev);
         return NULL;
     }
@@ -170,13 +303,117 @@ device_new(struct udev *udev, const char *node)
     snprintf(buf, sizeof(buf), "%u", minor(st.st_rdev));
     list_add(&dev->properties, "MINOR", buf);
     list_add(&dev->properties, "DEVNAME", node);
-    list_add(&dev->properties, "SUBSYSTEM", "drm");
-    list_add(&dev->properties, "DEVTYPE", "drm_minor");
     list_add(&dev->properties, "HOTPLUG", "1");
+    list_add(&dev->properties, "ID_SEAT", "seat0");
+    list_add(&dev->properties, "SUBSYSTEM", drm ? "drm" : "input");
+    list_add(&dev->properties, "DEVTYPE", drm ? "drm_minor" : "input_device");
+    list_add(&dev->tags, "seat", "1");
+    list_add(&dev->tags, "uaccess", "1");
+    if (drm) {
+        list_add(&dev->properties, "ID_FOR_SEAT", "drm-virtio_gpu-card0");
+        list_add(&dev->properties, "ID_PATH", "virtio-gpu");
+    } else {
+        list_add(&dev->properties, "ID_INPUT", "1");
+        list_add(&dev->properties, "ID_BUS", "xv6");
+        list_add(&dev->properties, "ID_PATH", "xv6-input");
+        list_add(&dev->properties, "ID_FOR_SEAT",
+                 keyboard ? "input-xv6-keyboard" : "input-xv6-pointer");
+        if (keyboard) {
+            list_add(&dev->properties, "ID_INPUT_KEYBOARD", "1");
+            list_add(&dev->sysattrs, "name", "xv6 PS/2 Keyboard");
+            list_add(&dev->sysattrs, "phys", "xv6/input0");
+            list_add(&dev->sysattrs, "capabilities/ev", "120003");
+            list_add(&dev->sysattrs, "capabilities/key",
+                     "ffffffffffffffff ffffffffffffffffffffffff 0 0");
+        } else if (pointer) {
+            list_add(&dev->properties, "ID_INPUT_MOUSE", "1");
+            list_add(&dev->sysattrs, "name", "xv6 Virtio/PS2 Pointer");
+            list_add(&dev->sysattrs, "phys", "xv6/input1");
+            list_add(&dev->sysattrs, "capabilities/ev", "b");
+            list_add(&dev->sysattrs, "capabilities/key", "70000 0 0 0 0");
+            list_add(&dev->sysattrs, "capabilities/rel", "103");
+            list_add(&dev->sysattrs, "capabilities/abs", "3");
+            list_add(&dev->sysattrs, "capabilities/prop", "1");
+        }
+        list_add(&dev->sysattrs, "id/bustype", "0006");
+        list_add(&dev->sysattrs, "id/vendor", "5856");
+        list_add(&dev->sysattrs, "id/product", keyboard ? "0001" : "0002");
+        list_add(&dev->sysattrs, "id/version", "0001");
+    }
+    if (primary) {
+        list_add(&dev->tags, "master-of-seat", "1");
+        list_add(&dev->properties, "ID_TAG_MASTER_OF_SEAT", "1");
+        list_add(&dev->properties, "TAGS", ":seat:uaccess:master-of-seat:");
+        list_add(&dev->properties, "CURRENT_TAGS", ":seat:uaccess:master-of-seat:");
+    } else {
+        list_add(&dev->properties, "TAGS", ":seat:uaccess:");
+        list_add(&dev->properties, "CURRENT_TAGS", ":seat:uaccess:");
+    }
     snprintf(buf, sizeof(buf), "%u:%u", major(st.st_rdev), minor(st.st_rdev));
     list_add(&dev->sysattrs, "dev", buf);
 
     return dev;
+}
+
+static struct udev_device *
+subsystem_device_new(struct udev *udev, const char *syspath)
+{
+    const char *name = subsystem_name_for_syspath(syspath);
+    struct udev_device *dev;
+
+    if (!udev || !syspath || !name || !known_subsystem_syspath(syspath))
+        return NULL;
+
+    dev = calloc(1, sizeof(*dev));
+    if (!dev)
+        return NULL;
+
+    dev->refcount = 1;
+    dev->udev = udev_ref(udev);
+    dev->syspath = xstrdup(syspath);
+    dev->sysname = xstrdup(name);
+    dev->subsystem = xstrdup("subsystem");
+    dev->devtype = xstrdup("subsystem");
+    dev->action = xstrdup("add");
+
+    if (!dev->syspath || !dev->sysname || !dev->subsystem ||
+        !dev->devtype || !dev->action) {
+        udev_device_unref(dev);
+        return NULL;
+    }
+
+    list_add(&dev->properties, "SUBSYSTEM", name);
+    list_add(&dev->properties, "DEVTYPE", "subsystem");
+    return dev;
+}
+
+static bool
+device_matches_tags(struct udev_device *dev, struct udev_list_entry *match_tags)
+{
+    struct udev_list_entry *entry;
+    if (!match_tags)
+        return true;
+    if (!dev)
+        return false;
+    for (entry = match_tags; entry; entry = entry->next) {
+        if (list_contains_name(dev->tags, entry->name))
+            return true;
+    }
+    return false;
+}
+
+static bool
+node_matches_tags(struct udev *udev, const char *node,
+                  struct udev_list_entry *match_tags)
+{
+    struct udev_device *dev;
+    bool matched;
+    if (!match_tags)
+        return true;
+    dev = device_new(udev, node);
+    matched = device_matches_tags(dev, match_tags);
+    udev_device_unref(dev);
+    return matched;
 }
 
 struct udev *
@@ -244,6 +481,7 @@ udev_enumerate_unref(struct udev_enumerate *e)
     if (e && --e->refcount == 0) {
         udev_unref(e->udev);
         free(e->match_subsystem);
+        list_free(e->match_tags);
         list_free(e->devices);
         free(e);
     }
@@ -300,9 +538,11 @@ udev_enumerate_add_match_sysname(struct udev_enumerate *e, const char *sysname)
 int
 udev_enumerate_add_match_tag(struct udev_enumerate *e, const char *tag)
 {
-    (void)e;
-    (void)tag;
-    return 0;
+    if (!e || !tag)
+        return -EINVAL;
+    if (list_contains_name(e->match_tags, tag))
+        return 0;
+    return list_add(&e->match_tags, tag, NULL);
 }
 
 int
@@ -328,9 +568,13 @@ udev_enumerate_add_nomatch_sysattr(struct udev_enumerate *e,
 int
 udev_enumerate_add_syspath(struct udev_enumerate *e, const char *syspath)
 {
+    const char *node;
     if (!e || !syspath)
         return -EINVAL;
-    if (!node_for_syspath(syspath))
+    node = node_for_syspath(syspath);
+    if (!node)
+        return 0;
+    if (!node_matches_tags(e->udev, node, e->match_tags))
         return 0;
     return list_add(&e->devices, syspath, NULL);
 }
@@ -342,12 +586,41 @@ udev_enumerate_scan_devices(struct udev_enumerate *e)
         return -EINVAL;
     list_free(e->devices);
     e->devices = NULL;
-    if (e->match_subsystem && strcmp(e->match_subsystem, "drm") != 0)
+    if (e->match_subsystem &&
+        strcmp(e->match_subsystem, "drm") != 0 &&
+        strcmp(e->match_subsystem, "input") != 0)
         return 0;
-    if (access(XV6_UDEV_PRIMARY_NODE, F_OK) == 0)
+    if ((!e->match_subsystem || strcmp(e->match_subsystem, "drm") == 0) &&
+        access(XV6_UDEV_PRIMARY_NODE, F_OK) == 0 &&
+        node_matches_tags(e->udev, XV6_UDEV_PRIMARY_NODE, e->match_tags))
         list_add(&e->devices, XV6_UDEV_PRIMARY_SYSPATH, NULL);
-    if (access(XV6_UDEV_RENDER_NODE, F_OK) == 0)
+    if ((!e->match_subsystem || strcmp(e->match_subsystem, "drm") == 0) &&
+        access(XV6_UDEV_RENDER_NODE, F_OK) == 0 &&
+        node_matches_tags(e->udev, XV6_UDEV_RENDER_NODE, e->match_tags))
         list_add(&e->devices, XV6_UDEV_RENDER_SYSPATH, NULL);
+    if ((!e->match_subsystem || strcmp(e->match_subsystem, "input") == 0) &&
+        access(XV6_UDEV_KEYBOARD_NODE, F_OK) == 0 &&
+        node_matches_tags(e->udev, XV6_UDEV_KEYBOARD_NODE, e->match_tags))
+        list_add(&e->devices, XV6_UDEV_KEYBOARD_SYSPATH, NULL);
+    if ((!e->match_subsystem || strcmp(e->match_subsystem, "input") == 0) &&
+        access(XV6_UDEV_POINTER_NODE, F_OK) == 0 &&
+        node_matches_tags(e->udev, XV6_UDEV_POINTER_NODE, e->match_tags))
+        list_add(&e->devices, XV6_UDEV_POINTER_SYSPATH, NULL);
+    return 0;
+}
+
+int
+udev_enumerate_scan_subsystems(struct udev_enumerate *e)
+{
+    if (!e)
+        return -EINVAL;
+    list_free(e->devices);
+    e->devices = NULL;
+    for (int i = 0; xv6_subsystem_syspaths[i]; i++) {
+        if (subsystem_matches_filter(xv6_subsystem_syspaths[i],
+                                     e->match_subsystem))
+            list_add(&e->devices, xv6_subsystem_syspaths[i], NULL);
+    }
     return 0;
 }
 
@@ -413,6 +686,8 @@ udev_device_unref(struct udev_device *dev)
         free(dev->action);
         list_free(dev->properties);
         list_free(dev->sysattrs);
+        list_free(dev->tags);
+        udev_device_unref(dev->parent);
         free(dev);
     }
     return NULL;
@@ -421,7 +696,10 @@ udev_device_unref(struct udev_device *dev)
 struct udev_device *
 udev_device_new_from_syspath(struct udev *udev, const char *syspath)
 {
-    return device_new(udev, node_for_syspath(syspath));
+    struct udev_device *dev = device_new(udev, node_for_syspath(syspath));
+    if (dev)
+        return dev;
+    return subsystem_device_new(udev, syspath);
 }
 
 struct udev_device *
@@ -434,6 +712,10 @@ udev_device_new_from_devnum(struct udev *udev, char type, dev_t devnum)
         return device_new(udev, XV6_UDEV_PRIMARY_NODE);
     if (stat(XV6_UDEV_RENDER_NODE, &st) == 0 && st.st_rdev == devnum)
         return device_new(udev, XV6_UDEV_RENDER_NODE);
+    if (stat(XV6_UDEV_KEYBOARD_NODE, &st) == 0 && st.st_rdev == devnum)
+        return device_new(udev, XV6_UDEV_KEYBOARD_NODE);
+    if (stat(XV6_UDEV_POINTER_NODE, &st) == 0 && st.st_rdev == devnum)
+        return device_new(udev, XV6_UDEV_POINTER_NODE);
     return NULL;
 }
 
@@ -442,12 +724,19 @@ udev_device_new_from_subsystem_sysname(struct udev *udev,
                                        const char *subsystem,
                                        const char *sysname)
 {
-    if (!subsystem || strcmp(subsystem, "drm") != 0 || !sysname)
+    if (!subsystem || !sysname)
         return NULL;
-    if (strcmp(sysname, "card0") == 0)
-        return device_new(udev, XV6_UDEV_PRIMARY_NODE);
-    if (strcmp(sysname, "renderD128") == 0)
-        return device_new(udev, XV6_UDEV_RENDER_NODE);
+    if (strcmp(subsystem, "drm") == 0) {
+        if (strcmp(sysname, "card0") == 0)
+            return device_new(udev, XV6_UDEV_PRIMARY_NODE);
+        if (strcmp(sysname, "renderD128") == 0)
+            return device_new(udev, XV6_UDEV_RENDER_NODE);
+    } else if (strcmp(subsystem, "input") == 0) {
+        if (strcmp(sysname, "event0") == 0)
+            return device_new(udev, XV6_UDEV_KEYBOARD_NODE);
+        if (strcmp(sysname, "event1") == 0)
+            return device_new(udev, XV6_UDEV_POINTER_NODE);
+    }
     return NULL;
 }
 
@@ -464,19 +753,31 @@ const char *udev_device_get_subsystem(struct udev_device *dev) { return dev ? de
 const char *udev_device_get_devtype(struct udev_device *dev) { return dev ? dev->devtype : NULL; }
 const char *udev_device_get_action(struct udev_device *dev) { return dev ? dev->action : NULL; }
 dev_t udev_device_get_devnum(struct udev_device *dev) { return dev ? dev->devnum : 0; }
-const char *udev_device_get_driver(struct udev_device *dev) { return dev ? "virtio_gpu" : NULL; }
+const char *udev_device_get_driver(struct udev_device *dev)
+{
+    if (!dev)
+        return NULL;
+    if (dev->subsystem && strcmp(dev->subsystem, "input") == 0)
+        return "xv6-input";
+    return "virtio_gpu";
+}
 int udev_device_get_is_initialized(struct udev_device *dev) { return dev ? 1 : 0; }
-struct udev_device *udev_device_get_parent(struct udev_device *dev) { (void)dev; return NULL; }
+struct udev_device *udev_device_get_parent(struct udev_device *dev) { return dev ? dev->parent : NULL; }
 
 struct udev_device *
 udev_device_get_parent_with_subsystem_devtype(struct udev_device *dev,
                                               const char *subsystem,
                                               const char *devtype)
 {
-    (void)dev;
-    (void)subsystem;
-    (void)devtype;
-    return NULL;
+    if (!dev || !dev->parent)
+        return NULL;
+    if (subsystem && (!dev->parent->subsystem ||
+        strcmp(dev->parent->subsystem, subsystem) != 0))
+        return NULL;
+    if (devtype && (!dev->parent->devtype ||
+        strcmp(dev->parent->devtype, devtype) != 0))
+        return NULL;
+    return dev->parent;
 }
 
 struct udev_list_entry *
@@ -501,15 +802,13 @@ udev_device_get_devlinks_list_entry(struct udev_device *dev)
 struct udev_list_entry *
 udev_device_get_tags_list_entry(struct udev_device *dev)
 {
-    (void)dev;
-    return NULL;
+    return dev ? dev->tags : NULL;
 }
 
 struct udev_list_entry *
 udev_device_get_current_tags_list_entry(struct udev_device *dev)
 {
-    (void)dev;
-    return NULL;
+    return dev ? dev->tags : NULL;
 }
 
 const char *
@@ -566,9 +865,13 @@ udev_device_set_sysattr_value(struct udev_device *dev,
 int
 udev_device_has_tag(struct udev_device *dev, const char *tag)
 {
-    (void)dev;
-    (void)tag;
-    return 0;
+    return dev && tag && list_contains_name(dev->tags, tag);
+}
+
+int
+udev_device_has_current_tag(struct udev_device *dev, const char *tag)
+{
+    return udev_device_has_tag(dev, tag);
 }
 
 struct udev_monitor *

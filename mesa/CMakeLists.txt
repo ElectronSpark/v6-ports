@@ -251,6 +251,43 @@ add_custom_target(port-mesa-dri-aliases ALL
     VERBATIM)
 add_dependencies(port-mesa-dri-aliases port-mesa)
 
+set(_mesa_build_dir ${CMAKE_BINARY_DIR}/mesa-build)
+add_custom_target(port-mesa-runtime-sanitize ALL
+    COMMAND ${CMAKE_COMMAND} -E make_directory
+            ${XV6_SYSROOT}/lib
+            ${XV6_SYSROOT}/lib/gbm
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            ${_mesa_build_dir}/src/egl/libEGL.so.1.0.0
+            ${XV6_SYSROOT}/lib/libEGL.so.1.0.0
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            ${_mesa_build_dir}/src/mesa/glapi/es2api/libGLESv2.so.2.0.0
+            ${XV6_SYSROOT}/lib/libGLESv2.so.2.0.0
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            ${_mesa_build_dir}/src/gbm/libgbm.so.1.0.0
+            ${XV6_SYSROOT}/lib/libgbm.so.1.0.0
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            ${_mesa_build_dir}/src/gbm/backends/dri/dri_gbm.so
+            ${XV6_SYSROOT}/lib/gbm/dri_gbm.so
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            ${_mesa_build_dir}/src/gallium/targets/dri/libgallium-26.2.0-devel.so
+            ${XV6_SYSROOT}/lib/libgallium-26.2.0-devel.so
+    COMMAND ${CMAKE_COMMAND} -E create_symlink libEGL.so.1.0.0
+            ${XV6_SYSROOT}/lib/libEGL.so.1
+    COMMAND ${CMAKE_COMMAND} -E create_symlink libEGL.so.1
+            ${XV6_SYSROOT}/lib/libEGL.so
+    COMMAND ${CMAKE_COMMAND} -E create_symlink libGLESv2.so.2.0.0
+            ${XV6_SYSROOT}/lib/libGLESv2.so.2
+    COMMAND ${CMAKE_COMMAND} -E create_symlink libGLESv2.so.2
+            ${XV6_SYSROOT}/lib/libGLESv2.so
+    COMMAND ${CMAKE_COMMAND} -E create_symlink libgbm.so.1.0.0
+            ${XV6_SYSROOT}/lib/libgbm.so.1
+    COMMAND ${CMAKE_COMMAND} -E create_symlink libgbm.so.1
+            ${XV6_SYSROOT}/lib/libgbm.so
+    DEPENDS port-mesa
+    COMMENT "Restoring Mesa-owned EGL/GBM/Gallium runtime artifacts"
+    VERBATIM)
+add_dependencies(port-mesa-runtime-sanitize port-mesa)
+
 set(_mesa_wsl_d3d12_runtime_dir "/usr/lib/wsl/lib" CACHE PATH
     "Directory containing the Microsoft WSL D3D12 runtime libraries")
 set(_mesa_wsl_dxcore_src ${_mesa_wsl_d3d12_runtime_dir}/libdxcore.so)

@@ -63,7 +63,7 @@ main(int argc, char **argv)
         strcmp(name, "Game Boy") == 0) {
         char *const args[] = {
             "/bin/peanutgb",
-            "/root/roms/Pokemon_Blue_Version_USA_Europe_SGB_Enhanced.gb",
+            "/root/roms/dmg-acid2.gb",
             NULL
         };
         return run(args);

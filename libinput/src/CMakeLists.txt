@@ -15,6 +15,8 @@ target_include_directories(input PUBLIC
 target_include_directories(input_static PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
     $<INSTALL_INTERFACE:include>)
+target_link_options(input PRIVATE
+    "LINKER:--version-script=${CMAKE_CURRENT_SOURCE_DIR}/libinput.map")
 target_link_libraries(input PRIVATE ${UDEV_LIBRARY})
 target_link_libraries(input_static PRIVATE ${UDEV_LIBRARY})
 

@@ -714,11 +714,18 @@ prepare_host_gst_runtime_cache
 copy_glob() {
     local pattern="$1"
     local matches=()
+    local match
     shopt -s nullglob
     matches=( ${pattern} )
     shopt -u nullglob
     if ((${#matches[@]})); then
-        cp -a "${matches[@]}" "${dst}/lib/"
+        for match in "${matches[@]}"; do
+            if is_guest_graphics_soname "$(basename "${match}")"; then
+                echo "ports/webkit: keeping guest graphics runtime for $(basename "${match}")" >&2
+                continue
+            fi
+            cp -a "${match}" "${dst}/lib/"
+        done
     fi
 }
 
@@ -892,6 +899,11 @@ stage_host_library_soname() {
     local reason="$2"
     local host_lib
 
+    if is_guest_graphics_soname "${soname}"; then
+        echo "ports/webkit: keeping guest graphics runtime for ${soname} (${reason})" >&2
+        return 1
+    fi
+
     host_lib="$(find_host_library "${soname}" || true)"
     if [[ -z "${host_lib}" ]]; then
         echo "ports/webkit: warning: ${reason}, but no host ${soname} was found" >&2
@@ -951,6 +963,18 @@ is_glibc_baseline_soname() {
     return 1
 }
 
+is_guest_graphics_soname() {
+    case "$1" in
+        libEGL.so*|libGL.so*|libGLX.so*|libGLdispatch.so*|\
+        libGLES*.so*|libOpenGL.so*|libglapi.so*|\
+        libgbm.so*|libdrm.so*|libdrm_*.so*|libwayland-*.so*|\
+        libweston-*.so*)
+            return 0
+            ;;
+    esac
+    return 1
+}
+
 queue_elf_if_present() {
     local elf="$1"
     local -n queue_ref="$2"
@@ -1001,6 +1025,7 @@ stage_host_needed_closure() {
 
         while IFS= read -r soname; do
             is_glibc_baseline_soname "${soname}" && continue
+            is_guest_graphics_soname "${soname}" && continue
 
             if ! sysroot_has_library_soname "${soname}"; then
                 stage_host_library_soname "${soname}" "${reason}" || true

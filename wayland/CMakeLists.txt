@@ -976,6 +976,9 @@ endif()
 if(TARGET port-webkit)
     add_dependencies(port-wayland port-webkit)
 endif()
+if(TARGET port-weston)
+    add_dependencies(port-wayland port-weston)
+endif()
 
 add_custom_target(port-wayland-clean
     COMMAND ${CMAKE_COMMAND} -E rm -rf

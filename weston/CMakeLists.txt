@@ -101,43 +101,22 @@ add_custom_command(
 add_custom_target(port-weston-config DEPENDS ${_weston_xv6_config})
 add_dependencies(port-weston port-weston-config)
 
-set(_xwayland_runtime_root
-    "${CMAKE_CURRENT_LIST_DIR}/../../rootfs-overlay/opt/host-gui/xwayland/usr")
-set(_xwayland_server_src "${_xwayland_runtime_root}/bin/Xwayland")
-set(_xwayland_xkbcomp_src "${_xwayland_runtime_root}/bin/xkbcomp")
-set(_xwayland_xkb_data_src "${_xwayland_runtime_root}/share/X11")
 set(_xwayland_runtime_stamp "${CMAKE_CURRENT_BINARY_DIR}/xwayland-runtime.stamp")
 set(_xwayland_wrapper_src "${CMAKE_CURRENT_LIST_DIR}/xwayland-glamor-wrapper.c")
 set(_xwayland_wrapper_bin "${CMAKE_CURRENT_BINARY_DIR}/Xwayland")
+set(_xwayland_stage_script
+    "${CMAKE_CURRENT_LIST_DIR}/../../scripts/image/stage-xwayland-runtime.sh")
 add_custom_command(
     OUTPUT  ${_xwayland_runtime_stamp}
     COMMAND /usr/bin/cc -O2 -Wall -Wextra
             "${_xwayland_wrapper_src}"
             -o "${_xwayland_wrapper_bin}"
-    COMMAND ${CMAKE_COMMAND} -E make_directory "${XV6_SYSROOT}/bin"
-    COMMAND ${CMAKE_COMMAND} -E make_directory "${XV6_SYSROOT}/usr/bin"
-    COMMAND ${CMAKE_COMMAND} -E make_directory "${XV6_SYSROOT}/usr/share"
-    COMMAND ${CMAKE_COMMAND} -E make_directory "${XV6_SYSROOT}/lib"
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "${_xwayland_server_src}"
-            "${XV6_SYSROOT}/bin/Xwayland.real"
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+    COMMAND "${_xwayland_stage_script}"
+            "${XV6_SYSROOT}"
             "${_xwayland_wrapper_bin}"
-            "${XV6_SYSROOT}/bin/Xwayland"
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "${_xwayland_xkbcomp_src}"
-            "${XV6_SYSROOT}/usr/bin/xkbcomp"
-    COMMAND ${CMAKE_COMMAND} -E copy_directory
-            "${_xwayland_runtime_root}/lib/x86_64-linux-gnu"
-            "${XV6_SYSROOT}/lib"
-    COMMAND ${CMAKE_COMMAND} -E copy_directory
-            "${_xwayland_xkb_data_src}"
-            "${XV6_SYSROOT}/usr/share/X11"
     COMMAND ${CMAKE_COMMAND} -E touch ${_xwayland_runtime_stamp}
-    DEPENDS "${_xwayland_server_src}"
-            "${_xwayland_wrapper_src}"
-            "${_xwayland_xkbcomp_src}"
-            "${_xwayland_xkb_data_src}/xkb/keycodes/evdev"
+    DEPENDS "${_xwayland_wrapper_src}"
+            "${_xwayland_stage_script}"
     COMMENT "Installing staged Xwayland runtime"
     VERBATIM)
 add_custom_target(port-weston-xwayland-runtime DEPENDS ${_xwayland_runtime_stamp})

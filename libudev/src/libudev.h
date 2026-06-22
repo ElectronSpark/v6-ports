@@ -47,6 +47,7 @@ int udev_enumerate_add_nomatch_sysattr(struct udev_enumerate *udev_enumerate,
 int udev_enumerate_add_syspath(struct udev_enumerate *udev_enumerate,
                                const char *syspath);
 int udev_enumerate_scan_devices(struct udev_enumerate *udev_enumerate);
+int udev_enumerate_scan_subsystems(struct udev_enumerate *udev_enumerate);
 struct udev *udev_enumerate_get_udev(struct udev_enumerate *udev_enumerate);
 struct udev_list_entry *udev_enumerate_get_list_entry(struct udev_enumerate *udev_enumerate);
 
@@ -96,6 +97,7 @@ int udev_device_set_sysattr_value(struct udev_device *udev_device,
                                   const char *sysattr,
                                   char *value);
 int udev_device_has_tag(struct udev_device *udev_device, const char *tag);
+int udev_device_has_current_tag(struct udev_device *udev_device, const char *tag);
 
 struct udev_monitor *udev_monitor_new_from_netlink(struct udev *udev,
                                                    const char *name);

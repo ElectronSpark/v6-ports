@@ -16,6 +16,20 @@
 #define XV6_BTN_RIGHT  0x111
 #define XV6_BTN_MIDDLE 0x112
 
+#define EV_SYN 0x00
+#define EV_KEY 0x01
+#define EV_REL 0x02
+#define EV_ABS 0x03
+
+#define SYN_REPORT 0
+
+#define REL_X 0x00
+#define REL_Y 0x01
+#define REL_WHEEL 0x08
+
+#define ABS_X 0x00
+#define ABS_Y 0x01
+
 #define XV6_KBD_KEY_UP      0x80
 #define XV6_KBD_KEY_DOWN    0x81
 #define XV6_KBD_KEY_LEFT    0x82
@@ -55,14 +69,28 @@ struct xv6_kbd_event {
     uint8_t modifiers;
 };
 
+struct linux_input_event {
+    uint64_t sec;
+    uint64_t usec;
+    uint16_t type;
+    uint16_t code;
+    int32_t value;
+};
+
 struct libinput_seat {
     const char *name;
+};
+
+struct libinput_device_group {
+    int refcount;
+    void *user_data;
 };
 
 struct libinput_device {
     int refcount;
     void *user_data;
     struct libinput_seat seat;
+    struct libinput_device_group group;
     struct udev *udev;
 };
 
@@ -96,12 +124,24 @@ struct libinput {
     int pipefd[2];
     int mousefd;
     int kbdfd;
+    int evmousefd;
+    int evkbdfd;
     pthread_t mouse_thread;
     pthread_mutex_t lock;
     int assigned;
     int resumed;
     volatile int mouse_thread_running;
     uint8_t buttons;
+    double pending_dx;
+    double pending_dy;
+    int pending_motion;
+    int pending_abs;
+    double pending_abs_x;
+    double pending_abs_y;
+    int pending_wheel;
+    int pending_button_update;
+    uint8_t pending_buttons;
+    int trace;
     libinput_log_handler log_handler;
     enum libinput_log_priority log_priority;
 };
@@ -222,6 +262,62 @@ queue_pointer_axis_locked(struct libinput *li, int dz)
     ev->axis_discrete_v = dz;
 }
 
+static void
+queue_mouse_buttons_locked(struct libinput *li, uint8_t old_buttons,
+                           uint8_t new_buttons);
+
+static void
+queue_evdev_syn_locked(struct libinput *li)
+{
+    struct libinput_event *ev = NULL;
+
+    if (li->trace) {
+        fprintf(stderr,
+                "xv6-libinput: syn abs=%d abs_x=%.0f abs_y=%.0f rel=%d dx=%.0f dy=%.0f wheel=%d buttons=%d old=0x%x new=0x%x\n",
+                li->pending_abs, li->pending_abs_x, li->pending_abs_y,
+                li->pending_motion, li->pending_dx, li->pending_dy,
+                li->pending_wheel, li->pending_button_update,
+                li->buttons, li->pending_buttons);
+    }
+
+    if (li->pending_abs) {
+        if (queue_event_locked(li, LIBINPUT_EVENT_POINTER_MOTION_ABSOLUTE,
+                               &ev) == 0 && ev) {
+            ev->abs_x = li->pending_abs_x;
+            ev->abs_y = li->pending_abs_y;
+        }
+        li->pending_abs = 0;
+        li->pending_dx = 0;
+        li->pending_dy = 0;
+        li->pending_motion = 0;
+    }
+
+    if (li->pending_motion) {
+        ev = NULL;
+        if (queue_event_locked(li, LIBINPUT_EVENT_POINTER_MOTION, &ev) == 0 &&
+            ev) {
+            ev->dx = li->pending_dx;
+            ev->dy = li->pending_dy;
+        }
+        li->pending_dx = 0;
+        li->pending_dy = 0;
+        li->pending_motion = 0;
+    }
+
+    if (li->pending_wheel) {
+        queue_pointer_axis_locked(li, li->pending_wheel);
+        li->pending_wheel = 0;
+    }
+
+    if (li->pending_button_update) {
+        uint8_t old_buttons = li->buttons;
+
+        li->buttons = li->pending_buttons;
+        queue_mouse_buttons_locked(li, old_buttons, li->buttons);
+        li->pending_button_update = 0;
+    }
+}
+
 static uint32_t
 kbd_event_key(const struct xv6_kbd_event *kev)
 {
@@ -329,14 +425,99 @@ dispatch_keyboard(struct libinput *li)
     }
 }
 
+static void
+dispatch_evdev_pointer(struct libinput *li)
+{
+    struct linux_input_event iev;
+
+    if (!li || li->evmousefd < 0)
+        return;
+    while (read(li->evmousefd, &iev, sizeof(iev)) == (ssize_t)sizeof(iev)) {
+        pthread_mutex_lock(&li->lock);
+        if (iev.type == EV_REL) {
+            if (iev.code == REL_X) {
+                li->pending_dx += (double)iev.value;
+                li->pending_motion = 1;
+            } else if (iev.code == REL_Y) {
+                li->pending_dy += (double)iev.value;
+                li->pending_motion = 1;
+            } else if (iev.code == REL_WHEEL) {
+                li->pending_wheel += iev.value;
+            }
+        } else if (iev.type == EV_ABS) {
+            if (iev.code == ABS_X) {
+                li->pending_abs_x = (double)(uint16_t)iev.value;
+                li->pending_abs = 1;
+            } else if (iev.code == ABS_Y) {
+                li->pending_abs_y = (double)(uint16_t)iev.value;
+                li->pending_abs = 1;
+            }
+        } else if (iev.type == EV_KEY) {
+            if (iev.code == XV6_BTN_LEFT || iev.code == XV6_BTN_RIGHT ||
+                iev.code == XV6_BTN_MIDDLE) {
+                uint8_t mask = iev.code == XV6_BTN_LEFT ? 0x01 :
+                               iev.code == XV6_BTN_RIGHT ? 0x02 : 0x04;
+
+                if (!li->pending_button_update)
+                    li->pending_buttons = li->buttons;
+                if (iev.value)
+                    li->pending_buttons |= mask;
+                else
+                    li->pending_buttons &= (uint8_t)~mask;
+                li->pending_button_update = 1;
+                if (li->trace) {
+                    fprintf(stderr,
+                            "xv6-libinput: evkey button=0x%x value=%d pending=0x%x\n",
+                            iev.code, iev.value, li->pending_buttons);
+                }
+            }
+        } else if (iev.type == EV_SYN && iev.code == SYN_REPORT) {
+            queue_evdev_syn_locked(li);
+        }
+        pthread_mutex_unlock(&li->lock);
+        signal_fd(li);
+    }
+}
+
+static void
+dispatch_evdev_keyboard(struct libinput *li)
+{
+    struct linux_input_event iev;
+
+    if (!li || li->evkbdfd < 0)
+        return;
+    while (read(li->evkbdfd, &iev, sizeof(iev)) == (ssize_t)sizeof(iev)) {
+        if (iev.type != EV_KEY)
+            continue;
+        pthread_mutex_lock(&li->lock);
+        {
+            struct libinput_event *ev = NULL;
+
+            if (queue_event_locked(li, LIBINPUT_EVENT_KEYBOARD_KEY, &ev) == 0 &&
+                ev) {
+                ev->key = iev.code;
+                ev->key_state = iev.value ? LIBINPUT_KEY_STATE_PRESSED :
+                                            LIBINPUT_KEY_STATE_RELEASED;
+                ev->seat_button_count = iev.value ? 1 : 0;
+            }
+        }
+        pthread_mutex_unlock(&li->lock);
+        signal_fd(li);
+    }
+}
+
 static void *
 mouse_thread_main(void *arg)
 {
     struct libinput *li = arg;
 
     while (li->mouse_thread_running) {
-        dispatch_mouse(li);
-        dispatch_keyboard(li);
+        dispatch_evdev_pointer(li);
+        dispatch_evdev_keyboard(li);
+        if (li->evmousefd < 0)
+            dispatch_mouse(li);
+        if (li->evkbdfd < 0)
+            dispatch_keyboard(li);
         usleep(5000);
     }
     return NULL;
@@ -357,6 +538,8 @@ libinput_udev_create_context(const struct libinput_interface *interface,
     li->pipefd[1] = -1;
     li->mousefd = -1;
     li->kbdfd = -1;
+    li->evmousefd = -1;
+    li->evkbdfd = -1;
     pthread_mutex_init(&li->lock, NULL);
     if (pipe(li->pipefd) != 0) {
         libinput_unref(li);
@@ -371,10 +554,21 @@ libinput_udev_create_context(const struct libinput_interface *interface,
     }
     li->device->refcount = 1;
     li->device->seat.name = "seat0";
+    li->device->group.refcount = 1;
     li->device->udev = udev_ref(udev);
-    li->mousefd = open("/dev/mouse", O_RDWR | O_NONBLOCK | O_CLOEXEC);
-    li->kbdfd = open("/dev/kbd", O_RDONLY | O_NONBLOCK | O_CLOEXEC);
-    if (li->mousefd >= 0 || li->kbdfd >= 0) {
+    li->evmousefd = open("/dev/input/event1", O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+    li->evkbdfd = open("/dev/input/event0", O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+    li->trace = getenv("XV6_LIBINPUT_TRACE") != NULL;
+    if (li->trace) {
+        fprintf(stderr, "xv6-libinput: create evmousefd=%d evkbdfd=%d\n",
+                li->evmousefd, li->evkbdfd);
+    }
+    if (li->evmousefd < 0)
+        li->mousefd = open("/dev/mouse", O_RDWR | O_NONBLOCK | O_CLOEXEC);
+    if (li->evkbdfd < 0)
+        li->kbdfd = open("/dev/kbd", O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+    if (li->evmousefd >= 0 || li->evkbdfd >= 0 ||
+        li->mousefd >= 0 || li->kbdfd >= 0) {
         li->mouse_thread_running = 1;
         if (pthread_create(&li->mouse_thread, NULL, mouse_thread_main, li) != 0)
             li->mouse_thread_running = 0;
@@ -407,6 +601,10 @@ libinput_unref(struct libinput *li)
         close(li->mousefd);
     if (li->kbdfd >= 0)
         close(li->kbdfd);
+    if (li->evmousefd >= 0)
+        close(li->evmousefd);
+    if (li->evkbdfd >= 0)
+        close(li->evkbdfd);
     if (li->pipefd[0] >= 0)
         close(li->pipefd[0]);
     if (li->pipefd[1] >= 0)
@@ -445,8 +643,12 @@ libinput_dispatch(struct libinput *li)
     while (read(li->pipefd[0], buf, sizeof(buf)) > 0)
         ;
     if (!li->mouse_thread_running) {
-        dispatch_mouse(li);
-        dispatch_keyboard(li);
+        dispatch_evdev_pointer(li);
+        dispatch_evdev_keyboard(li);
+        if (li->evmousefd < 0)
+            dispatch_mouse(li);
+        if (li->evkbdfd < 0)
+            dispatch_keyboard(li);
     }
     return 0;
 }
@@ -662,3 +864,92 @@ int libinput_tablet_tool_has_distance(struct libinput_tablet_tool *tool) { (void
 int libinput_tablet_tool_has_tilt(struct libinput_tablet_tool *tool) { (void)tool; return 0; }
 void libinput_tablet_tool_set_user_data(struct libinput_tablet_tool *tool, void *user_data) { (void)tool; (void)user_data; }
 void *libinput_tablet_tool_get_user_data(struct libinput_tablet_tool *tool) { (void)tool; return NULL; }
+
+double libinput_device_config_accel_get_default_speed(struct libinput_device *device) { (void)device; return 0.0; }
+double libinput_device_config_accel_get_speed(struct libinput_device *device) { (void)device; return 0.0; }
+enum libinput_config_accel_profile libinput_device_config_accel_get_default_profile(struct libinput_device *device) { (void)device; return LIBINPUT_CONFIG_ACCEL_PROFILE_NONE; }
+enum libinput_config_accel_profile libinput_device_config_accel_get_profile(struct libinput_device *device) { (void)device; return LIBINPUT_CONFIG_ACCEL_PROFILE_NONE; }
+
+uint32_t libinput_device_config_click_get_methods(struct libinput_device *device) { (void)device; return 0; }
+uint32_t libinput_device_config_click_get_method(struct libinput_device *device) { (void)device; return 0; }
+uint32_t libinput_device_config_click_get_default_method(struct libinput_device *device) { (void)device; return 0; }
+enum libinput_config_status libinput_device_config_click_set_method(struct libinput_device *device, uint32_t method) { (void)device; (void)method; return LIBINPUT_CONFIG_STATUS_UNSUPPORTED; }
+
+int libinput_device_config_dwt_get_default_enabled(struct libinput_device *device) { (void)device; return 0; }
+int libinput_device_config_dwt_get_enabled(struct libinput_device *device) { (void)device; return 0; }
+int libinput_device_config_left_handed_get(struct libinput_device *device) { (void)device; return 0; }
+int libinput_device_config_left_handed_get_default(struct libinput_device *device) { (void)device; return 0; }
+int libinput_device_config_middle_emulation_get_default_enabled(struct libinput_device *device) { (void)device; return 0; }
+int libinput_device_config_middle_emulation_get_enabled(struct libinput_device *device) { (void)device; return 0; }
+
+uint32_t libinput_device_config_scroll_get_button(struct libinput_device *device) { (void)device; return 0; }
+uint32_t libinput_device_config_scroll_get_default_button(struct libinput_device *device) { (void)device; return 0; }
+enum libinput_config_scroll_method libinput_device_config_scroll_get_default_method(struct libinput_device *device) { (void)device; return LIBINPUT_CONFIG_SCROLL_NO_SCROLL; }
+enum libinput_config_scroll_method libinput_device_config_scroll_get_method(struct libinput_device *device) { (void)device; return LIBINPUT_CONFIG_SCROLL_NO_SCROLL; }
+int libinput_device_config_scroll_get_default_natural_scroll_enabled(struct libinput_device *device) { (void)device; return 0; }
+int libinput_device_config_scroll_get_natural_scroll_enabled(struct libinput_device *device) { (void)device; return 0; }
+
+uint32_t libinput_device_config_send_events_get_modes(struct libinput_device *device) { (void)device; return 0; }
+uint32_t libinput_device_config_send_events_get_mode(struct libinput_device *device) { (void)device; return 0; }
+enum libinput_config_status libinput_device_config_send_events_set_mode(struct libinput_device *device, uint32_t mode) { (void)device; (void)mode; return LIBINPUT_CONFIG_STATUS_UNSUPPORTED; }
+
+int libinput_device_config_tap_get_enabled(struct libinput_device *device) { (void)device; return 0; }
+int libinput_device_config_tap_get_default_enabled(struct libinput_device *device) { (void)device; return 0; }
+int libinput_device_config_tap_get_drag_enabled(struct libinput_device *device) { (void)device; return 0; }
+int libinput_device_config_tap_get_default_drag_enabled(struct libinput_device *device) { (void)device; return 0; }
+int libinput_device_config_tap_get_drag_lock_enabled(struct libinput_device *device) { (void)device; return 0; }
+int libinput_device_config_tap_get_default_drag_lock_enabled(struct libinput_device *device) { (void)device; return 0; }
+uint32_t libinput_device_config_tap_get_button_map(struct libinput_device *device) { (void)device; return 0; }
+uint32_t libinput_device_config_tap_get_default_button_map(struct libinput_device *device) { (void)device; return 0; }
+enum libinput_config_status libinput_device_config_tap_set_button_map(struct libinput_device *device, uint32_t map) { (void)device; (void)map; return LIBINPUT_CONFIG_STATUS_UNSUPPORTED; }
+
+struct libinput_device_group *libinput_device_get_device_group(struct libinput_device *device) { return device ? &device->group : NULL; }
+struct libinput_device_group *libinput_device_group_ref(struct libinput_device_group *group) { if (group) group->refcount++; return group; }
+struct libinput_device_group *libinput_device_group_unref(struct libinput_device_group *group) { if (group && group->refcount > 0) group->refcount--; return NULL; }
+void libinput_device_group_set_user_data(struct libinput_device_group *group, void *user_data) { if (group) group->user_data = user_data; }
+void *libinput_device_group_get_user_data(struct libinput_device_group *group) { return group ? group->user_data : NULL; }
+
+int libinput_device_get_size(struct libinput_device *device, double *width, double *height) { (void)device; if (width) *width = 0.0; if (height) *height = 0.0; return -1; }
+int libinput_device_keyboard_has_key(struct libinput_device *device, uint32_t code) { (void)device; (void)code; return 1; }
+int libinput_device_pointer_has_button(struct libinput_device *device, uint32_t code) { (void)device; return code == XV6_BTN_LEFT || code == XV6_BTN_RIGHT || code == XV6_BTN_MIDDLE; }
+int libinput_device_switch_has_switch(struct libinput_device *device, uint32_t sw) { (void)device; (void)sw; return 0; }
+
+struct libinput_event_gesture *libinput_event_get_gesture_event(struct libinput_event *event) { return (void *)event; }
+uint64_t libinput_event_gesture_get_time_usec(struct libinput_event_gesture *event) { return ((struct libinput_event *)event)->time_usec; }
+double libinput_event_gesture_get_dx(struct libinput_event_gesture *event) { (void)event; return 0.0; }
+double libinput_event_gesture_get_dy(struct libinput_event_gesture *event) { (void)event; return 0.0; }
+double libinput_event_gesture_get_angle_delta(struct libinput_event_gesture *event) { (void)event; return 0.0; }
+double libinput_event_gesture_get_scale(struct libinput_event_gesture *event) { (void)event; return 1.0; }
+int libinput_event_gesture_get_finger_count(struct libinput_event_gesture *event) { (void)event; return 0; }
+int libinput_event_gesture_get_cancelled(struct libinput_event_gesture *event) { (void)event; return 0; }
+
+struct libinput_event_switch *libinput_event_get_switch_event(struct libinput_event *event) { return (void *)event; }
+uint64_t libinput_event_switch_get_time_usec(struct libinput_event_switch *event) { return ((struct libinput_event *)event)->time_usec; }
+uint32_t libinput_event_switch_get_switch_state(struct libinput_event_switch *event) { (void)event; return 0; }
+
+struct libinput_event_tablet_pad *libinput_event_get_tablet_pad_event(struct libinput_event *event) { return (void *)event; }
+uint64_t libinput_event_tablet_pad_get_time_usec(struct libinput_event_tablet_pad *event) { return ((struct libinput_event *)event)->time_usec; }
+uint32_t libinput_event_tablet_pad_get_button_number(struct libinput_event_tablet_pad *event) { (void)event; return 0; }
+enum libinput_button_state libinput_event_tablet_pad_get_button_state(struct libinput_event_tablet_pad *event) { (void)event; return LIBINPUT_BUTTON_STATE_RELEASED; }
+uint32_t libinput_event_tablet_pad_get_ring_number(struct libinput_event_tablet_pad *event) { (void)event; return 0; }
+double libinput_event_tablet_pad_get_ring_position(struct libinput_event_tablet_pad *event) { (void)event; return -1.0; }
+uint32_t libinput_event_tablet_pad_get_ring_source(struct libinput_event_tablet_pad *event) { (void)event; return 0; }
+uint32_t libinput_event_tablet_pad_get_strip_number(struct libinput_event_tablet_pad *event) { (void)event; return 0; }
+double libinput_event_tablet_pad_get_strip_position(struct libinput_event_tablet_pad *event) { (void)event; return -1.0; }
+uint32_t libinput_event_tablet_pad_get_strip_source(struct libinput_event_tablet_pad *event) { (void)event; return 0; }
+
+uint32_t libinput_device_tablet_pad_get_num_buttons(struct libinput_device *device) { (void)device; return 0; }
+uint32_t libinput_device_tablet_pad_get_num_rings(struct libinput_device *device) { (void)device; return 0; }
+uint32_t libinput_device_tablet_pad_get_num_strips(struct libinput_device *device) { (void)device; return 0; }
+uint32_t libinput_device_tablet_pad_get_num_mode_groups(struct libinput_device *device) { (void)device; return 0; }
+struct libinput_tablet_pad_mode_group *libinput_device_tablet_pad_get_mode_group(struct libinput_device *device, unsigned int index) { (void)device; (void)index; return NULL; }
+uint32_t libinput_tablet_pad_mode_group_get_mode(struct libinput_tablet_pad_mode_group *group) { (void)group; return 0; }
+
+uint64_t libinput_event_tablet_tool_get_time_usec(struct libinput_event_tablet_tool *event) { return ((struct libinput_event *)event)->time_usec; }
+double libinput_event_tablet_tool_get_rotation(struct libinput_event_tablet_tool *event) { (void)event; return 0.0; }
+int libinput_tablet_tool_has_rotation(struct libinput_tablet_tool *tool) { (void)tool; return 0; }
+int libinput_tablet_tool_has_slider(struct libinput_tablet_tool *tool) { (void)tool; return 0; }
+int libinput_tablet_tool_has_wheel(struct libinput_tablet_tool *tool) { (void)tool; return 0; }
+
+double libinput_event_pointer_get_scroll_value(struct libinput_event_pointer *event, enum libinput_pointer_axis axis) { return libinput_event_pointer_get_axis_value(event, axis); }
+double libinput_event_pointer_get_scroll_value_v120(struct libinput_event_pointer *event, enum libinput_pointer_axis axis) { return libinput_event_pointer_get_axis_value_discrete(event, axis) * 120.0; }

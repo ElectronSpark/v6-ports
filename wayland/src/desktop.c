@@ -3045,6 +3045,9 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             "WEBKIT_XV6_DISABLE_COMPOSITING_MODE=0";
         char webkit_force_vblank_timer_env[32] =
             "WEBKIT_FORCE_VBLANK_TIMER=1";
+        char webkit_window_width_env[40] = "WEBKIT_XV6_WINDOW_WIDTH=820";
+        char webkit_window_height_env[40] = "WEBKIT_XV6_WINDOW_HEIGHT=560";
+        char webkit_fullscreen_env[32] = "WEBKIT_XV6_FULLSCREEN=0";
         char mesa_capture_env[] = "XV6_MESAWLEGL_CAPTURE=0";
         char mesa_capture_seconds_env[48];
         char mesa_wayland_color_buffers_env[48] =
@@ -3197,7 +3200,21 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
                 snprintf(webkit_youtube_geometry_arg,
                          sizeof(webkit_youtube_geometry_arg),
                          "--geometry=%dx%d", vw, vh);
+                if (cmdline_int_value(webkit_cmdline_buf,
+                                      "webkit_match_video_size", 0) != 0) {
+                    snprintf(webkit_window_width_env,
+                             sizeof(webkit_window_width_env),
+                             "WEBKIT_XV6_WINDOW_WIDTH=%d", vw);
+                    snprintf(webkit_window_height_env,
+                             sizeof(webkit_window_height_env),
+                             "WEBKIT_XV6_WINDOW_HEIGHT=%d", vh);
+                }
             }
+            if (cmdline_int_value(webkit_cmdline_buf,
+                                  "webkit_fullscreen", 0) != 0)
+                snprintf(webkit_fullscreen_env,
+                         sizeof(webkit_fullscreen_env),
+                         "WEBKIT_XV6_FULLSCREEN=1");
         }
         snprintf(webkit_dmabuf_renderer_disable_gbm_env,
                  sizeof(webkit_dmabuf_renderer_disable_gbm_env),
@@ -3589,6 +3606,9 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             webkit_gst_debug_file_env,
             "GST_DEBUG_NO_COLOR=1",
             "XV6_GUI_SESSION=1",
+            webkit_window_width_env,
+            webkit_window_height_env,
+            webkit_fullscreen_env,
             webkit_youtube_probe_seconds_env,
             webkit_gpu_run_id_env,
             webkit_gpu_validate_run_id_env,
@@ -3651,6 +3671,9 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             webkit_gst_debug_file_env,
             "GST_DEBUG_NO_COLOR=1",
             "XV6_GUI_SESSION=1",
+            webkit_window_width_env,
+            webkit_window_height_env,
+            webkit_fullscreen_env,
             webkit_youtube_probe_seconds_env,
             webkit_gpu_run_id_env,
             webkit_gpu_validate_run_id_env,
@@ -3732,6 +3755,9 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             webkit_gst_debug_file_env,
             "GST_DEBUG_NO_COLOR=1",
             "XV6_GUI_SESSION=1",
+            webkit_window_width_env,
+            webkit_window_height_env,
+            webkit_fullscreen_env,
             webkit_youtube_probe_seconds_env,
             webkit_gpu_run_id_env,
             webkit_gpu_validate_run_id_env,
@@ -3790,6 +3816,9 @@ static pid_t launch_client(const char *path, const char *name, const char *arg1,
             webkit_gst_debug_file_env,
             "GST_DEBUG_NO_COLOR=1",
             "XV6_GUI_SESSION=1",
+            webkit_window_width_env,
+            webkit_window_height_env,
+            webkit_fullscreen_env,
             webkit_youtube_probe_seconds_env,
             webkit_gpu_run_id_env,
             webkit_gpu_validate_run_id_env,
@@ -5423,8 +5452,23 @@ int main(int argc, char **argv)
 
     /* 2. Wait for Wayland socket */
     if (wait_for_socket() < 0) {
+        int status = 0;
+        pid_t exited = waitpid(compositor_pid, &status, WNOHANG);
+
         fprintf(stderr, "[desktop] timed out waiting for %s\n",
                 WAYLAND_SOCKET_PATH);
+        if (exited == compositor_pid) {
+            fprintf(stderr,
+                    "[desktop] %s exited before Wayland socket status=0x%x\n",
+                    compositor_name, status);
+            compositor_pid = 0;
+        } else if (exited < 0) {
+            fprintf(stderr,
+                    "[desktop] %s waitpid probe failed errno=%d (%s)\n",
+                    compositor_name, errno, strerror(errno));
+        }
+        desktop_dump_text_log_tail("/tmp/weston.log", "WESTON",
+                                   "socket-timeout", 80);
         cleanup();
         return 1;
     }

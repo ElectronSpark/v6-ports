@@ -200,6 +200,22 @@ static int env_is(const char *name, const char *expected)
     return value && strcmp(value, expected) == 0;
 }
 
+static int env_int_or(const char *name, int fallback)
+{
+    const char *value = getenv(name);
+    char *end = NULL;
+    long parsed;
+
+    if (!value || !value[0])
+        return fallback;
+    errno = 0;
+    parsed = strtol(value, &end, 10);
+    if (errno != 0 || end == value || *end != '\0' ||
+        parsed <= 0 || parsed > 16384)
+        return fallback;
+    return (int)parsed;
+}
+
 static int animated_title_frame(const char *title)
 {
     const char *needle = "native present animated content frame ";
@@ -1902,7 +1918,9 @@ int main(int argc, char **argv)
     phase("gtk initialized");
 
     GtkWidget *window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
-    gtk_window_set_default_size(GTK_WINDOW(window), 820, 560);
+    gtk_window_set_default_size(GTK_WINDOW(window),
+                                env_int_or("WEBKIT_XV6_WINDOW_WIDTH", 820),
+                                env_int_or("WEBKIT_XV6_WINDOW_HEIGHT", 560));
     gtk_window_set_title(GTK_WINDOW(window), "xv6 WebKit GPU API Smoke");
     g_signal_connect(window, "destroy", G_CALLBACK(quit_cb), NULL);
     phase("window created");
@@ -1924,6 +1942,8 @@ int main(int argc, char **argv)
     g_signal_connect(view, "load-changed", G_CALLBACK(load_changed_cb), NULL);
     gtk_container_add(GTK_CONTAINER(window), view);
     gtk_widget_show_all(window);
+    if (env_enabled("WEBKIT_XV6_FULLSCREEN"))
+        gtk_window_fullscreen(GTK_WINDOW(window));
     phase("window shown");
     struct SmokeLoad *load = calloc(1, sizeof(*load));
     load->view = WEBKIT_WEB_VIEW(g_object_ref(view));

@@ -10,6 +10,7 @@ xv6_port(
     BUILD_SYSTEM    meson
     MESON_DEFAULT_LIBRARY both
     DEPENDS         libffi libexpat wayland-host
+    C_LINK_ARGS     -Wl,-Bsymbolic
     OUTPUT_FILES    lib/libwayland-client.a
                     lib/libwayland-client.so
                     lib/libwayland-client.so.0
