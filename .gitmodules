@@ -87,7 +87,7 @@
 [submodule "wayland-src/src"]
 	path = wayland-src/src
 	url = https://github.com/ElectronSpark/v6-wayland.git
-	branch = v6-port
+	branch = main
 [submodule "wayland-protocols/src"]
 	path = wayland-protocols/src
 	url = https://gitlab.freedesktop.org/wayland/wayland-protocols.git
