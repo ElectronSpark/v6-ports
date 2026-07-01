@@ -1050,6 +1050,8 @@ stage_host_gdk_x11_if_needed() {
     local webkit_lib="${dst}/lib/libwebkit2gtk-4.1.so.0"
     local staged_gdk="${dst}/lib/libgdk-3.so.0"
     local host_gdk
+    local host_gdk_real
+    local host_gdk_base
 
     if ! elf_has_undefined_symbol "${webkit_lib}" "gdk_x11_cursor_get_xcursor"; then
         return 0
@@ -1066,8 +1068,20 @@ stage_host_gdk_x11_if_needed() {
     fi
 
     echo "ports/webkit: staging host libgdk-3.so.0 for WebKit GDK X11 ABI compatibility" >&2
-    cp -L "${host_gdk}" "${dst}/lib/libgdk-3.so.0"
-    chmod 0755 "${dst}/lib/libgdk-3.so.0" 2>/dev/null || true
+    host_gdk_real="$(readlink -f "${host_gdk}" 2>/dev/null || true)"
+    if [[ -z "${host_gdk_real}" ]]; then
+        host_gdk_real="${host_gdk}"
+    fi
+    host_gdk_base="$(basename "${host_gdk_real}")"
+    if [[ "${host_gdk_base}" == "libgdk-3.so.0" ]]; then
+        host_gdk_base="libgdk-3.so.0.host"
+    fi
+    rm -f "${dst}/lib/libgdk-3.so" "${dst}/lib/libgdk-3.so.0" \
+        "${dst}"/lib/libgdk-3.so.0.[0-9]* \
+        "${dst}/lib/libgdk-3.so.0.host"
+    cp -L "${host_gdk}" "${dst}/lib/${host_gdk_base}"
+    chmod 0755 "${dst}/lib/${host_gdk_base}" 2>/dev/null || true
+    ln -sf "${host_gdk_base}" "${dst}/lib/libgdk-3.so.0"
     ln -sf libgdk-3.so.0 "${dst}/lib/libgdk-3.so"
 }
 
@@ -1075,6 +1089,10 @@ stage_host_gtk_gdk_x11_pair_if_needed() {
     local webkit_lib="${dst}/lib/libwebkit2gtk-4.1.so.0"
     local host_gtk
     local host_gdk
+    local host_gtk_real
+    local host_gdk_real
+    local host_gtk_base
+    local host_gdk_base
 
     if ! elf_has_undefined_symbol "${webkit_lib}" "gdk_x11_cursor_get_xcursor"; then
         return 0
@@ -1089,14 +1107,36 @@ stage_host_gtk_gdk_x11_pair_if_needed() {
     fi
 
     echo "ports/webkit: staging host GTK/GDK pair for WebKit GDK X11 ABI compatibility" >&2
+    host_gtk_real="$(readlink -f "${host_gtk}" 2>/dev/null || true)"
+    host_gdk_real="$(readlink -f "${host_gdk}" 2>/dev/null || true)"
+    if [[ -z "${host_gtk_real}" ]]; then
+        host_gtk_real="${host_gtk}"
+    fi
+    if [[ -z "${host_gdk_real}" ]]; then
+        host_gdk_real="${host_gdk}"
+    fi
+    host_gtk_base="$(basename "${host_gtk_real}")"
+    host_gdk_base="$(basename "${host_gdk_real}")"
+    if [[ "${host_gtk_base}" == "libgtk-3.so.0" ]]; then
+        host_gtk_base="libgtk-3.so.0.host"
+    fi
+    if [[ "${host_gdk_base}" == "libgdk-3.so.0" ]]; then
+        host_gdk_base="libgdk-3.so.0.host"
+    fi
     rm -f \
         "${dst}/lib/libgtk-3.so" \
         "${dst}/lib/libgtk-3.so.0" \
+        "${dst}"/lib/libgtk-3.so.0.[0-9]* \
+        "${dst}/lib/libgtk-3.so.0.host" \
         "${dst}/lib/libgdk-3.so" \
-        "${dst}/lib/libgdk-3.so.0"
-    cp -L "${host_gtk}" "${dst}/lib/libgtk-3.so.0"
-    cp -L "${host_gdk}" "${dst}/lib/libgdk-3.so.0"
-    chmod 0755 "${dst}/lib/libgtk-3.so.0" "${dst}/lib/libgdk-3.so.0" 2>/dev/null || true
+        "${dst}/lib/libgdk-3.so.0" \
+        "${dst}"/lib/libgdk-3.so.0.[0-9]* \
+        "${dst}/lib/libgdk-3.so.0.host"
+    cp -L "${host_gtk}" "${dst}/lib/${host_gtk_base}"
+    cp -L "${host_gdk}" "${dst}/lib/${host_gdk_base}"
+    chmod 0755 "${dst}/lib/${host_gtk_base}" "${dst}/lib/${host_gdk_base}" 2>/dev/null || true
+    ln -sf "${host_gtk_base}" "${dst}/lib/libgtk-3.so.0"
+    ln -sf "${host_gdk_base}" "${dst}/lib/libgdk-3.so.0"
     ln -sf libgtk-3.so.0 "${dst}/lib/libgtk-3.so"
     ln -sf libgdk-3.so.0 "${dst}/lib/libgdk-3.so"
 }
