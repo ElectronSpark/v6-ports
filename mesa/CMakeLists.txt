@@ -58,6 +58,8 @@ file(GLOB_RECURSE _mesa_d3d12_source_deps CONFIGURE_DEPENDS
     ${CMAKE_CURRENT_SOURCE_DIR}/src/src/gallium/winsys/sw/kms-dri/*
     ${CMAKE_CURRENT_SOURCE_DIR}/src/src/gallium/winsys/virgl/*
     ${CMAKE_CURRENT_SOURCE_DIR}/src/src/gallium/auxiliary/target-helpers/*sw_helper.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/src/mesa/glapi/*
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/src/mesa/main/*
     ${CMAKE_CURRENT_SOURCE_DIR}/src/src/egl/drivers/dri2/*
     ${CMAKE_CURRENT_SOURCE_DIR}/src/src/egl/main/*
     ${CMAKE_CURRENT_SOURCE_DIR}/src/src/gallium/include/*
