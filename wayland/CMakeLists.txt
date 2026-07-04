@@ -17,7 +17,7 @@ set(DIRECTX_HEADERS_DIR
 set(DESKTOP_INCLUDE_SRCS
     ${WAYLAND_SRC_DIR}/desktop_clients.inc)
 
-foreach(_src desktop.c desktop_icons.c desktop_launchers.c filemgr.c settings.c glsmoke.c glmaze.c peanutgb.c mesaglsmoke.c mesawlegl.c mesakmsgl.c mesademo.c gl_program.c gl_program.h gl_fps_overlay.c gl_fps_overlay.h mesawlegl_sphere.c mesawlegl_sphere.h pixel_fps_overlay.c pixel_fps_overlay.h xv6_draw.c xv6_draw.h xv6_titlebar.c xv6_titlebar.h xv6_titlebar_gl.c xv6_titlebar_gl.h xv6_icon.c xv6_icon.h xv6_icon_filemgr.c xv6_icon_glmaze.c xv6_present_buffer.c xv6_present_buffer.h mesaeglinfo.c mesaglfeature.c mesad3d12probe.c gpu_substrate_validate.c dmabufsmoke.c d3d12sharedsmoke.c drmgpuprobe.c webkitgpusmoke.c cursorsmoke.c xv6_egl_gles.c webkit_preload_wrapper.c webkit_uri_interpose.c install_webkit_preload_wrappers.sh font8x16.h)
+foreach(_src desktop.c desktop_icons.c desktop_launchers.c filemgr.c settings.c glsmoke.c glmaze.c peanutgb.c mesaglsmoke.c mesawlegl.c mesakmsgl.c mesademo.c gl_program.c gl_program.h gl_fps_overlay.c gl_fps_overlay.h mesawlegl_sphere.c mesawlegl_sphere.h pixel_fps_overlay.c pixel_fps_overlay.h xv6_draw.c xv6_draw.h xv6_titlebar.c xv6_titlebar.h xv6_titlebar_gl.c xv6_titlebar_gl.h xv6_icon.c xv6_icon.h xv6_icon_filemgr.c xv6_icon_glmaze.c xv6_present_buffer.c xv6_present_buffer.h mesaeglinfo.c mesaglfeature.c mesacopytexture.c mesad3d12probe.c gpu_substrate_validate.c dmabufsmoke.c d3d12sharedsmoke.c drmgpuprobe.c webkitgpusmoke.c cursorsmoke.c xv6_egl_gles.c webkit_preload_wrapper.c webkit_uri_interpose.c install_webkit_preload_wrappers.sh font8x16.h)
     if(NOT EXISTS "${WAYLAND_SRC_DIR}/${_src}")
         message(FATAL_ERROR "ports/wayland: missing ${WAYLAND_SRC_DIR}/${_src}")
     endif()
@@ -70,6 +70,7 @@ set(_mesakmsgl_bin ${_wl_build}/mesakmsgl)
 set(_mesademo_bin ${_wl_build}/mesademo)
 set(_mesaeglinfo_bin ${_wl_build}/mesaeglinfo)
 set(_mesaglfeature_bin ${_wl_build}/mesaglfeature)
+set(_mesacopytexture_bin ${_wl_build}/mesacopytexture)
 set(_mesad3d12probe_bin ${_wl_build}/mesad3d12probe)
 set(_gpu_substrate_validate_bin ${_wl_build}/gpu-substrate-validate)
 set(_gbmtest_bin ${_wl_build}/gbmtest)
@@ -100,6 +101,7 @@ set(_mesakmsgl_installed ${XV6_SYSROOT}/bin/mesakmsgl)
 set(_mesademo_installed ${XV6_SYSROOT}/bin/mesademo)
 set(_mesaeglinfo_installed ${XV6_SYSROOT}/bin/mesaeglinfo)
 set(_mesaglfeature_installed ${XV6_SYSROOT}/bin/mesaglfeature)
+set(_mesacopytexture_installed ${XV6_SYSROOT}/bin/mesacopytexture)
 set(_mesad3d12probe_installed ${XV6_SYSROOT}/bin/mesad3d12probe)
 set(_gpu_substrate_validate_installed ${XV6_SYSROOT}/bin/gpu-substrate-validate)
 set(_gbmtest_installed ${XV6_SYSROOT}/bin/gbmtest)
@@ -373,6 +375,28 @@ add_custom_command(
                 -lEGL -lGLESv2 -lpthread -ldl -lrt -lm
     DEPENDS ${WAYLAND_SRC_DIR}/mesaglfeature.c
     COMMENT "Compiling Mesa EGL/GLES feature probe"
+    VERBATIM)
+
+add_custom_command(
+    OUTPUT  ${_mesacopytexture_bin}
+    COMMAND ${CMAKE_C_COMPILER} ${_wayland_opt_cflags} -Wall
+                -isystem ${XV6_SYSROOT}/include
+                -isystem ${XV6_SYSROOT}/include/libdrm
+                -L ${XV6_SYSROOT}/lib
+                -Wl,-rpath-link,${XV6_SYSROOT}/lib
+                -Wl,-rpath,/lib
+                -o ${_mesacopytexture_bin}
+                ${WAYLAND_SRC_DIR}/mesacopytexture.c
+                -lEGL -lGLESv2 -lpthread -ldl -lrt -lm
+    DEPENDS ${WAYLAND_SRC_DIR}/mesacopytexture.c
+    COMMENT "Compiling GL_CHROMIUM_copy_texture reducer"
+    VERBATIM)
+
+add_custom_target(port-wayland-mesacopytexture-install
+    COMMAND ${CMAKE_COMMAND} -E copy ${_mesacopytexture_bin}
+            ${_mesacopytexture_installed}
+    DEPENDS ${_mesacopytexture_bin}
+    COMMENT "Installing GL_CHROMIUM_copy_texture reducer"
     VERBATIM)
 
 add_custom_command(
@@ -872,6 +896,7 @@ add_custom_command(
             ${_mesakmsgl_installed}
             ${_mesademo_installed}
             ${_mesaeglinfo_installed} ${_mesaglfeature_installed}
+            ${_mesacopytexture_installed}
             ${_mesad3d12probe_installed}
             ${_gpu_substrate_validate_installed}
             ${_gbmtest_installed}
@@ -901,6 +926,7 @@ add_custom_command(
     COMMAND ${CMAKE_COMMAND} -E copy ${_mesademo_bin} ${_mesademo_installed}
     COMMAND ${CMAKE_COMMAND} -E copy ${_mesaeglinfo_bin} ${_mesaeglinfo_installed}
     COMMAND ${CMAKE_COMMAND} -E copy ${_mesaglfeature_bin} ${_mesaglfeature_installed}
+    COMMAND ${CMAKE_COMMAND} -E copy ${_mesacopytexture_bin} ${_mesacopytexture_installed}
     COMMAND ${CMAKE_COMMAND} -E copy ${_mesad3d12probe_bin} ${_mesad3d12probe_installed}
     COMMAND ${CMAKE_COMMAND} -E copy ${_gpu_substrate_validate_bin} ${_gpu_substrate_validate_installed}
     COMMAND ${CMAKE_COMMAND} -E copy ${_gbmtest_bin} ${_gbmtest_installed}
@@ -936,6 +962,7 @@ add_custom_command(
             ${_mesaglsmoke_bin}
             ${_mesawlegl_bin} ${_mesakmsgl_bin} ${_mesademo_bin}
             ${_mesaeglinfo_bin} ${_mesaglfeature_bin}
+            ${_mesacopytexture_bin}
             ${_mesad3d12probe_bin} ${_gpu_substrate_validate_bin}
             ${_gbmtest_bin} ${_dmabufsmoke_bin} ${_cursorsmoke_bin}
             ${_d3d12sharedsmoke_bin}
@@ -957,6 +984,7 @@ add_custom_target(port-wayland ALL DEPENDS
     ${_mesaglsmoke_installed} ${_mesawlegl_installed}
     ${_mesakmsgl_installed} ${_mesademo_installed}
     ${_mesaeglinfo_installed} ${_mesaglfeature_installed}
+    ${_mesacopytexture_installed}
     ${_mesad3d12probe_installed}
     ${_gpu_substrate_validate_installed} ${_gbmtest_installed}
     ${_dmabufsmoke_installed} ${_cursorsmoke_installed}
@@ -994,6 +1022,7 @@ add_custom_target(port-wayland-clean
             ${_mesakmsgl_installed}
             ${_mesademo_installed}
             ${_mesaeglinfo_installed} ${_mesaglfeature_installed}
+            ${_mesacopytexture_installed}
             ${_mesad3d12probe_installed}
             ${_gpu_substrate_validate_installed}
             ${_dmabufsmoke_installed} ${_cursorsmoke_installed}
