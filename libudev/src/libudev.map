@@ -19,7 +19,9 @@ LIBUDEV_183 {
         udev_device_get_sysnum;
         udev_device_get_syspath;
         udev_device_get_tags_list_entry;
+        udev_device_get_udev;
         udev_device_get_usec_since_initialized;
+        udev_device_has_tag;
         udev_device_new_from_devnum;
         udev_device_new_from_subsystem_sysname;
         udev_device_new_from_syspath;
@@ -37,18 +39,24 @@ LIBUDEV_183 {
         udev_enumerate_get_list_entry;
         udev_enumerate_get_udev;
         udev_enumerate_new;
+        udev_enumerate_ref;
         udev_enumerate_scan_devices;
         udev_enumerate_unref;
+        udev_get_userdata;
+        udev_list_entry_get_by_name;
         udev_list_entry_get_name;
         udev_list_entry_get_next;
+        udev_list_entry_get_value;
         udev_monitor_enable_receiving;
         udev_monitor_filter_add_match_subsystem_devtype;
         udev_monitor_get_fd;
         udev_monitor_new_from_netlink;
         udev_monitor_receive_device;
+        udev_monitor_ref;
         udev_monitor_unref;
         udev_new;
         udev_ref;
+        udev_set_userdata;
         udev_unref;
     local:
         *;
