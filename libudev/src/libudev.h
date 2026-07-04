@@ -47,6 +47,7 @@ int udev_enumerate_add_nomatch_sysattr(struct udev_enumerate *udev_enumerate,
 int udev_enumerate_add_syspath(struct udev_enumerate *udev_enumerate,
                                const char *syspath);
 int udev_enumerate_scan_devices(struct udev_enumerate *udev_enumerate);
+int udev_enumerate_scan_subsystems(struct udev_enumerate *udev_enumerate);
 struct udev *udev_enumerate_get_udev(struct udev_enumerate *udev_enumerate);
 struct udev_list_entry *udev_enumerate_get_list_entry(struct udev_enumerate *udev_enumerate);
 

@@ -19,6 +19,8 @@
 #define XV6_UDEV_RENDER_SYSPATH "/sys/dev/char/226:128"
 #define XV6_UDEV_EVENT0_SYSPATH "/sys/dev/char/13:64"
 #define XV6_UDEV_EVENT1_SYSPATH "/sys/dev/char/13:65"
+#define XV6_UDEV_DRM_SUBSYSTEM_SYSPATH "/sys/class/drm"
+#define XV6_UDEV_INPUT_SUBSYSTEM_SYSPATH "/sys/class/input"
 
 struct udev {
     int refcount;
@@ -180,7 +182,49 @@ sysnum_for_node(const char *node, dev_t devnum)
 static const char *
 driver_for_node(const char *node)
 {
+    if (!node)
+        return NULL;
     return is_input_node(node) ? "virtio_input" : "virtio_gpu";
+}
+
+static const char *
+subsystem_name_for_syspath(const char *syspath)
+{
+    if (!syspath)
+        return NULL;
+    if (strcmp(syspath, XV6_UDEV_DRM_SUBSYSTEM_SYSPATH) == 0)
+        return "drm";
+    if (strcmp(syspath, XV6_UDEV_INPUT_SUBSYSTEM_SYSPATH) == 0)
+        return "input";
+    return NULL;
+}
+
+static struct udev_device *
+subsystem_device_new(struct udev *udev, const char *syspath)
+{
+    const char *sysname = subsystem_name_for_syspath(syspath);
+    if (!udev || !sysname)
+        return NULL;
+
+    struct udev_device *dev = calloc(1, sizeof(*dev));
+    if (!dev)
+        return NULL;
+
+    dev->refcount = 1;
+    dev->udev = udev_ref(udev);
+    dev->syspath = xstrdup(syspath);
+    dev->sysname = xstrdup(sysname);
+    dev->subsystem = xstrdup("subsystem");
+    dev->action = xstrdup("add");
+
+    if (!dev->syspath || !dev->sysname || !dev->subsystem || !dev->action) {
+        udev_device_unref(dev);
+        return NULL;
+    }
+
+    list_add(&dev->properties, "SUBSYSTEM", "subsystem");
+    list_add(&dev->properties, "DEVPATH", syspath);
+    return dev;
 }
 
 static struct udev_device *
@@ -433,6 +477,34 @@ maybe_input:
     return 0;
 }
 
+int
+udev_enumerate_scan_subsystems(struct udev_enumerate *e)
+{
+    int err;
+
+    if (!e)
+        return -EINVAL;
+    list_free(e->devices);
+    e->devices = NULL;
+    if (!e->match_subsystem || strcmp(e->match_subsystem, "drm") == 0) {
+        if (access(XV6_UDEV_PRIMARY_NODE, F_OK) == 0 ||
+            access(XV6_UDEV_RENDER_NODE, F_OK) == 0) {
+            err = list_add(&e->devices, XV6_UDEV_DRM_SUBSYSTEM_SYSPATH, NULL);
+            if (err)
+                return err;
+        }
+    }
+    if (!e->match_subsystem || strcmp(e->match_subsystem, "input") == 0) {
+        if (access(XV6_UDEV_EVENT0_NODE, F_OK) == 0 ||
+            access(XV6_UDEV_EVENT1_NODE, F_OK) == 0) {
+            err = list_add(&e->devices, XV6_UDEV_INPUT_SUBSYSTEM_SYSPATH, NULL);
+            if (err)
+                return err;
+        }
+    }
+    return 0;
+}
+
 struct udev *
 udev_enumerate_get_udev(struct udev_enumerate *e)
 {
@@ -505,7 +577,8 @@ udev_device_unref(struct udev_device *dev)
 struct udev_device *
 udev_device_new_from_syspath(struct udev *udev, const char *syspath)
 {
-    return device_new(udev, node_for_syspath(syspath));
+    struct udev_device *dev = subsystem_device_new(udev, syspath);
+    return dev ? dev : device_new(udev, node_for_syspath(syspath));
 }
 
 struct udev_device *
