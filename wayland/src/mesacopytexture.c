@@ -47,6 +47,66 @@
 #ifndef GL_TEXTURE_IMMUTABLE_FORMAT
 #define GL_TEXTURE_IMMUTABLE_FORMAT 0x912F
 #endif
+#ifndef GL_TEXTURE_BASE_LEVEL
+#define GL_TEXTURE_BASE_LEVEL 0x813C
+#endif
+#ifndef GL_TEXTURE_MAX_LEVEL
+#define GL_TEXTURE_MAX_LEVEL 0x813D
+#endif
+#ifndef GL_RGB565
+#define GL_RGB565 0x8D62
+#endif
+#ifndef GL_RGBA4
+#define GL_RGBA4 0x8056
+#endif
+#ifndef GL_RGB5_A1
+#define GL_RGB5_A1 0x8057
+#endif
+#ifndef GL_UNSIGNED_SHORT_5_6_5
+#define GL_UNSIGNED_SHORT_5_6_5 0x8363
+#endif
+#ifndef GL_UNSIGNED_SHORT_4_4_4_4
+#define GL_UNSIGNED_SHORT_4_4_4_4 0x8033
+#endif
+#ifndef GL_UNSIGNED_SHORT_5_5_5_1
+#define GL_UNSIGNED_SHORT_5_5_5_1 0x8034
+#endif
+#ifndef GL_SRGB8_ALPHA8
+#define GL_SRGB8_ALPHA8 0x8C43
+#endif
+#ifndef GL_RGBA16F
+#define GL_RGBA16F 0x881A
+#endif
+#ifndef GL_RGBA32F
+#define GL_RGBA32F 0x8814
+#endif
+#ifndef GL_HALF_FLOAT
+#define GL_HALF_FLOAT 0x140B
+#endif
+#ifndef GL_R8UI
+#define GL_R8UI 0x8232
+#endif
+#ifndef GL_RG8UI
+#define GL_RG8UI 0x8238
+#endif
+#ifndef GL_RGBA8UI
+#define GL_RGBA8UI 0x8D7C
+#endif
+#ifndef GL_RED_INTEGER
+#define GL_RED_INTEGER 0x8D94
+#endif
+#ifndef GL_RG_INTEGER
+#define GL_RG_INTEGER 0x8228
+#endif
+#ifndef GL_RGBA_INTEGER
+#define GL_RGBA_INTEGER 0x8D99
+#endif
+#ifndef EGL_GL_TEXTURE_2D_KHR
+#define EGL_GL_TEXTURE_2D_KHR 0x30B1
+#endif
+#ifndef EGL_GL_TEXTURE_LEVEL_KHR
+#define EGL_GL_TEXTURE_LEVEL_KHR 0x30BC
+#endif
 
 #define SKIP_RC 77
 #define TEX_W 4
@@ -63,6 +123,11 @@ typedef void (*gl_copy_sub_texture_chromium_fn)(GLuint, GLint, GLenum, GLuint,
 typedef void (*gl_tex_storage_2d_fn)(GLenum, GLsizei, GLenum, GLsizei,
                                      GLsizei);
 typedef const GLubyte *(*gl_get_string_i_fn)(GLenum, GLuint);
+typedef void (*gl_egl_image_target_texture_2d_oes_fn)(GLenum, void *);
+typedef EGLImageKHR (*egl_create_image_khr_fn)(EGLDisplay, EGLContext,
+                                               EGLenum, EGLClientBuffer,
+                                               const EGLint *);
+typedef EGLBoolean (*egl_destroy_image_khr_fn)(EGLDisplay, EGLImageKHR);
 
 struct egl_state {
     EGLDisplay display;
@@ -81,6 +146,7 @@ static GLuint create_texture_typed(GLenum internal_format, GLenum format,
                                    int width, int height, GLenum type,
                                    const uint8_t *pixels, int *accepted);
 static int gl_version_at_least(int major, int minor);
+static int egl_has_display_extension(EGLDisplay display, const char *name);
 
 static EGLDisplay get_surfaceless_display(void)
 {
@@ -239,6 +305,27 @@ static int gl_has_extension(const char *name)
     return 0;
 }
 
+static int egl_has_display_extension(EGLDisplay display, const char *name)
+{
+    const char *all = eglQueryString(display, EGL_EXTENSIONS);
+    const char *exts = all;
+    size_t name_len;
+
+    if (!all || !name || !*name)
+        return 0;
+    name_len = strlen(name);
+    while ((exts = strstr(exts, name)) != NULL) {
+        char before = exts == all ? ' ' : exts[-1];
+        char after = exts[name_len];
+
+        if ((before == ' ' || before == '\0') &&
+            (after == ' ' || after == '\0'))
+            return 1;
+        exts += name_len;
+    }
+    return 0;
+}
+
 static int gl_version_at_least(int major, int minor)
 {
     const char *version = (const char *)glGetString(GL_VERSION);
@@ -385,6 +472,27 @@ static GLuint create_empty_texture(void)
     return texture;
 }
 
+static int texture_image_accepted(GLenum internal_format, GLenum format,
+                                  GLenum type)
+{
+    GLuint texture = 0;
+    GLenum err;
+
+    clear_gl_errors();
+    glGenTextures(1, &texture);
+    glBindTexture(GL_TEXTURE_2D, texture);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexImage2D(GL_TEXTURE_2D, 0, internal_format, TEX_W, TEX_H, 0,
+                 format, type, NULL);
+    err = glGetError();
+    if (texture)
+        glDeleteTextures(1, &texture);
+    return err == GL_NO_ERROR;
+}
+
 static int read_texture_target_rgba(GLenum target, GLuint texture, GLint level,
                                     int width, int height, uint8_t *pixels)
 {
@@ -403,6 +511,33 @@ static int read_texture_target_rgba(GLenum target, GLuint texture, GLint level,
         return 1;
     }
     glReadPixels(0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+    err = glGetError();
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glDeleteFramebuffers(1, &fbo);
+    return err == GL_NO_ERROR ? 0 : 1;
+}
+
+static int read_texture_target_pixels(GLenum target, GLuint texture,
+                                      GLint level, int width, int height,
+                                      GLenum format, GLenum type,
+                                      void *pixels)
+{
+    GLuint fbo = 0;
+    GLenum status;
+    GLenum err;
+
+    clear_gl_errors();
+    glGenFramebuffers(1, &fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, target,
+                           texture, level);
+    status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+    if (status != GL_FRAMEBUFFER_COMPLETE) {
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        glDeleteFramebuffers(1, &fbo);
+        return 1;
+    }
+    glReadPixels(0, 0, width, height, format, type, pixels);
     err = glGetError();
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     glDeleteFramebuffers(1, &fbo);
@@ -489,6 +624,20 @@ static void fill_rg(uint8_t *pixels)
     }
 }
 
+static void fill_rgba_extremes(uint8_t *pixels)
+{
+    for (int y = 0; y < TEX_H; y++) {
+        for (int x = 0; x < TEX_W; x++) {
+            uint8_t *p = pixels + (y * TEX_W + x) * 4;
+
+            p[0] = (x & 1) ? 255 : 0;
+            p[1] = (y & 1) ? 255 : 0;
+            p[2] = ((x + y) & 1) ? 255 : 0;
+            p[3] = ((x ^ y) & 1) ? 255 : 0;
+        }
+    }
+}
+
 static void fill_zero_alpha_rgba(uint8_t *pixels)
 {
     for (int i = 0; i < TEX_W * TEX_H; i++) {
@@ -506,6 +655,57 @@ static uint8_t clamp_u8(int value)
     if (value > 255)
         return 255;
     return (uint8_t)value;
+}
+
+static void expected_dest_roundtrip(const uint8_t *src, uint8_t *expected,
+                                    GLenum internal_format)
+{
+    for (int i = 0; i < TEX_W * TEX_H; i++) {
+        const uint8_t *s = src + i * 4;
+        uint8_t *d = expected + i * 4;
+
+        switch (internal_format) {
+        case GL_ALPHA:
+            d[0] = 0;
+            d[1] = 0;
+            d[2] = 0;
+            d[3] = s[3];
+            break;
+        case GL_LUMINANCE:
+        case GL_R8:
+            d[0] = s[0];
+            d[1] = internal_format == GL_LUMINANCE ? s[0] : 0;
+            d[2] = internal_format == GL_LUMINANCE ? s[0] : 0;
+            d[3] = 255;
+            break;
+        case GL_LUMINANCE_ALPHA:
+            d[0] = s[0];
+            d[1] = s[0];
+            d[2] = s[0];
+            d[3] = s[3];
+            break;
+        case GL_RG8:
+            d[0] = s[0];
+            d[1] = s[1];
+            d[2] = 0;
+            d[3] = 255;
+            break;
+        case GL_RGB565:
+            d[0] = s[0];
+            d[1] = s[1];
+            d[2] = s[2];
+            d[3] = 255;
+            break;
+        case GL_RGBA4:
+        case GL_RGB5_A1:
+        case GL_SRGB8_ALPHA8:
+        case GL_RGBA16F:
+        case GL_RGBA32F:
+        default:
+            memcpy(d, s, 4);
+            break;
+        }
+    }
 }
 
 static void expected_rgba_transform(const uint8_t *src, uint8_t *dst,
@@ -824,6 +1024,212 @@ static int run_r8_rg8_cases(const struct chromium_copy_texture *copy)
     return failures;
 }
 
+static int run_dest_roundtrip_case(const struct chromium_copy_texture *copy,
+                                   const char *case_name,
+                                   GLenum internal_format, GLenum format,
+                                   GLenum type, int tolerance,
+                                   int use_extreme_source)
+{
+    uint8_t src_pixels[TEX_W * TEX_H * 4];
+    uint8_t expected[TEX_W * TEX_H * 4];
+    uint8_t actual[TEX_W * TEX_H * 4];
+    GLuint src = 0;
+    GLuint dst = 0;
+    GLuint back = 0;
+    GLenum err;
+    int accepted = 0;
+    int failed = 0;
+
+    if (!texture_image_accepted(internal_format, format, type)) {
+        printf("MESACOPYTEXTURE-SKIP case=%s detail=dest_format_unaccepted\n",
+               case_name);
+        return 0;
+    }
+
+    if (use_extreme_source)
+        fill_rgba_extremes(src_pixels);
+    else
+        fill_rgba(src_pixels);
+    expected_dest_roundtrip(src_pixels, expected, internal_format);
+    src = create_texture(GL_RGBA, TEX_W, TEX_H, src_pixels, &accepted);
+    dst = create_empty_texture();
+    back = create_empty_texture();
+    if (!src || !dst || !back || !accepted) {
+        printf("MESACOPYTEXTURE-FAIL case=%s step=create_texture\n",
+               case_name);
+        failed = 1;
+        goto out;
+    }
+
+    clear_gl_errors();
+    copy->copy_texture(src, 0, GL_TEXTURE_2D, dst, 0, internal_format,
+                       type, GL_FALSE, GL_FALSE, GL_FALSE);
+    err = glGetError();
+    if (err != GL_NO_ERROR) {
+        printf("MESACOPYTEXTURE-FAIL case=%s step=copy_to_dest error=0x%x\n",
+               case_name, err);
+        failed = 1;
+        goto out;
+    }
+
+    clear_gl_errors();
+    copy->copy_texture(dst, 0, GL_TEXTURE_2D, back, 0, GL_RGBA,
+                       GL_UNSIGNED_BYTE, GL_FALSE, GL_FALSE, GL_FALSE);
+    err = glGetError();
+    if (err != GL_NO_ERROR) {
+        printf("MESACOPYTEXTURE-FAIL case=%s step=copy_back error=0x%x\n",
+               case_name, err);
+        failed = 1;
+        goto out;
+    }
+    if (read_texture_rgba(back, TEX_W, TEX_H, actual)) {
+        printf("MESACOPYTEXTURE-FAIL case=%s step=readback\n", case_name);
+        failed = 1;
+        goto out;
+    }
+    failed = compare_pixels(actual, expected, TEX_W * TEX_H * 4, tolerance,
+                            case_name);
+
+out:
+    if (src)
+        glDeleteTextures(1, &src);
+    if (dst)
+        glDeleteTextures(1, &dst);
+    if (back)
+        glDeleteTextures(1, &back);
+    if (!failed)
+        printf("MESACOPYTEXTURE-PASS case=%s\n", case_name);
+    return failed;
+}
+
+static void fill_uint_pixels(uint8_t *pixels, int components)
+{
+    for (int i = 0; i < TEX_W * TEX_H; i++) {
+        for (int c = 0; c < components; c++)
+            pixels[i * components + c] = (uint8_t)(17 + i * 7 + c * 31);
+    }
+}
+
+static int run_uint_dest_roundtrip_case(
+    const struct chromium_copy_texture *copy, const char *case_name,
+    GLenum internal_format, GLenum format, int components)
+{
+    uint8_t src_pixels[TEX_W * TEX_H * 4];
+    uint8_t actual[TEX_W * TEX_H * 4];
+    GLuint src = 0;
+    GLuint dst = 0;
+    GLenum err;
+    int accepted = 0;
+    int failed = 0;
+    int completed = 0;
+    int count = TEX_W * TEX_H * components;
+
+    if (!gl_version_at_least(3, 0)) {
+        printf("MESACOPYTEXTURE-SKIP case=%s missing_es3_integer_textures\n",
+               case_name);
+        return 0;
+    }
+    if (!texture_image_accepted(internal_format, format, GL_UNSIGNED_BYTE)) {
+        printf("MESACOPYTEXTURE-SKIP case=%s detail=integer_format_unaccepted\n",
+               case_name);
+        return 0;
+    }
+
+    fill_uint_pixels(src_pixels, components);
+    src = create_texture_typed(internal_format, format, TEX_W, TEX_H,
+                               GL_UNSIGNED_BYTE, src_pixels, &accepted);
+    dst = create_empty_texture();
+    if (!src || !dst || !accepted) {
+        printf("MESACOPYTEXTURE-SKIP case=%s detail=integer_source_unaccepted\n",
+               case_name);
+        goto out;
+    }
+
+    clear_gl_errors();
+    copy->copy_texture(src, 0, GL_TEXTURE_2D, dst, 0, internal_format,
+                       GL_UNSIGNED_BYTE, GL_FALSE, GL_FALSE, GL_FALSE);
+    err = glGetError();
+    if (err != GL_NO_ERROR) {
+        printf("MESACOPYTEXTURE-FAIL case=%s step=copy_to_integer_dest error=0x%x\n",
+               case_name, err);
+        failed = 1;
+        goto out;
+    }
+    if (read_texture_target_pixels(GL_TEXTURE_2D, dst, 0, TEX_W, TEX_H,
+                                   format, GL_UNSIGNED_BYTE, actual)) {
+        printf("MESACOPYTEXTURE-SKIP case=%s detail=integer_readback_unavailable\n",
+               case_name);
+        goto out;
+    }
+    failed = compare_pixels(actual, src_pixels, count, 0, case_name);
+    completed = !failed;
+
+out:
+    if (src)
+        glDeleteTextures(1, &src);
+    if (dst)
+        glDeleteTextures(1, &dst);
+    if (!failed && completed)
+        printf("MESACOPYTEXTURE-PASS case=%s\n", case_name);
+    return failed;
+}
+
+static int run_destination_format_roundtrip_cases(
+    const struct chromium_copy_texture *copy)
+{
+    int failures = 0;
+    int has_srgb = gl_version_at_least(3, 0) ||
+                   gl_has_extension("GL_EXT_sRGB") ||
+                   gl_has_extension("GL_EXT_texture_sRGB");
+
+    failures += run_dest_roundtrip_case(copy, "dest_alpha_roundtrip",
+                                        GL_ALPHA, GL_ALPHA,
+                                        GL_UNSIGNED_BYTE, 0, 0);
+    failures += run_dest_roundtrip_case(copy, "dest_luminance_roundtrip",
+                                        GL_LUMINANCE, GL_LUMINANCE,
+                                        GL_UNSIGNED_BYTE, 0, 0);
+    failures += run_dest_roundtrip_case(copy,
+                                        "dest_luminance_alpha_roundtrip",
+                                        GL_LUMINANCE_ALPHA,
+                                        GL_LUMINANCE_ALPHA,
+                                        GL_UNSIGNED_BYTE, 0, 0);
+    failures += run_dest_roundtrip_case(copy, "dest_rgb565_roundtrip",
+                                        GL_RGB565, GL_RGB,
+                                        GL_UNSIGNED_SHORT_5_6_5, 8, 0);
+    failures += run_dest_roundtrip_case(copy, "dest_rgba4_roundtrip",
+                                        GL_RGBA4, GL_RGBA,
+                                        GL_UNSIGNED_SHORT_4_4_4_4, 17, 0);
+    failures += run_dest_roundtrip_case(copy, "dest_rgb5_a1_roundtrip",
+                                        GL_RGB5_A1, GL_RGBA,
+                                        GL_UNSIGNED_SHORT_5_5_5_1, 128, 0);
+    failures += run_dest_roundtrip_case(copy, "dest_r8_roundtrip",
+                                        GL_R8, GL_RED,
+                                        GL_UNSIGNED_BYTE, 0, 0);
+    failures += run_dest_roundtrip_case(copy, "dest_rg8_roundtrip",
+                                        GL_RG8, GL_RG,
+                                        GL_UNSIGNED_BYTE, 0, 0);
+    if (has_srgb) {
+        failures += run_dest_roundtrip_case(copy,
+                                            "dest_srgb8_alpha8_roundtrip",
+                                            GL_SRGB8_ALPHA8, GL_RGBA,
+                                            GL_UNSIGNED_BYTE, 1, 1);
+    } else {
+        printf("MESACOPYTEXTURE-SKIP case=dest_srgb8_alpha8_roundtrip missing_srgb\n");
+    }
+    failures += run_dest_roundtrip_case(copy, "dest_rgba16f_roundtrip",
+                                        GL_RGBA16F, GL_RGBA, GL_HALF_FLOAT,
+                                        1, 0);
+    failures += run_dest_roundtrip_case(copy, "dest_rgba32f_roundtrip",
+                                        GL_RGBA32F, GL_RGBA, GL_FLOAT, 1, 0);
+    failures += run_uint_dest_roundtrip_case(copy, "dest_r8ui_roundtrip",
+                                             GL_R8UI, GL_RED_INTEGER, 1);
+    failures += run_uint_dest_roundtrip_case(copy, "dest_rg8ui_roundtrip",
+                                             GL_RG8UI, GL_RG_INTEGER, 2);
+    failures += run_uint_dest_roundtrip_case(copy, "dest_rgba8ui_roundtrip",
+                                             GL_RGBA8UI, GL_RGBA_INTEGER, 4);
+    return failures;
+}
+
 static int run_luminance_alpha_case(const struct chromium_copy_texture *copy)
 {
     const char *case_name = "luminance_alpha_to_rgba";
@@ -1011,24 +1417,14 @@ out:
 static int run_same_texture_subcopy_case(
     const struct chromium_copy_texture *copy)
 {
-    const char *case_name = "same_texture_subcopy_nonoverlap";
+    const char *case_name = "same_texture_subcopy_same_level_invalid";
     uint8_t pixels[TEX_W * TEX_H * 4];
-    uint8_t expected[TEX_W * TEX_H * 4];
-    uint8_t actual[TEX_W * TEX_H * 4];
     GLuint texture = 0;
     GLenum err;
     int accepted = 0;
     int failed = 0;
 
     fill_rgba(pixels);
-    memcpy(expected, pixels, sizeof(expected));
-    for (int y = 0; y < 2; y++) {
-        for (int x = 0; x < 2; x++) {
-            memcpy(expected + (((y + 2) * TEX_W + (x + 2)) * 4),
-                   pixels + ((y * TEX_W + x) * 4), 4);
-        }
-    }
-
     texture = create_texture(GL_RGBA, TEX_W, TEX_H, pixels, &accepted);
     if (!texture || !accepted) {
         printf("MESACOPYTEXTURE-FAIL case=%s step=create_texture\n",
@@ -1041,19 +1437,12 @@ static int run_same_texture_subcopy_case(
     copy->copy_sub_texture(texture, 0, GL_TEXTURE_2D, texture, 0, 2, 2,
                            0, 0, 2, 2, GL_FALSE, GL_FALSE, GL_FALSE);
     err = glGetError();
-    if (err != GL_NO_ERROR) {
-        printf("MESACOPYTEXTURE-FAIL case=%s step=sub_copy error=0x%x\n",
-               case_name, err);
+    if (err != GL_INVALID_OPERATION) {
+        printf("MESACOPYTEXTURE-FAIL case=%s step=sub_copy error=0x%x expected=0x%x\n",
+               case_name, err, GL_INVALID_OPERATION);
         failed = 1;
         goto out;
     }
-    if (read_texture_rgba(texture, TEX_W, TEX_H, actual)) {
-        printf("MESACOPYTEXTURE-FAIL case=%s step=readback\n", case_name);
-        failed = 1;
-        goto out;
-    }
-    failed = compare_pixels(actual, expected, TEX_W * TEX_H * 4, 0,
-                            case_name);
 
 out:
     if (texture)
@@ -1229,6 +1618,109 @@ out:
     return failed;
 }
 
+static int run_dest_level_state_invariance_case(
+    const struct chromium_copy_texture *copy)
+{
+    const char *case_name = "dest_level_state_invariance";
+    uint8_t level0[TEX_W * TEX_H * 4];
+    uint8_t level1[2 * 2 * 4];
+    uint8_t actual[2 * 2 * 4];
+    GLuint src = 0;
+    GLuint dst = 0;
+    GLint before_base = 0;
+    GLint before_max = 0;
+    GLint after_base = 0;
+    GLint after_max = 0;
+    GLenum err;
+    int accepted = 0;
+    int failed = 0;
+    int completed = 0;
+
+    if (!gl_version_at_least(3, 0)) {
+        printf("MESACOPYTEXTURE-SKIP case=%s requires_es3_nonzero_levels\n",
+               case_name);
+        return 0;
+    }
+
+    fill_rgba(level0);
+    for (int i = 0; i < 2 * 2; i++) {
+        level1[i * 4 + 0] = (uint8_t)(32 + i * 17);
+        level1[i * 4 + 1] = (uint8_t)(96 + i * 13);
+        level1[i * 4 + 2] = (uint8_t)(144 + i * 11);
+        level1[i * 4 + 3] = (uint8_t)(192 + i * 7);
+    }
+
+    src = create_texture(GL_RGBA, TEX_W, TEX_H, level0, &accepted);
+    dst = create_empty_texture();
+    if (!src || !dst || !accepted) {
+        printf("MESACOPYTEXTURE-FAIL case=%s step=create_texture\n",
+               case_name);
+        failed = 1;
+        goto out;
+    }
+    if (define_rgba_level(src, 1, 2, 2, level1)) {
+        printf("MESACOPYTEXTURE-FAIL case=%s step=define_source_level1\n",
+               case_name);
+        failed = 1;
+        goto out;
+    }
+
+    clear_gl_errors();
+    glBindTexture(GL_TEXTURE_2D, dst);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_BASE_LEVEL, 1);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 1);
+    glGetTexParameteriv(GL_TEXTURE_2D, GL_TEXTURE_BASE_LEVEL, &before_base);
+    glGetTexParameteriv(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, &before_max);
+    err = glGetError();
+    if (err != GL_NO_ERROR || before_base != 1 || before_max != 1) {
+        printf("MESACOPYTEXTURE-SKIP case=%s detail=base_max_state_unavailable error=0x%x base=%d max=%d\n",
+               case_name, err, before_base, before_max);
+        goto out;
+    }
+
+    clear_gl_errors();
+    copy->copy_texture(src, 1, GL_TEXTURE_2D, dst, 1, GL_RGBA,
+                       GL_UNSIGNED_BYTE, GL_FALSE, GL_FALSE, GL_FALSE);
+    err = glGetError();
+    if (err != GL_NO_ERROR) {
+        printf("MESACOPYTEXTURE-FAIL case=%s step=copy_level1 error=0x%x\n",
+               case_name, err);
+        failed = 1;
+        goto out;
+    }
+
+    glBindTexture(GL_TEXTURE_2D, dst);
+    glGetTexParameteriv(GL_TEXTURE_2D, GL_TEXTURE_BASE_LEVEL, &after_base);
+    glGetTexParameteriv(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, &after_max);
+    err = glGetError();
+    if (err != GL_NO_ERROR || after_base != before_base ||
+        after_max != before_max) {
+        printf("MESACOPYTEXTURE-FAIL case=%s step=state_mutation error=0x%x before_base=%d before_max=%d after_base=%d after_max=%d\n",
+               case_name, err, before_base, before_max, after_base,
+               after_max);
+        failed = 1;
+        goto out;
+    }
+
+    if (read_texture_target_rgba(GL_TEXTURE_2D, dst, 1, 2, 2, actual)) {
+        printf("MESACOPYTEXTURE-FAIL case=%s step=readback_level1\n",
+               case_name);
+        failed = 1;
+        goto out;
+    }
+    failed = compare_pixels(actual, level1, 2 * 2 * 4, 0, case_name);
+    completed = !failed;
+
+out:
+    if (src)
+        glDeleteTextures(1, &src);
+    if (dst)
+        glDeleteTextures(1, &dst);
+    if (!failed && completed)
+        printf("MESACOPYTEXTURE-PASS case=%s\n", case_name);
+    return failed;
+}
+
 static int run_zero_alpha_transform_cases(
     const struct chromium_copy_texture *copy)
 {
@@ -1347,22 +1839,209 @@ out:
     return failed;
 }
 
-static int run_optional_target_probe_cases(void)
+static int run_external_texture_cases(const struct chromium_copy_texture *copy,
+                                      const struct egl_state *egl)
 {
-    if (!gl_has_extension("GL_ARB_texture_rectangle") &&
-        !gl_has_extension("GL_EXT_texture_rectangle") &&
-        !gl_has_extension("GL_NV_texture_rectangle")) {
-        printf("MESACOPYTEXTURE-SKIP case=rectangle_texture_target missing texture_rectangle\n");
-    } else {
-        printf("MESACOPYTEXTURE-SKIP case=rectangle_texture_target detail=no_gles_rectangle_fixture\n");
-    }
+    const char *case_name = "external_oes_texture_source";
+    uint8_t pixels[TEX_W * TEX_H * 4];
+    uint8_t actual[TEX_W * TEX_H * 4];
+    EGLint image_attrs[] = {
+        EGL_GL_TEXTURE_LEVEL_KHR, 0,
+        EGL_NONE
+    };
+    egl_create_image_khr_fn create_image =
+        (egl_create_image_khr_fn)eglGetProcAddress("eglCreateImageKHR");
+    egl_destroy_image_khr_fn destroy_image =
+        (egl_destroy_image_khr_fn)eglGetProcAddress("eglDestroyImageKHR");
+    gl_egl_image_target_texture_2d_oes_fn image_target_texture =
+        (gl_egl_image_target_texture_2d_oes_fn)
+            eglGetProcAddress("glEGLImageTargetTexture2DOES");
+    EGLImageKHR image = EGL_NO_IMAGE_KHR;
+    GLuint src_2d = 0;
+    GLuint src_external = 0;
+    GLuint dst = 0;
+    GLuint integer_dst = 0;
+    GLenum err;
+    int accepted = 0;
+    int failed = 0;
+    int completed_external = 0;
+    int completed_integer = 0;
+    int has_essl3 = gl_has_extension("GL_OES_EGL_image_external_essl3");
 
     if (!gl_has_extension("GL_OES_EGL_image_external")) {
-        printf("MESACOPYTEXTURE-SKIP case=external_oes_texture_source missing OES_EGL_image_external\n");
-    } else {
-        printf("MESACOPYTEXTURE-SKIP case=external_oes_texture_source detail=no_eglimage_fixture\n");
+        printf("MESACOPYTEXTURE-SKIP case=%s missing OES_EGL_image_external\n",
+               case_name);
+        printf("MESACOPYTEXTURE-SKIP case=external_oes_to_integer_dest missing OES_EGL_image_external\n");
+        return 0;
     }
-    return 0;
+    if (!egl_has_display_extension(egl->display, "EGL_KHR_image_base") ||
+        !egl_has_display_extension(egl->display,
+                                   "EGL_KHR_gl_texture_2D_image") ||
+        !create_image || !destroy_image || !image_target_texture) {
+        printf("MESACOPYTEXTURE-SKIP case=%s detail=eglimage_fixture_unavailable\n",
+               case_name);
+        printf("MESACOPYTEXTURE-SKIP case=external_oes_to_integer_dest detail=eglimage_fixture_unavailable\n");
+        return 0;
+    }
+
+    fill_rgba(pixels);
+    src_2d = create_texture(GL_RGBA, TEX_W, TEX_H, pixels, &accepted);
+    dst = create_empty_texture();
+    if (!src_2d || !dst || !accepted) {
+        printf("MESACOPYTEXTURE-FAIL case=%s step=create_texture\n",
+               case_name);
+        failed = 1;
+        goto out;
+    }
+
+    clear_gl_errors();
+    image = create_image(egl->display, egl->context, EGL_GL_TEXTURE_2D_KHR,
+                         (EGLClientBuffer)(uintptr_t)src_2d, image_attrs);
+    if (image == EGL_NO_IMAGE_KHR) {
+        printf("MESACOPYTEXTURE-SKIP case=%s detail=create_eglimage_failed error=0x%x\n",
+               case_name, eglGetError());
+        printf("MESACOPYTEXTURE-SKIP case=external_oes_to_integer_dest detail=create_eglimage_failed\n");
+        goto out;
+    }
+
+    glGenTextures(1, &src_external);
+    glBindTexture(GL_TEXTURE_EXTERNAL_OES, src_external);
+    glTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_MIN_FILTER,
+                    GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_MAG_FILTER,
+                    GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_WRAP_S,
+                    GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_WRAP_T,
+                    GL_CLAMP_TO_EDGE);
+    image_target_texture(GL_TEXTURE_EXTERNAL_OES, image);
+    err = glGetError();
+    if (!src_external || err != GL_NO_ERROR) {
+        printf("MESACOPYTEXTURE-FAIL case=%s step=bind_external error=0x%x\n",
+               case_name, err);
+        failed = 1;
+        goto out;
+    }
+
+    clear_gl_errors();
+    copy->copy_texture(src_external, 0, GL_TEXTURE_2D, dst, 0, GL_RGBA,
+                       GL_UNSIGNED_BYTE, GL_FALSE, GL_FALSE, GL_FALSE);
+    err = glGetError();
+    if (err != GL_NO_ERROR) {
+        printf("MESACOPYTEXTURE-FAIL case=%s step=copy error=0x%x\n",
+               case_name, err);
+        failed = 1;
+        goto out;
+    }
+    if (read_texture_rgba(dst, TEX_W, TEX_H, actual)) {
+        printf("MESACOPYTEXTURE-FAIL case=%s step=readback\n", case_name);
+        failed = 1;
+        goto out;
+    }
+    failed = compare_pixels(actual, pixels, TEX_W * TEX_H * 4, 0,
+                            case_name);
+    completed_external = !failed;
+    if (failed)
+        goto out;
+
+    if (!texture_image_accepted(GL_RGBA8UI, GL_RGBA_INTEGER,
+                                GL_UNSIGNED_BYTE)) {
+        printf("MESACOPYTEXTURE-SKIP case=external_oes_to_integer_dest detail=integer_dest_unaccepted\n");
+        goto out;
+    }
+    integer_dst = create_empty_texture();
+    if (!integer_dst) {
+        printf("MESACOPYTEXTURE-FAIL case=external_oes_to_integer_dest step=create_dest\n");
+        failed = 1;
+        goto out;
+    }
+    clear_gl_errors();
+    copy->copy_texture(src_external, 0, GL_TEXTURE_2D, integer_dst, 0,
+                       GL_RGBA8UI, GL_UNSIGNED_BYTE, GL_FALSE, GL_FALSE,
+                       GL_FALSE);
+    err = glGetError();
+    if (has_essl3) {
+        if (err != GL_NO_ERROR) {
+            printf("MESACOPYTEXTURE-FAIL case=external_oes_to_integer_dest step=essl3_copy error=0x%x\n",
+                   err);
+            failed = 1;
+            goto out;
+        }
+    } else if (err != GL_INVALID_OPERATION) {
+        printf("MESACOPYTEXTURE-FAIL case=external_oes_to_integer_dest step=missing_essl3_error error=0x%x expected=0x%x\n",
+               err, GL_INVALID_OPERATION);
+        failed = 1;
+        goto out;
+    }
+    completed_integer = 1;
+
+out:
+    if (image != EGL_NO_IMAGE_KHR)
+        destroy_image(egl->display, image);
+    if (src_2d)
+        glDeleteTextures(1, &src_2d);
+    if (src_external)
+        glDeleteTextures(1, &src_external);
+    if (dst)
+        glDeleteTextures(1, &dst);
+    if (integer_dst)
+        glDeleteTextures(1, &integer_dst);
+    if (!failed && completed_external)
+        printf("MESACOPYTEXTURE-PASS case=%s\n", case_name);
+    if (!failed && completed_integer)
+        printf("MESACOPYTEXTURE-PASS case=external_oes_to_integer_dest essl3=%d\n",
+               has_essl3);
+    return failed;
+}
+
+static int run_optional_target_probe_cases(
+    const struct chromium_copy_texture *copy)
+{
+    const char *case_name = "rectangle_texture_target";
+    uint8_t pixels[TEX_W * TEX_H * 4];
+    GLuint src = 0;
+    GLuint dst = 0;
+    GLenum err;
+    int accepted = 0;
+    int failed = 0;
+
+    if (gl_has_extension("GL_ARB_texture_rectangle") ||
+        gl_has_extension("GL_EXT_texture_rectangle") ||
+        gl_has_extension("GL_NV_texture_rectangle")) {
+        printf("MESACOPYTEXTURE-SKIP case=%s detail=no_gles_rectangle_fixture\n",
+               case_name);
+        return 0;
+    }
+
+    fill_rgba(pixels);
+    src = create_texture(GL_RGBA, TEX_W, TEX_H, pixels, &accepted);
+    dst = create_empty_texture();
+    if (!src || !dst || !accepted) {
+        printf("MESACOPYTEXTURE-FAIL case=%s step=create_texture\n",
+               case_name);
+        failed = 1;
+        goto out;
+    }
+
+    clear_gl_errors();
+    copy->copy_texture(src, 0, GL_TEXTURE_RECTANGLE_ARB, dst, 0, GL_RGBA,
+                       GL_UNSIGNED_BYTE, GL_FALSE, GL_FALSE, GL_FALSE);
+    err = glGetError();
+    if (err != GL_INVALID_ENUM) {
+        printf("MESACOPYTEXTURE-FAIL case=%s step=missing_extension_error error=0x%x expected=0x%x\n",
+               case_name, err, GL_INVALID_ENUM);
+        failed = 1;
+        goto out;
+    }
+
+out:
+    if (src)
+        glDeleteTextures(1, &src);
+    if (dst)
+        glDeleteTextures(1, &dst);
+    if (!failed)
+        printf("MESACOPYTEXTURE-PASS case=%s\n", case_name);
+    return failed;
 }
 
 static int run_immutable_case(const struct chromium_copy_texture *copy)
@@ -1480,13 +2159,16 @@ int main(void)
     failures += run_luminance_alpha_case(&copy);
     failures += run_bgra_case(&copy);
     failures += run_r8_rg8_cases(&copy);
+    failures += run_destination_format_roundtrip_cases(&copy);
     failures += run_zero_alpha_transform_cases(&copy);
     failures += run_generated_name_error_case(&copy);
     failures += run_same_texture_invalid_case(&copy);
     failures += run_same_texture_subcopy_case(&copy);
     failures += run_level_dimension_case(&copy);
+    failures += run_dest_level_state_invariance_case(&copy);
     failures += run_cube_dest_case(&copy);
-    failures += run_optional_target_probe_cases();
+    failures += run_external_texture_cases(&copy, &egl);
+    failures += run_optional_target_probe_cases(&copy);
     failures += run_immutable_case(&copy);
 
     destroy_egl(&egl);
