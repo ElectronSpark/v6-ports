@@ -96,7 +96,7 @@
 	url = https://github.com/xkbcommon/libxkbcommon.git
 [submodule "libepoxy/src"]
 	path = libepoxy/src
-	url = https://github.com/anholt/libepoxy.git
+	url = https://github.com/ElectronSpark/v6-libepoxy.git
 [submodule "khronos-headers/egl-registry"]
 	path = khronos-headers/egl-registry
 	url = https://github.com/KhronosGroup/EGL-Registry.git
@@ -160,7 +160,7 @@
 	url = https://github.com/ElectronSpark/v6-Peanut-GB.git
 [submodule "kmscube/src"]
 	path = kmscube/src
-	url = https://gitlab.freedesktop.org/mesa/kmscube.git
+	url = https://github.com/ElectronSpark/v6-kmscube.git
 [submodule "json-c/src"]
 	path = json-c/src
 	url = https://github.com/json-c/json-c.git
