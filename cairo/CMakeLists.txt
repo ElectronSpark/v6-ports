@@ -18,8 +18,6 @@ xv6_port(
                     lib/libcairo-gobject.so.2
                     lib/libcairo-gobject.so.2.11805.5
                     include/cairo/cairo.h
-                    include/cairo/cairo-xcb.h
-                    lib/pkgconfig/cairo-xcb.pc
     CMAKE_ARGS
         -Dfreetype=enabled
         -Dfontconfig=enabled
@@ -27,7 +25,7 @@ xv6_port(
         -Dzlib=enabled
         -Dglib=enabled
         -Dxlib=disabled
-        -Dxcb=enabled
+        -Dxcb=disabled
         -Dquartz=disabled
         -Dtee=disabled
         -Dgtk2-utils=disabled

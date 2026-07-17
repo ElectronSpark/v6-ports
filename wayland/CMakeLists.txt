@@ -14,10 +14,7 @@ set(XV6_FAULT_TRACE_SRC "${XV6_REPO_ROOT}/tools/xv6_glibc_fault_trace.c")
 set(PEANUT_GB_SRC_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../peanut-gb/src")
 set(DIRECTX_HEADERS_DIR
     "${CMAKE_CURRENT_SOURCE_DIR}/../mesa/src/subprojects/DirectX-Headers-1.0/include")
-set(DESKTOP_INCLUDE_SRCS
-    ${WAYLAND_SRC_DIR}/desktop_clients.inc)
-
-foreach(_src desktop.c desktop_icons.c desktop_launchers.c filemgr.c settings.c glsmoke.c glmaze.c peanutgb.c mesaglsmoke.c mesawlegl.c mesakmsgl.c mesademo.c gl_program.c gl_program.h gl_fps_overlay.c gl_fps_overlay.h mesawlegl_sphere.c mesawlegl_sphere.h pixel_fps_overlay.c pixel_fps_overlay.h xv6_draw.c xv6_draw.h xv6_titlebar.c xv6_titlebar.h xv6_titlebar_gl.c xv6_titlebar_gl.h xv6_icon.c xv6_icon.h xv6_icon_filemgr.c xv6_icon_glmaze.c xv6_present_buffer.c xv6_present_buffer.h mesaeglinfo.c mesaglfeature.c mesacopytexture.c mesaanglepassthrough.c mesad3d12probe.c gpu_substrate_validate.c dmabufsmoke.c d3d12sharedsmoke.c drmgpuprobe.c webkitgpusmoke.c cursorsmoke.c xv6_egl_gles.c webkit_preload_wrapper.c webkit_uri_interpose.c install_webkit_preload_wrappers.sh font8x16.h)
+foreach(_src desktop_icons.c desktop_launchers.c filemgr.c settings.c glsmoke.c glmaze.c peanutgb.c mesaglsmoke.c mesawlegl.c mesakmsgl.c mesademo.c gl_program.c gl_program.h gl_fps_overlay.c gl_fps_overlay.h mesawlegl_sphere.c mesawlegl_sphere.h pixel_fps_overlay.c pixel_fps_overlay.h xv6_draw.c xv6_draw.h xv6_titlebar.c xv6_titlebar.h xv6_titlebar_gl.c xv6_titlebar_gl.h xv6_icon.c xv6_icon.h xv6_icon_filemgr.c xv6_icon_glmaze.c xv6_present_buffer.c xv6_present_buffer.h mesaeglinfo.c mesaglfeature.c mesacopytexture.c mesaanglepassthrough.c mesad3d12probe.c gpu_substrate_validate.c dmabufsmoke.c d3d12sharedsmoke.c drmgpuprobe.c webkitgpusmoke.c cursorsmoke.c xv6_egl_gles.c webkit_preload_wrapper.c webkit_uri_interpose.c install_webkit_preload_wrappers.sh font8x16.h)
     if(NOT EXISTS "${WAYLAND_SRC_DIR}/${_src}")
         message(FATAL_ERROR "ports/wayland: missing ${WAYLAND_SRC_DIR}/${_src}")
     endif()
@@ -26,11 +23,6 @@ if(NOT EXISTS "${PEANUT_GB_SRC_DIR}/peanut_gb.h")
     message(FATAL_ERROR
         "ports/wayland: missing Peanut-GB source submodule at ${PEANUT_GB_SRC_DIR}; run git submodule update --init --recursive ports/peanut-gb/src")
 endif()
-foreach(_src ${DESKTOP_INCLUDE_SRCS})
-    if(NOT EXISTS "${_src}")
-        message(FATAL_ERROR "ports/wayland: missing ${_src}")
-    endif()
-endforeach()
 if(NOT EXISTS "${XV6_FAULT_TRACE_SRC}")
     message(FATAL_ERROR "ports/wayland: missing ${XV6_FAULT_TRACE_SRC}")
 endif()
@@ -57,7 +49,6 @@ set(_dmabuf_client_code ${_wl_build}/linux-dmabuf-v1-client-protocol.c)
 set(_explicit_sync_xml ${CMAKE_CURRENT_SOURCE_DIR}/../wayland-protocols/src/unstable/linux-explicit-synchronization/linux-explicit-synchronization-unstable-v1.xml)
 set(_explicit_sync_client_header ${_wl_proto_dir}/linux-explicit-synchronization-unstable-v1-client-protocol.h)
 set(_explicit_sync_client_code ${_wl_build}/linux-explicit-synchronization-unstable-v1-client-protocol.c)
-set(_weston_session_bin  ${_wl_build}/weston-session)
 set(_desktop_icons_bin ${_wl_build}/xv6-desktop-icons)
 set(_filemgr_bin  ${_wl_build}/filemgr)
 set(_settings_bin ${_wl_build}/xv6-settings)
@@ -89,6 +80,8 @@ set(_xv6gles_lib  ${_wl_build}/libGLESv2.a)
 set(_host_xv6egl_obj  ${_wl_build}/host-xv6_egl_gles.o)
 set(_host_xv6egl_lib  ${_wl_build}/host-libEGL.a)
 set(_host_xv6gles_lib ${_wl_build}/host-libGLESv2.a)
+# Remove this legacy launcher whenever the Wayland tools are installed. KDE
+# Plasma/KWin is the only supported desktop session.
 set(_weston_session_installed ${XV6_SYSROOT}/bin/weston-session)
 set(_desktop_icons_installed ${XV6_SYSROOT}/bin/xv6-desktop-icons)
 set(_filemgr_installed ${XV6_SYSROOT}/bin/filemgr)
@@ -185,24 +178,6 @@ add_custom_command(
     DEPENDS ${_explicit_sync_xml}
     COMMENT "Generating linux-explicit-sync Wayland client protocol sources"
     VERBATIM)
-
-if(XV6_WAYLAND_HOST_GLIBC)
-    add_custom_command(
-        OUTPUT  ${_weston_session_bin}
-        COMMAND ${XV6_HOST_CC} ${_wayland_opt_cflags} -Wall -Wno-unused-result
-                    -o ${_weston_session_bin} ${WAYLAND_SRC_DIR}/desktop.c
-        DEPENDS ${WAYLAND_SRC_DIR}/desktop.c ${DESKTOP_INCLUDE_SRCS}
-        COMMENT "Compiling Weston session manager with host glibc"
-        VERBATIM)
-else()
-    add_custom_command(
-        OUTPUT  ${_weston_session_bin}
-        COMMAND ${CMAKE_C_COMPILER} ${_wayland_opt_cflags} -Wall -static
-                    -o ${_weston_session_bin} ${WAYLAND_SRC_DIR}/desktop.c
-        DEPENDS ${WAYLAND_SRC_DIR}/desktop.c ${DESKTOP_INCLUDE_SRCS}
-        COMMENT "Compiling Weston session manager from source"
-        VERBATIM)
-endif()
 
 add_custom_command(
     OUTPUT  ${_webkit_preload_wrapper_bin}
@@ -560,13 +535,6 @@ add_custom_target(port-wayland-settings-install
     COMMENT "Installing native xv6 settings panel"
     VERBATIM)
 
-add_custom_target(port-wayland-session-install
-    COMMAND ${CMAKE_COMMAND} -E copy ${_weston_session_bin}
-            ${_weston_session_installed}
-    DEPENDS ${_weston_session_bin}
-    COMMENT "Installing xv6 Weston session launcher"
-    VERBATIM)
-
 add_custom_command(
     OUTPUT  ${_mesaglsmoke_bin}
     COMMAND ${CMAKE_C_COMPILER} ${_wayland_opt_cflags} -Wall
@@ -910,8 +878,7 @@ add_custom_command(
     VERBATIM)
 
 add_custom_command(
-    OUTPUT  ${_weston_session_installed}
-            ${_desktop_icons_installed}
+    OUTPUT  ${_desktop_icons_installed}
             ${_filemgr_installed}
             ${_settings_installed}
             ${_glsmoke_installed} ${_glmaze_installed}
@@ -934,8 +901,20 @@ add_custom_command(
     COMMAND ${CMAKE_COMMAND} -E rm -f
             ${XV6_SYSROOT}/bin/wlcomp
             ${XV6_SYSROOT}/bin/desktop
+            ${XV6_SYSROOT}/bin/weston
+            ${XV6_SYSROOT}/bin/weston-terminal
+            ${XV6_SYSROOT}/bin/libexec_weston.so
+            ${XV6_SYSROOT}/bin/libexec_weston.so.0
+            ${XV6_SYSROOT}/bin/libexec_weston.so.0.0.0
+            ${_weston_session_installed}
+            ${XV6_SYSROOT}/lib/libweston-15.so.0
+            ${XV6_SYSROOT}/libexec/weston-desktop-shell
+            ${XV6_SYSROOT}/root/desktop/Terminal
             ${XV6_SYSROOT}/lib/libxv6memshim.so
-    COMMAND ${CMAKE_COMMAND} -E copy ${_weston_session_bin} ${_weston_session_installed}
+    COMMAND ${CMAKE_COMMAND} -E rm -rf
+            ${XV6_SYSROOT}/lib/libweston-15
+            ${XV6_SYSROOT}/lib/weston
+            ${XV6_SYSROOT}/share/weston
     COMMAND ${CMAKE_COMMAND} -E copy ${_desktop_icons_bin} ${_desktop_icons_installed}
     COMMAND ${CMAKE_COMMAND} -E copy ${_filemgr_bin} ${_filemgr_installed}
     COMMAND ${CMAKE_COMMAND} -E copy ${_settings_bin} ${_settings_installed}
@@ -982,7 +961,7 @@ add_custom_command(
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
             ${_adwaita_cursor_dir}/no-drop ${_dnd_none_cursor}
     COMMAND ${CMAKE_COMMAND} -E rm -f ${_egl_installed} ${_gles_installed}
-    DEPENDS ${_weston_session_bin} ${_desktop_icons_bin}
+    DEPENDS ${_desktop_icons_bin}
             ${_filemgr_bin} ${_settings_bin}
             ${_glsmoke_bin} ${_glmaze_bin} ${_peanutgb_bin}
             ${_mesaglsmoke_bin}
@@ -1003,7 +982,6 @@ add_custom_command(
     VERBATIM)
 
 add_custom_target(port-wayland ALL DEPENDS
-    ${_weston_session_installed}
     ${_desktop_icons_installed}
     ${_filemgr_installed}
     ${_settings_installed}
@@ -1041,7 +1019,15 @@ add_custom_target(port-wayland-clean
     COMMAND ${CMAKE_COMMAND} -E remove -f
             ${XV6_SYSROOT}/bin/wlcomp
             ${XV6_SYSROOT}/bin/desktop
+            ${XV6_SYSROOT}/bin/weston
+            ${XV6_SYSROOT}/bin/weston-terminal
+            ${XV6_SYSROOT}/bin/libexec_weston.so
+            ${XV6_SYSROOT}/bin/libexec_weston.so.0
+            ${XV6_SYSROOT}/bin/libexec_weston.so.0.0.0
             ${_weston_session_installed}
+            ${XV6_SYSROOT}/lib/libweston-15.so.0
+            ${XV6_SYSROOT}/libexec/weston-desktop-shell
+            ${XV6_SYSROOT}/root/desktop/Terminal
             ${_desktop_icons_installed}
             ${_filemgr_installed}
             ${_settings_installed}
@@ -1060,6 +1046,10 @@ add_custom_target(port-wayland-clean
             ${_desktop_launcher_installed}
             ${_dnd_move_cursor} ${_dnd_copy_cursor} ${_dnd_none_cursor}
             ${XV6_SYSROOT}/lib/libxv6memshim.so
+    COMMAND ${CMAKE_COMMAND} -E rm -rf
+            ${XV6_SYSROOT}/lib/libweston-15
+            ${XV6_SYSROOT}/lib/weston
+            ${XV6_SYSROOT}/share/weston
             ${_webkit_preload_wrapper_bin}
             ${_webkit_uri_interpose_installed}
             ${_egl_installed} ${_gles_installed}

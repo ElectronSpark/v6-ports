@@ -53,8 +53,15 @@ foreach(_e ${_entries})
     endif()
 endforeach()
 
+# Weston is retained in-tree only as a legacy reference.  The supported xv6
+# desktop is KDE Plasma/KWin, whose runtime is staged by the superproject.
+# Keeping Weston out of the aggregate graph also avoids pulling its obsolete
+# X11/XCB development stack into otherwise Wayland-only guest ports.
+list(REMOVE_ITEM _ports weston)
+
 list(LENGTH _ports _nports)
 message(STATUS "xv6 ports discovered: ${_nports} (${_ports})")
+message(STATUS "ports/weston: deprecated and excluded; KDE Plasma is the supported desktop")
 
 # libudev and xkeyboard-config are runtime/discovery packages that other ports
 # may depend on even though they sort later than some consumers.
