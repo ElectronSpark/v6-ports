@@ -86,6 +86,11 @@ function(xv6_port)
 
     _xv6_port_resolve_config()
 
+    if(NOT P_JOBS AND DEFINED XV6_PARALLEL_JOBS
+       AND NOT XV6_PARALLEL_JOBS STREQUAL ""
+       AND NOT XV6_PARALLEL_JOBS EQUAL 0)
+        set(P_JOBS "${XV6_PARALLEL_JOBS}")
+    endif()
     if(NOT P_JOBS)
         include(ProcessorCount)
         ProcessorCount(P_JOBS)
