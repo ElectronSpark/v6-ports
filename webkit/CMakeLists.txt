@@ -75,7 +75,11 @@ else()
 endif()
 
 set(_webkit_deps "")
-foreach(_dep gtk3 glib gdk-pixbuf pango atk cairo fontconfig freetype
+# The host WebKit dependency closure may need libva.  Wait for Mesa to install
+# its versioned libva files before the closure considers staging a host copy;
+# otherwise parallel clean builds can race a regular libva.so.2 against
+# Meson's libva symlink installation.
+foreach(_dep mesa gtk3 glib gdk-pixbuf pango atk cairo fontconfig freetype
              fribidi libepoxy libffi libpng libxkbcommon openssl)
     if(TARGET port-${_dep})
         list(APPEND _webkit_deps port-${_dep})
