@@ -53,11 +53,10 @@ foreach(_e ${_entries})
     endif()
 endforeach()
 
-# Weston is retained in-tree only as a legacy reference.  The supported xv6
-# desktop is KDE Plasma/KWin, whose runtime is staged by the superproject.
-# Keeping Weston out of the aggregate graph also avoids pulling its obsolete
-# X11/XCB development stack into otherwise Wayland-only guest ports.
-list(REMOVE_ITEM _ports weston)
+# Plasma/KWin is the only supported desktop compositor.  The historical
+# Weston compositor and its legacy `wayland` session/helper sources are kept
+# only for archaeology; neither is configured or built by the supported graph.
+list(REMOVE_ITEM _ports weston wayland)
 
 list(LENGTH _ports _nports)
 message(STATUS "xv6 ports discovered: ${_nports} (${_ports})")
@@ -67,10 +66,11 @@ message(STATUS "ports/weston: deprecated and excluded; KDE Plasma is the support
 # may depend on even though they sort later than some consumers.
 # cpython declares dependencies on several library ports in its own
 # CMakeLists.txt; add it after discovery has created those targets.
-# wayland builds the compositor against the generated wayland-libs output.
-list(REMOVE_ITEM _ports libudev xkeyboard-config cpython wayland)
+# The legacy `wayland` session remains excluded above.  `wayland-libs` is the
+# protocol/runtime library port required by the supported Plasma/KWin path.
+list(REMOVE_ITEM _ports libudev xkeyboard-config cpython)
 list(PREPEND _ports xkeyboard-config libudev)
-list(APPEND _ports cpython wayland)
+list(APPEND _ports cpython)
 
 foreach(p IN LISTS _ports)
     add_subdirectory(${p})

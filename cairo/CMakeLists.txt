@@ -41,6 +41,9 @@ xv6_port(
             ${XV6_SYSROOT}/lib/libcairo.so.2
             ${XV6_SYSROOT}/lib/libcairo-gobject.so
             ${XV6_SYSROOT}/lib/libcairo-gobject.so.2
+            ${XV6_SYSROOT}/include/cairo/cairo-xcb.h
+            ${XV6_SYSROOT}/lib/pkgconfig/cairo-xcb.pc
+            ${XV6_SYSROOT}/lib/pkgconfig/cairo-xcb-shm.pc
         COMMAND ${CMAKE_COMMAND} -E create_symlink
             libcairo.so.2.11805.5
             ${XV6_SYSROOT}/lib/libcairo.so.2

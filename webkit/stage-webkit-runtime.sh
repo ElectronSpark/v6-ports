@@ -203,7 +203,10 @@ prepare_host_gst_runtime_cache() {
     local all_packages=()
     local chunk=()
 
-    [[ "${WEBKIT_DOWNLOAD_HOST_GST_RUNTIME:-1}" != "0" ]] || return 0
+    # Package downloads are an explicit cache-population operation.  A normal
+    # ports build must remain reproducible and must not probe the network just
+    # because an optional host runtime is absent.
+    [[ "${WEBKIT_DOWNLOAD_HOST_GST_RUNTIME:-0}" != "0" ]] || return 0
     host_gst_plugins_complete && return 0
     command -v apt-cache >/dev/null 2>&1 || return 0
     command -v apt-get >/dev/null 2>&1 || return 0
@@ -297,7 +300,7 @@ prepare_host_gio_tls_runtime_cache() {
     local all_packages=()
     local chunk=()
 
-    [[ "${WEBKIT_DOWNLOAD_HOST_GIO_TLS_RUNTIME:-1}" != "0" ]] || return 0
+    [[ "${WEBKIT_DOWNLOAD_HOST_GIO_TLS_RUNTIME:-0}" != "0" ]] || return 0
     command -v apt-cache >/dev/null 2>&1 || return 0
     command -v apt-get >/dev/null 2>&1 || return 0
     command -v dpkg-deb >/dev/null 2>&1 || return 0
@@ -373,7 +376,7 @@ prepare_host_webkit_runtime_dependency_cache() {
     local all_packages=()
     local chunk=()
 
-    [[ "${WEBKIT_DOWNLOAD_HOST_RUNTIME_DEPS:-1}" != "0" ]] || return 0
+    [[ "${WEBKIT_DOWNLOAD_HOST_RUNTIME_DEPS:-0}" != "0" ]] || return 0
     command -v apt-cache >/dev/null 2>&1 || return 0
     command -v apt-get >/dev/null 2>&1 || return 0
     command -v dpkg-deb >/dev/null 2>&1 || return 0
@@ -452,7 +455,7 @@ prepare_host_webkit_runtime_cache() {
     local all_packages=()
     local chunk=()
 
-    [[ "${WEBKIT_DOWNLOAD_HOST_WEBKIT_RUNTIME:-1}" != "0" ]] || return 1
+    [[ "${WEBKIT_DOWNLOAD_HOST_WEBKIT_RUNTIME:-0}" != "0" ]] || return 1
     command -v apt-cache >/dev/null 2>&1 || return 1
     command -v apt-get >/dev/null 2>&1 || return 1
     command -v dpkg-deb >/dev/null 2>&1 || return 1
@@ -602,8 +605,16 @@ remove_staged_webkit() {
         "${dst}/lib/pkgconfig/libsoup-3.0.pc" \
         "${dst}/libexec/webkit2gtk-4.1/MiniBrowser" \
         "${dst}/libexec/webkit2gtk-4.1/MiniBrowser.real" \
+        "${dst}/libexec/webkit2gtk-4.1/MiniBrowser.payload" \
         "${dst}/libexec/webkit2gtk-4.1/WebKitNetworkProcess" \
+        "${dst}/libexec/webkit2gtk-4.1/WebKitNetworkProcess.real" \
+        "${dst}/libexec/webkit2gtk-4.1/WebKitNetworkProcess.payload" \
         "${dst}/libexec/webkit2gtk-4.1/WebKitWebProcess" \
+        "${dst}/libexec/webkit2gtk-4.1/WebKitWebProcess.real" \
+        "${dst}/libexec/webkit2gtk-4.1/WebKitWebProcess.payload" \
+        "${dst}/libexec/webkit2gtk-4.1/WebKitGPUProcess" \
+        "${dst}/libexec/webkit2gtk-4.1/WebKitGPUProcess.real" \
+        "${dst}/libexec/webkit2gtk-4.1/WebKitGPUProcess.payload" \
         "${dst}/libexec/webkit2gtk-4.1/jsc" \
         "${dst}/libexec/webkit2gtk-4.1/.webkit_install_stamp" \
         "${dst}/libexec/webkit2gtk-4.1/.webkit-stage-manifest" \
@@ -659,7 +670,7 @@ if [[ -z "${ref}" ]]; then
     ref="$(prepare_host_webkit_runtime_cache || true)"
     if [[ -z "${ref}" ]]; then
         echo "ports/webkit: warning: no WebKitGTK runtime selected; skipping stage" >&2
-        mkdir -p "${dst}/libexec/webkit2gtk-4.1"
+        remove_staged_webkit
         touch "${dst}/libexec/webkit2gtk-4.1/.webkit-stage.stamp"
         exit 0
     fi

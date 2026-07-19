@@ -119,6 +119,12 @@ set(_fault_trace_installed ${XV6_SYSROOT}/lib/xv6_glibc_fault_trace.so)
 set(_webkit_uri_interpose_installed ${XV6_SYSROOT}/lib/libxv6webkituri.so)
 set(_webkit_preload_wrapper_bin ${_wl_build}/webkit-preload-wrapper)
 set(_webkit_stage_stamp ${XV6_SYSROOT}/libexec/webkit2gtk-4.1/.webkit-stage.stamp)
+set(_webkit_runtime_requested OFF)
+if((DEFINED XV6_WEBKIT_REF_SYSROOT
+    AND NOT "${XV6_WEBKIT_REF_SYSROOT}" STREQUAL "")
+   OR "$ENV{WEBKIT_DOWNLOAD_HOST_WEBKIT_RUNTIME}" STREQUAL "1")
+    set(_webkit_runtime_requested ON)
+endif()
 set(_adwaita_cursor_dir ${XV6_SYSROOT}/share/icons/Adwaita/cursors)
 set(_dnd_move_cursor ${_adwaita_cursor_dir}/dnd-move)
 set(_dnd_copy_cursor ${_adwaita_cursor_dir}/dnd-copy)
@@ -179,19 +185,35 @@ add_custom_command(
     COMMENT "Generating linux-explicit-sync Wayland client protocol sources"
     VERBATIM)
 
-add_custom_command(
-    OUTPUT  ${_webkit_preload_wrapper_bin}
-    COMMAND ${XV6_WEBKIT_HOST_CC} -O2 -Wall
-                -L ${XV6_SYSROOT}/lib
-                -Wl,-rpath,/lib
-                -Wl,-rpath-link,${XV6_SYSROOT}/lib
-                -o ${_webkit_preload_wrapper_bin}
-                ${WAYLAND_SRC_DIR}/webkit_preload_wrapper.c
-                -Wl,--no-as-needed -lwebkit2gtk-4.1
-                -Wl,--as-needed -ldl -pthread
-    DEPENDS ${WAYLAND_SRC_DIR}/webkit_preload_wrapper.c
-    COMMENT "Compiling WebKit process shim wrapper"
-    VERBATIM)
+if(_webkit_runtime_requested)
+    add_custom_command(
+        OUTPUT  ${_webkit_preload_wrapper_bin}
+        COMMAND ${XV6_WEBKIT_HOST_CC} -O2 -Wall
+                    -L ${XV6_SYSROOT}/lib
+                    -Wl,-rpath,/lib
+                    -Wl,-rpath-link,${XV6_SYSROOT}/lib
+                    -o ${_webkit_preload_wrapper_bin}
+                    ${WAYLAND_SRC_DIR}/webkit_preload_wrapper.c
+                    -Wl,--no-as-needed -lwebkit2gtk-4.1
+                    -Wl,--as-needed -ldl -pthread
+        DEPENDS ${WAYLAND_SRC_DIR}/webkit_preload_wrapper.c
+                ${_webkit_stage_stamp}
+        COMMENT "Compiling WebKit process shim wrapper"
+        VERBATIM)
+else()
+    # The installer only copies this helper when WebKit process binaries are
+    # present.  Keep explicit legacy diagnostics buildable without turning an
+    # optional WebKit runtime into an unconditional link dependency.
+    add_custom_command(
+        OUTPUT  ${_webkit_preload_wrapper_bin}
+        COMMAND ${XV6_WEBKIT_HOST_CC} -O2 -Wall
+                    -o ${_webkit_preload_wrapper_bin}
+                    ${WAYLAND_SRC_DIR}/webkit_preload_wrapper.c
+                    -ldl -pthread
+        DEPENDS ${WAYLAND_SRC_DIR}/webkit_preload_wrapper.c
+        COMMENT "Compiling inactive WebKit process shim wrapper"
+        VERBATIM)
+endif()
 
 add_custom_command(
     OUTPUT  ${_webkit_uri_interpose_lib}
