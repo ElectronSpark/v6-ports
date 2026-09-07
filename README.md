@@ -1,5 +1,10 @@
 # ports — heavy third-party software, one CMake project per port.
 
+Migration and source-cleanup work is tracked in the umbrella repository’s
+[consolidated plan](../docs/active-work-plan.md#upstream-source-cleanup-and-port-migration).
+The [original ports roadmap](../docs/archive/plan-consolidation-20260907/ports/MIGRATION.md)
+is preserved for reference.
+
 Each port wraps its upstream native build via `ExternalProject_Add`
 (through the `xv6_port()` helper). Inter-port deps are explicit:
 
